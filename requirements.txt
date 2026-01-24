@@ -1,0 +1,6 @@
+pycairo
+pygame
+svgwrite
+board
+RPi.GPIO
+adafruit-circuitpython-seesaw

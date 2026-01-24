@@ -1,0 +1,6 @@
+{
+  "baud": 115200,
+  "planner_path": "pl0tb0t_toolplan.json",
+  "port": "1",
+  "tools_path": "pl0tb0t_tools.json"
+}
