@@ -4,3 +4,5 @@ svgwrite
 board
 RPi.GPIO
 adafruit-circuitpython-seesaw
+pyserial
+flask

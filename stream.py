@@ -54,6 +54,7 @@ RX_BUFFER_SIZE = 128
 def wait_idle(port, verbose=False):
     resp = "Busy"
     while not resp.startswith("<Idle"):
+        time.sleep(0.05)
         port.write(b"?\n")
         resp = port.readline().decode('UTF8')
         while not resp.startswith("<"):
@@ -117,7 +118,7 @@ def stream_gcode(port, file, verbose=False):
         l_block = line.strip()
         c_line.append(len(l_block)+1) # Track number of characters in grbl serial read buffer
         grbl_out = ''
-        while sum(c_line) >= RX_BUFFER_SIZE-1 | port.inWaiting() :
+        while sum(c_line) >= RX_BUFFER_SIZE - 1 or port.inWaiting() :
             out_temp = port.readline().decode("UTF8").strip() # Wait for grbl response
             if verbose: print("T:",out_temp)
             if out_temp.find('ok') < 0 and out_temp.find('error') < 0 :

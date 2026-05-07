@@ -1,2 +1,4 @@
 *.svg
 *.gcode
+__pycache__/
+*.pyc

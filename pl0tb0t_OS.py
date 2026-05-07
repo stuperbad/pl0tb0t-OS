@@ -202,14 +202,19 @@ def grbl_send(port: "serial.Serial", command: str, wait_ok: bool = True, verbose
     port.write(command.encode("utf-8"))
     responses = []
     if wait_ok:
+        empty_count = 0
         while True:
             line = port.readline().decode("utf-8", errors="ignore").strip()
             if not line:
+                empty_count += 1
+                if empty_count >= 10:
+                    break  # port not responding, give up
                 continue
+            empty_count = 0
             responses.append(line)
             if verbose:
                 print("RCV:", line)
-            if line.lower().startswith("ok") or "error" in line.lower():
+            if line.lower().startswith("ok") or "error" in line.lower() or "alarm" in line.lower():
                 break
     return responses
 
@@ -234,11 +239,20 @@ def grbl_jog(port: "serial.Serial", axis: str, distance: float, feed: float, uni
     grbl_send(port, cmd, wait_ok=False)
 
 
-def grbl_move_abs(port: "serial.Serial", x: float, y: float, z: float, feed: Optional[float] = None) -> None:
+def grbl_move_abs(
+    port: "serial.Serial",
+    x: float,
+    y: float,
+    z: float,
+    feed: Optional[float] = None,
+    use_machine_coords: bool = False,
+) -> None:
+    """Move in absolute coordinates; optionally force machine coordinates (G53)."""
+    coord_prefix = "G53 " if use_machine_coords else ""
     if feed is None:
-        cmd = f"G90 G0 X{x:.3f} Y{y:.3f} Z{z:.3f}"
+        cmd = f"G90 {coord_prefix}G0 X{x:.3f} Y{y:.3f} Z{z:.3f}"
     else:
-        cmd = f"G90 G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{feed:.1f}"
+        cmd = f"G90 {coord_prefix}G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{feed:.1f}"
     grbl_send(port, cmd, wait_ok=True)
 
 
@@ -271,6 +285,95 @@ def remove_tool(tools: List[Tool], name: str) -> bool:
             tools.pop(i)
             return True
     return False
+
+
+def export_vpype_config(tools: List[Tool], output_path: str) -> None:
+    """Export tools as a vpype-compatible config file for G-code generation"""
+    lines = [
+        "# Pl0tb0t vpype configuration with tool-change macros",
+        "# Auto-generated for multi-color plotting with dove-tail tool changer",
+        "",
+        "[gwrite.pl0tb0t]",
+        'unit = "mm"',
+        'vertical_flip = true',
+        "",
+        '# Document setup',
+        'document_start = """G90',
+        'G21',
+        'G0 Z50',
+        'M3',
+        'G4 P0.5',
+        '"""',
+        "",
+        '# Tool change sequence (picks up tool from dove-tail holder)',
+        '# Tool positions should be configured with X spacing in 50mm increments',
+        "",
+    ]
+    
+    # Generate layer_start with tool-change macros for each layer
+    lines.append("# Layer-to-tool mapping (customize based on your SVG layer colors)")
+    lines.append('[gwrite.pl0tb0t]')
+    lines.append('layer_start = """')
+    lines.append("; === TOOL CHANGE SEQUENCE (Layer {layer_index1:d}) ===")
+    lines.append("; Move to safe Z")
+    lines.append("G0 Z50")
+    lines.append("; Move to approach position (tool X, tool Y+50)")
+    lines.append("G0 X{tool_x:.3f} Y{tool_y_approach:.3f}")
+    lines.append("; Move down to engage (Z{tool_z:.3f})")
+    lines.append("G0 Z{tool_z:.3f}")
+    lines.append("; Short pause to let tool seat")
+    lines.append("G4 P0.2")
+    lines.append("; Move to tool holder Y (clipping in)")
+    lines.append("G0 Y{tool_y:.3f}")
+    lines.append("; Lift tool out (+50mm Z)")
+    lines.append("G0 Z{tool_z_lifted:.3f}")
+    lines.append("; Return to drawing approach Y")
+    lines.append("G0 Y{tool_y_approach:.3f}")
+    lines.append("; Ready to draw")
+    lines.append('"""')
+    lines.append("")
+    
+    lines.append('layer_end = """')
+    lines.append("; === END LAYER {layer_index1:d} ===")
+    lines.append("; Move to safe Z")
+    lines.append("G0 Z50")
+    lines.append("; Move to approach position to remove tool")
+    lines.append("G0 X{tool_x:.3f} Y{tool_y_approach:.3f}")
+    lines.append("; Move down to tool holder")
+    lines.append("G0 Z{tool_z:.3f}")
+    lines.append("; Move into holder (unclipping)")
+    lines.append("G0 Y{tool_y:.3f}")
+    lines.append("; Lift carriage")
+    lines.append("G0 Z50")
+    lines.append("; Move back to approach")
+    lines.append("G0 Y{tool_y_approach:.3f}")
+    lines.append('"""')
+    lines.append("")
+    
+    lines.append('segment_first = "G0 X{x:.3f} Y{y:.3f}\\n"')
+    lines.append('segment = "G1 X{x:.3f} Y{y:.3f}\\n"')
+    lines.append('document_end = """')
+    lines.append("G0 Z50")
+    lines.append("M5")
+    lines.append("M2")
+    lines.append('"""')
+    lines.append("")
+    
+    lines.append("# Tool definitions (update these based on your calibration)")
+    for i, tool in enumerate(tools):
+        tool_x = 100 + (i * 50)  # Tools spaced 50mm apart starting at X=100
+        tool_y = 100  # All at same Y
+        tool_z = 50  # Z position to clip
+        tool_y_approach = tool_y + 50  # Approach height
+        tool_z_lifted = tool_z + 50  # Lifted position
+        
+        lines.append(f"# Tool {i+1}: {tool.name} (X={tool_x}, Y={tool_y}, Z={tool_z})")
+        lines.append(f"# Color: {tool.color}")
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    
+    print(f"Vpype config exported to {output_path}")
 
 
 # -------------------------

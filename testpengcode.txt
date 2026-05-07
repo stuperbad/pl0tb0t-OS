@@ -1,0 +1,23 @@
+There are three positions assosiated with the pen.. pen position, undocked position, and unplugged position. 
+
+pen position is obviously the X,Y,Z positions saved from the ui.
+unplugged position is X, Y+offset (positive move in machine coords), Z
+undocked position is X, Y, Safe-Z (should be around -20, ideally pen z + some variable designated by the final design)
+
+this way, drive from home, to uplugged pen 1 (Safe Z first), to pen 1, to undocked pen one, back to pen 1, then tup unplugged pen 1, then finally to pen 2 (unplugged)
+
+We'll start the cycle test after a machine home, and with no pen.. 
+So the positions in gcode should look something like this: 
+
+
+1 home: (0,0,0)
+2 Pen 1 Unplug approach: X1,Y1+offset, Safe-Z1(-20)
+3 Pen 1 Unplug position: X1,Y1+offset,Z1
+4 Pen 1 position: X,Y,Z
+5 Pen 1 Undock position: X1, Y1, Safe-Z1
+6 Pen 1 Move - draw a 10mm circle in air (XY Plane) from last position to Y-10mm, ending right at Pen 1 Undock position
+7 Pen 1 position: X1, Y1, Z1
+8 Pen 1 Unplug position: X1, Y1+offset, Z
+9 Pen 2 Unplug position: X2, Y2+offset, z
+
+from there it can repeat steps 4-8 as one 'cycle' moving between however many pens dictated by the ui

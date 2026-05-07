@@ -2,11 +2,35 @@
   "tools": [
     {
       "color": "black",
-      "name": "First Pen - Black",
-      "safe_z": 0.0,
-      "x": 0.0,
-      "y": 0.0,
-      "z": 0.0
+      "name": "Test Pen 1 - Black",
+      "safe_z": -20.0,
+      "x": -425.35,
+      "y": -541.29,
+      "z": -85.19
+    },
+    {
+      "color": "black",
+      "name": "Test Pen 2 - Cyan",
+      "safe_z": -20.0,
+      "x": -325.35,
+      "y": -541.29,
+      "z": -85.19
+    },
+    {
+      "color": "black",
+      "name": "Test Pen 3 - Magenta",
+      "safe_z": -20.0,
+      "x": -225.35,
+      "y": -541.29,
+      "z": -85.19
+    },
+    {
+      "color": "black",
+      "name": "Test Pen 4 - Yellow",
+      "safe_z": -20.0,
+      "x": -725.35,
+      "y": -541.29,
+      "z": -85.19
     }
   ]
 }
