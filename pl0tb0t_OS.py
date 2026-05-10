@@ -1,30 +1,55 @@
 #!/usr/bin/env python3
 """
-Pl0tb0t OS: menu-driven controller for GRBL plotters + art workflows.
+Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
+Direct control + tool management with dockable graphical interface
 """
 
-from __future__ import annotations
-
-import argparse
-import json
+__version__ = "0.4.0"
 import os
-import subprocess
 import sys
 import time
+import re
+import threading
+import math
+import subprocess
+import shutil
+import tempfile
+import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple, Iterable
+from typing import Dict, List, Optional, Tuple
 
 try:
     import serial
     from serial.tools import list_ports
-except Exception:  # pragma: no cover - only hit when pyserial missing
+except Exception:
     serial = None
     list_ports = None
 
-import stream
+has_display = (
+    os.environ.get("DISPLAY") is not None
+    or os.environ.get("WAYLAND_DISPLAY") is not None
+)
 
-CONFIG_PATH = "pl0tb0t_os_config.json"
-TOOLS_PATH = "pl0tb0t_tools.json"
+if has_display:
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QDockWidget,
+        QVBoxLayout, QHBoxLayout, QGridLayout,
+        QGroupBox, QLabel, QPushButton, QComboBox, QLineEdit,
+        QSlider, QCheckBox, QProgressBar, QListWidget,
+        QSplitter, QScrollArea, QSizePolicy, QToolBar,
+        QFileDialog, QMessageBox, QMenu,
+    )
+    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent
+    from PyQt6.QtGui import QPainter, QPen, QColor, QFont
+
+
+# ---------------------------------------------------------------------------
+# Core data + persistence
+# ---------------------------------------------------------------------------
+
+CONFIG_PATH = "pl0tb0t_config.json"   # unified config + tools file
 
 
 @dataclass
@@ -41,162 +66,93 @@ class Tool:
 class OSConfig:
     port: Optional[str] = None
     baud: int = 115200
-    tools_path: str = TOOLS_PATH
-    planner_path: str = "pl0tb0t_toolplan.json"
+    # Plot / drawing parameters
+    pen_lift_z: float = 3.5       # mm — Z lift between path segments
+    pen_contact_z: float = 0.0    # mm — Z when pen contacts paper
+    # Tool-change parameters
+    tc_unplug_mm: float = 20.0    # mm — Y approach/release offset from dock centre
+    tc_rapid: int = 800           # mm/min — rapid moves during tool change
+    tc_approach: int = 50         # mm/min — slow docking/undocking moves
+    draw_speed: int = 3000        # mm/min — G1 feed rate while drawing
+    vpype_config: str = "pl0tb0t_0x0_config.cfg"
+    vpype_profile: str = "pl0tb0t_0x0"
 
 
-# -------------------------
-# Config + tools persistence
-# -------------------------
-
-def load_json(path: str, default: Dict) -> Dict:
+def _load_json(path: str, default: dict) -> dict:
     if not os.path.exists(path):
         return default
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_json(path: str, data: Dict) -> None:
+def _save_json(path: str, data: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
 def load_config(path: str = CONFIG_PATH) -> OSConfig:
-    data = load_json(path, {})
+    data = _load_json(path, {})
     return OSConfig(
         port=data.get("port"),
         baud=int(data.get("baud", 115200)),
-        tools_path=data.get("tools_path", TOOLS_PATH),
-        planner_path=data.get("planner_path", "pl0tb0t_toolplan.json"),
+        pen_lift_z=float(data.get("pen_lift_z", 3.5)),
+        pen_contact_z=float(data.get("pen_contact_z", 0.0)),
+        tc_unplug_mm=float(data.get("tc_unplug_mm", 20.0)),
+        tc_rapid=int(data.get("tc_rapid", 800)),
+        tc_approach=int(data.get("tc_approach", 50)),
+        draw_speed=int(data.get("draw_speed", 3000)),
+        vpype_config=data.get("vpype_config", "pl0tb0t_0x0_config.cfg"),
+        vpype_profile=data.get("vpype_profile", "pl0tb0t_0x0"),
     )
 
 
 def save_config(config: OSConfig, path: str = CONFIG_PATH) -> None:
-    save_json(path, asdict(config))
+    # Load existing data so we preserve the tools list
+    data = _load_json(path, {})
+    cfg = asdict(config)
+    cfg.pop("tools_path", None)   # legacy field, not used
+    data.update(cfg)
+    _save_json(path, data)
 
 
-def load_tools(path: str) -> List[Tool]:
-    data = load_json(path, {"tools": []})
-    tools: List[Tool] = []
-    for item in data.get("tools", []):
-        tools.append(
-            Tool(
-                name=item.get("name", "tool"),
-                color=item.get("color", "black"),
-                x=float(item.get("x", 0)),
-                y=float(item.get("y", 0)),
-                z=float(item.get("z", 0)),
-                safe_z=float(item.get("safe_z", 0)),
-            )
+def load_tools(path: str = CONFIG_PATH) -> List[Tool]:
+    data = _load_json(path, {})
+    return [
+        Tool(
+            name=item.get("name", "tool"),
+            color=item.get("color", "black"),
+            x=float(item.get("x", 0)),
+            y=float(item.get("y", 0)),
+            z=float(item.get("z", 0)),
+            safe_z=float(item.get("safe_z", 0)),
         )
-    return tools
+        for item in data.get("tools", [])
+    ]
 
 
-def save_tools(path: str, tools: List[Tool]) -> None:
-    payload = {"tools": [asdict(t) for t in tools]}
-    save_json(path, payload)
-
-
-def resolve_tool(tools: List[Tool], name_or_color: str) -> Optional[Tool]:
-    target = name_or_color.strip().lower()
-    for t in tools:
-        if t.name.lower() == target:
-            return t
-    for t in tools:
-        if t.color.lower() == target:
-            return t
-    return None
-
-
-# -------------------------
-# Tool change planner
-# -------------------------
-
-def load_toolplan(path: str) -> Dict:
-    return load_json(path, {"layers": []})
-
-
-def save_toolplan(path: str, data: Dict) -> None:
-    save_json(path, data)
-
-
-def _iter_gcode_lines(path: str) -> Iterable[str]:
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            yield line.rstrip("\n")
-
-
-def _write_lines(path: str, lines: Iterable[str]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        for line in lines:
-            f.write(line + "\n")
-
-
-def generate_toolchange_gcode(tools: List[Tool], plan: Dict, out_path: str) -> None:
-    layers = plan.get("layers", [])
-    safe_z = float(plan.get("safe_z", 0))
-    park = plan.get("park", {"x": 0, "y": 0, "z": safe_z})
-    park_x = float(park.get("x", 0))
-    park_y = float(park.get("y", 0))
-    park_z = float(park.get("z", safe_z))
-
-    output: List[str] = []
-    output.append("; Pl0tb0t tool change plan")
-    output.append("G90")
-    output.append("G21")
-
-    for idx, layer in enumerate(layers, start=1):
-        color = layer.get("color", "")
-        tool_name = layer.get("tool", color)
-        gcode_path = layer.get("gcode")
-        if not gcode_path:
-            raise ValueError(f"Layer {idx} missing gcode path")
-        tool = resolve_tool(tools, tool_name)
-        if tool is None:
-            raise ValueError(f"Layer {idx} tool not found: {tool_name}")
-
-        output.append(f"; --- Layer {idx}: {color or tool.name} ---")
-        output.append(f"G0 Z{safe_z:.3f}")
-        output.append(f"G0 X{tool.x:.3f} Y{tool.y:.3f}")
-        output.append(f"G0 Z{tool.z:.3f}")
-        output.append("; Tool pickup")
-        output.append(f"G0 Z{tool.safe_z:.3f}")
-        output.append(f"G0 X{park_x:.3f} Y{park_y:.3f} Z{park_z:.3f}")
-        output.append(f"; Begin layer gcode: {gcode_path}")
-        output.extend(_iter_gcode_lines(gcode_path))
-        output.append(f"; End layer gcode: {gcode_path}")
-
-    _write_lines(out_path, output)
-
-
-# -------------------------
-# GRBL helpers
-# -------------------------
-
-def require_serial() -> None:
-    if serial is None:
-        print("pyserial not available. Install dependencies first.")
-        sys.exit(1)
+def save_tools(path: str = CONFIG_PATH, tools: List[Tool] = None) -> None:
+    data = _load_json(path, {})
+    data["tools"] = [asdict(t) for t in (tools or [])]
+    _save_json(path, data)
 
 
 def list_serial_ports() -> List[Tuple[str, str]]:
-    require_serial()
-    ports = []
-    for p in list_ports.comports():
-        ports.append((p.device, p.description))
-    return ports
+    if list_ports is None:
+        return []
+    return [(p.device, p.description) for p in list_ports.comports()]
 
 
-def open_port(port: str, baud: int) -> "serial.Serial":
-    require_serial()
+def open_port(port: str, baud: int):
+    if serial is None:
+        raise RuntimeError("pyserial not installed")
     s = serial.Serial(port, baud, timeout=1.0)
     time.sleep(2)
     return s
 
 
-def grbl_send(port: "serial.Serial", command: str, wait_ok: bool = True, verbose: bool = False) -> List[str]:
+def grbl_send(port, command: str, wait_ok: bool = True, verbose: bool = False):
     if not command.endswith("\n"):
-        command = command + "\n"
+        command += "\n"
     if verbose:
         print("SND:", command.strip())
     port.write(command.encode("utf-8"))
@@ -208,7 +164,7 @@ def grbl_send(port: "serial.Serial", command: str, wait_ok: bool = True, verbose
             if not line:
                 empty_count += 1
                 if empty_count >= 10:
-                    break  # port not responding, give up
+                    break
                 continue
             empty_count = 0
             responses.append(line)
@@ -219,51 +175,45 @@ def grbl_send(port: "serial.Serial", command: str, wait_ok: bool = True, verbose
     return responses
 
 
-def grbl_home(port: "serial.Serial", verbose: bool = False) -> None:
+def grbl_home(port, verbose: bool = False) -> None:
     grbl_send(port, "$H", wait_ok=True, verbose=verbose)
-    stream.wait_idle(port, verbose=verbose)
+    for _ in range(120):
+        time.sleep(0.5)
+        try:
+            port.reset_input_buffer()
+            port.write(b"?\n")
+            line = port.readline().decode("utf-8", errors="ignore").strip()
+            if "Idle" in line:
+                break
+        except Exception:
+            break
 
 
-def grbl_status(port: "serial.Serial") -> str:
+def grbl_status(port) -> str:
     port.write(b"?\n")
-    line = port.readline().decode("utf-8", errors="ignore").strip()
-    return line
+    return port.readline().decode("utf-8", errors="ignore").strip()
 
 
-def grbl_jog(port: "serial.Serial", axis: str, distance: float, feed: float, units: str = "mm") -> None:
+def grbl_jog(port, axis: str, distance: float, feed: float, units: str = "mm") -> None:
     axis = axis.upper()
-    if axis not in {"X", "Y", "Z"}:
-        raise ValueError("axis must be X, Y, or Z")
     unit_cmd = "G21" if units == "mm" else "G20"
-    cmd = f"$J=G91 {unit_cmd} {axis}{distance:.3f} F{feed:.1f}"
-    grbl_send(port, cmd, wait_ok=False)
+    grbl_send(port, f"$J=G91 {unit_cmd} {axis}{distance:.3f} F{feed:.1f}", wait_ok=False)
 
 
-def grbl_move_abs(
-    port: "serial.Serial",
-    x: float,
-    y: float,
-    z: float,
-    feed: Optional[float] = None,
-    use_machine_coords: bool = False,
-) -> None:
-    """Move in absolute coordinates; optionally force machine coordinates (G53)."""
-    coord_prefix = "G53 " if use_machine_coords else ""
+def grbl_move_abs(port, x: float, y: float, z: float,
+                  feed: Optional[float] = None, use_machine_coords: bool = False) -> None:
+    prefix = "G53 " if use_machine_coords else ""
     if feed is None:
-        cmd = f"G90 {coord_prefix}G0 X{x:.3f} Y{y:.3f} Z{z:.3f}"
+        cmd = f"G90 {prefix}G0 X{x:.3f} Y{y:.3f} Z{z:.3f}"
     else:
-        cmd = f"G90 {coord_prefix}G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{feed:.1f}"
+        cmd = f"G90 {prefix}G1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{feed:.1f}"
     grbl_send(port, cmd, wait_ok=True)
 
 
-# -------------------------
-# Tooling helpers
-# -------------------------
-
 def find_tool(tools: List[Tool], name: str) -> Optional[Tool]:
-    for tool in tools:
-        if tool.name.lower() == name.lower():
-            return tool
+    for t in tools:
+        if t.name.lower() == name.lower():
+            return t
     return None
 
 
@@ -280,481 +230,2641 @@ def add_or_update_tool(tools: List[Tool], tool: Tool) -> None:
 
 
 def remove_tool(tools: List[Tool], name: str) -> bool:
-    for i, tool in enumerate(tools):
-        if tool.name.lower() == name.lower():
+    for i, t in enumerate(tools):
+        if t.name.lower() == name.lower():
             tools.pop(i)
             return True
     return False
 
 
-def export_vpype_config(tools: List[Tool], output_path: str) -> None:
-    """Export tools as a vpype-compatible config file for G-code generation"""
-    lines = [
-        "# Pl0tb0t vpype configuration with tool-change macros",
-        "# Auto-generated for multi-color plotting with dove-tail tool changer",
-        "",
-        "[gwrite.pl0tb0t]",
-        'unit = "mm"',
-        'vertical_flip = true',
-        "",
-        '# Document setup',
-        'document_start = """G90',
-        'G21',
-        'G0 Z50',
-        'M3',
-        'G4 P0.5',
-        '"""',
-        "",
-        '# Tool change sequence (picks up tool from dove-tail holder)',
-        '# Tool positions should be configured with X spacing in 50mm increments',
-        "",
-    ]
-    
-    # Generate layer_start with tool-change macros for each layer
-    lines.append("# Layer-to-tool mapping (customize based on your SVG layer colors)")
-    lines.append('[gwrite.pl0tb0t]')
-    lines.append('layer_start = """')
-    lines.append("; === TOOL CHANGE SEQUENCE (Layer {layer_index1:d}) ===")
-    lines.append("; Move to safe Z")
-    lines.append("G0 Z50")
-    lines.append("; Move to approach position (tool X, tool Y+50)")
-    lines.append("G0 X{tool_x:.3f} Y{tool_y_approach:.3f}")
-    lines.append("; Move down to engage (Z{tool_z:.3f})")
-    lines.append("G0 Z{tool_z:.3f}")
-    lines.append("; Short pause to let tool seat")
-    lines.append("G4 P0.2")
-    lines.append("; Move to tool holder Y (clipping in)")
-    lines.append("G0 Y{tool_y:.3f}")
-    lines.append("; Lift tool out (+50mm Z)")
-    lines.append("G0 Z{tool_z_lifted:.3f}")
-    lines.append("; Return to drawing approach Y")
-    lines.append("G0 Y{tool_y_approach:.3f}")
-    lines.append("; Ready to draw")
-    lines.append('"""')
-    lines.append("")
-    
-    lines.append('layer_end = """')
-    lines.append("; === END LAYER {layer_index1:d} ===")
-    lines.append("; Move to safe Z")
-    lines.append("G0 Z50")
-    lines.append("; Move to approach position to remove tool")
-    lines.append("G0 X{tool_x:.3f} Y{tool_y_approach:.3f}")
-    lines.append("; Move down to tool holder")
-    lines.append("G0 Z{tool_z:.3f}")
-    lines.append("; Move into holder (unclipping)")
-    lines.append("G0 Y{tool_y:.3f}")
-    lines.append("; Lift carriage")
-    lines.append("G0 Z50")
-    lines.append("; Move back to approach")
-    lines.append("G0 Y{tool_y_approach:.3f}")
-    lines.append('"""')
-    lines.append("")
-    
-    lines.append('segment_first = "G0 X{x:.3f} Y{y:.3f}\\n"')
-    lines.append('segment = "G1 X{x:.3f} Y{y:.3f}\\n"')
-    lines.append('document_end = """')
-    lines.append("G0 Z50")
-    lines.append("M5")
-    lines.append("M2")
-    lines.append('"""')
-    lines.append("")
-    
-    lines.append("# Tool definitions (update these based on your calibration)")
-    for i, tool in enumerate(tools):
-        tool_x = 100 + (i * 50)  # Tools spaced 50mm apart starting at X=100
-        tool_y = 100  # All at same Y
-        tool_z = 50  # Z position to clip
-        tool_y_approach = tool_y + 50  # Approach height
-        tool_z_lifted = tool_z + 50  # Lifted position
-        
-        lines.append(f"# Tool {i+1}: {tool.name} (X={tool_x}, Y={tool_y}, Z={tool_z})")
-        lines.append(f"# Color: {tool.color}")
-    
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-    
-    print(f"Vpype config exported to {output_path}")
+def _migrate_legacy_config():
+    """One-time migration: merge old separate config + tools files into unified file."""
+    if os.path.exists(CONFIG_PATH):
+        return   # already migrated
+    merged = {}
+    for old in ("pl0tb0t_os_config.json", "pl0tb0t_tools.json"):
+        if os.path.exists(old):
+            merged.update(_load_json(old, {}))
+    _save_json(CONFIG_PATH, merged)
 
 
-# -------------------------
-# Art integration
-# -------------------------
+# ---------------------------------------------------------------------------
+# PyQt6 UI
+# ---------------------------------------------------------------------------
 
-def run_ui_py() -> int:
-    return subprocess.call([sys.executable, "UI.py"])
+if has_display:
 
+    class _Signals(QObject):
+        update_status  = pyqtSignal(str)
+        update_dro     = pyqtSignal(dict, dict)
+        update_progress = pyqtSignal(float)
+        show_error     = pyqtSignal(str, str)
+        show_info      = pyqtSignal(str, str)
+        gcode_done     = pyqtSignal()
+        wcs_offset_ready = pyqtSignal(float, float, float)
+        gcode_status   = pyqtSignal(str)
+        gcode_highlight = pyqtSignal(int)
+        grbl_log       = pyqtSignal(str)
 
-def plot_gcode_file(port: str, baud: int, gcode_path: str, home_first: bool, verbose: bool = False) -> None:
-    if not os.path.exists(gcode_path):
-        raise FileNotFoundError(gcode_path)
-    s = open_port(port, baud)
-    if home_first:
-        grbl_home(s, verbose=verbose)
-    with open(gcode_path, "r", encoding="utf-8") as f:
-        stream.stream_gcode(s, f, verbose=verbose)
-    s.close()
+    class GcodePreviewWidget(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.segments = []      # (x0,y0,x1,y1, mode, color_hex)
+            self.bounds = None
+            self.visible_colors = None   # None = all visible
+            self._zoom = 1.0
+            self._pan = [0.0, 0.0]
+            self._drag_start = None
+            self._pan_origin = [0.0, 0.0]
+            self.setMinimumHeight(150)
+            self.setStyleSheet("background: white;")
 
+        def set_data(self, segments, bounds):
+            self.segments = segments
+            self.bounds = bounds
+            self._zoom = 1.0
+            self._pan = [0.0, 0.0]
+            self.update()
 
-# -------------------------
-# Interactive menu
-# -------------------------
+        def set_visible_colors(self, colors):
+            self.visible_colors = colors
+            self.update()
 
-def prompt(text: str, default: Optional[str] = None) -> str:
-    suffix = f" [{default}]" if default is not None else ""
-    value = input(f"{text}{suffix}: ").strip()
-    return value if value else (default or "")
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor("white"))
+            if not self.segments or not self.bounds:
+                painter.setPen(QColor("#aaaaaa"))
+                painter.drawText(10, 20, "No preview available")
+                return
+            w, h = self.width(), self.height()
+            pad = 10
+            min_x, min_y, max_x, max_y = self.bounds
+            span_x = max(max_x - min_x, 1e-6)
+            span_y = max(max_y - min_y, 1e-6)
+            scale = min((w - 2 * pad) / span_x, (h - 2 * pad) / span_y)
+            zoom, pan_x, pan_y = self._zoom, self._pan[0], self._pan[1]
 
+            def mp(px, py):
+                cx = pad + (px - min_x) * scale
+                cy = h - pad - (py - min_y) * scale
+                return cx * zoom + pan_x, cy * zoom + pan_y
 
-def menu_machine(config: OSConfig) -> None:
-    while True:
-        print("\nMachine")
-        print("1) List ports")
-        print("2) Set active port")
-        print("3) Home")
-        print("4) Jog")
-        print("5) Status")
-        print("6) Send raw G-code")
-        print("0) Back")
-        choice = prompt(">")
-        if choice == "0":
-            return
-        if choice == "1":
-            ports = list_serial_ports()
-            if not ports:
-                print("No serial ports found.")
-            for dev, desc in ports:
-                print(f"- {dev} ({desc})")
-        elif choice == "2":
-            config.port = prompt("Port", config.port)
-            save_config(config)
-            print("Saved.")
-        elif choice == "3":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            s = open_port(config.port, config.baud)
-            grbl_home(s, verbose=True)
-            s.close()
-        elif choice == "4":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            axis = prompt("Axis (X/Y/Z)", "X")
-            dist = float(prompt("Distance", "1.0"))
-            feed = float(prompt("Feed", "500"))
-            units = prompt("Units (mm/in)", "mm")
-            s = open_port(config.port, config.baud)
-            grbl_jog(s, axis, dist, feed, units=units)
-            s.close()
-        elif choice == "5":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            s = open_port(config.port, config.baud)
-            print(grbl_status(s))
-            s.close()
-        elif choice == "6":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            cmd = prompt("G-code line")
-            s = open_port(config.port, config.baud)
-            grbl_send(s, cmd, wait_ok=True, verbose=True)
-            s.close()
+            rapid_color = QColor("#dddddd")
+            for x0, y0, x1, y1, mode, color in self.segments:
+                if self.visible_colors is not None and color not in self.visible_colors:
+                    continue
+                sx0, sy0 = mp(x0, y0)
+                sx1, sy1 = mp(x1, y1)
+                if mode == "G0":
+                    painter.setPen(rapid_color)
+                else:
+                    c = QColor(color)
+                    # darken very light colors so they show on white background
+                    if c.lightness() > 220:
+                        c = c.darker(180)
+                    painter.setPen(c)
+                painter.drawLine(int(sx0), int(sy0), int(sx1), int(sy1))
 
+            if zoom != 1.0 or pan_x != 0.0 or pan_y != 0.0:
+                painter.setPen(QColor("#888888"))
+                painter.setFont(QFont("Arial", 7))
+                painter.drawText(w - 165, 15, f"zoom {zoom:.1f}×  dbl-click to reset")
 
-def menu_tools(config: OSConfig) -> None:
-    tools = load_tools(config.tools_path)
-    while True:
-        print("\nTools")
-        print("1) List tools")
-        print("2) Add/Update tool")
-        print("3) Remove tool")
-        print("4) Move to tool")
-        print("5) Tool change planner")
-        print("0) Back")
-        choice = prompt(">")
-        if choice == "0":
-            save_tools(config.tools_path, tools)
-            return
-        if choice == "1":
-            if not tools:
-                print("No tools configured.")
-            for t in tools:
-                print(f"- {t.name} color={t.color} x={t.x} y={t.y} z={t.z} safe_z={t.safe_z}")
-        elif choice == "2":
-            name = prompt("Name")
-            color = prompt("Color", "black")
-            x = float(prompt("X", "0"))
-            y = float(prompt("Y", "0"))
-            z = float(prompt("Z", "0"))
-            safe_z = float(prompt("Safe Z", "0"))
-            add_or_update_tool(tools, Tool(name=name, color=color, x=x, y=y, z=z, safe_z=safe_z))
-            save_tools(config.tools_path, tools)
-            print("Saved.")
-        elif choice == "3":
-            name = prompt("Name")
-            if remove_tool(tools, name):
-                save_tools(config.tools_path, tools)
-                print("Removed.")
+        def wheelEvent(self, event):
+            delta = event.angleDelta().y()
+            factor = 1.25 if delta > 0 else 0.8
+            pos = event.position()
+            mx, my = pos.x(), pos.y()
+            self._pan[0] = mx + (self._pan[0] - mx) * factor
+            self._pan[1] = my + (self._pan[1] - my) * factor
+            self._zoom = max(0.05, min(200.0, self._zoom * factor))
+            self.update()
+
+        def mousePressEvent(self, event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = event.position()
+                self._drag_start = (pos.x(), pos.y())
+                self._pan_origin = list(self._pan)
+
+        def mouseMoveEvent(self, event):
+            if self._drag_start:
+                pos = event.position()
+                self._pan[0] = self._pan_origin[0] + pos.x() - self._drag_start[0]
+                self._pan[1] = self._pan_origin[1] + pos.y() - self._drag_start[1]
+                self.update()
+
+        def mouseReleaseEvent(self, event):
+            self._drag_start = None
+
+        def mouseDoubleClickEvent(self, event):
+            self._zoom = 1.0
+            self._pan = [0.0, 0.0]
+            self.update()
+
+    class _SnapDock(QDockWidget):
+        """QDockWidget with collapsible title bar and right-click re-dock menu."""
+        def __init__(self, title, parent):
+            super().__init__(title, parent)
+            self._collapsed = False
+            self._title_text = title
+            self._pre_collapse_min_w = 0
+            self._build_title_bar()
+
+        def _build_title_bar(self):
+            bar = QWidget()
+            bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            bar.customContextMenuRequested.connect(
+                lambda pos: self._ctx_menu(bar.mapToParent(pos)))
+
+            hl = QHBoxLayout(bar)
+            hl.setContentsMargins(6, 2, 4, 2)
+            hl.setSpacing(4)
+
+            self._caret = QPushButton("▼")
+            self._caret.setFixedSize(16, 16)
+            self._caret.setFlat(True)
+            self._caret.setToolTip("Collapse / expand")
+            self._caret.clicked.connect(self._toggle_collapse)
+            hl.addWidget(self._caret)
+
+            lbl = QLabel(self._title_text)
+            f = lbl.font()
+            f.setBold(True)
+            lbl.setFont(f)
+            hl.addWidget(lbl, 1)
+
+            float_btn = QPushButton("⧉")
+            float_btn.setFixedSize(16, 16)
+            float_btn.setFlat(True)
+            float_btn.setToolTip("Float / dock")
+            float_btn.clicked.connect(lambda: self.setFloating(not self.isFloating()))
+            hl.addWidget(float_btn)
+
+            self.setTitleBarWidget(bar)
+
+        def _toggle_collapse(self):
+            self._collapsed = not self._collapsed
+            w = self.widget()
+            if w:
+                w.setVisible(not self._collapsed)
+            self._caret.setText("▶" if self._collapsed else "▼")
+            if self._collapsed:
+                self._pre_collapse_min_w = self.minimumWidth()
+                self.setMinimumWidth(self.width())  # hold column width
+                self.setMaximumHeight(26)
             else:
-                print("Tool not found.")
-        elif choice == "4":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            name = prompt("Name")
-            tool = find_tool(tools, name)
-            if tool is None:
-                print("Tool not found.")
-                continue
-            s = open_port(config.port, config.baud)
-            if tool.safe_z != tool.z:
-                grbl_move_abs(s, tool.x, tool.y, tool.safe_z)
-            grbl_move_abs(s, tool.x, tool.y, tool.z)
-            s.close()
-        elif choice == "5":
-            plan_path = prompt("Plan file", config.planner_path)
-            plan = load_toolplan(plan_path)
-            if not plan.get("layers"):
-                plan["layers"] = []
-            count = int(prompt("Number of layers", str(len(plan["layers"]) or 0)))
-            layers = []
-            for i in range(count):
-                color = prompt(f"Layer {i+1} color/tool")
-                gcode = prompt(f"Layer {i+1} gcode path")
-                layers.append({"color": color, "gcode": gcode})
-            plan["layers"] = layers
-            plan["safe_z"] = float(prompt("Safe Z", str(plan.get("safe_z", 0))))
-            park = plan.get("park", {"x": 0, "y": 0, "z": plan["safe_z"]})
-            park["x"] = float(prompt("Park X", str(park.get("x", 0))))
-            park["y"] = float(prompt("Park Y", str(park.get("y", 0))))
-            park["z"] = float(prompt("Park Z", str(park.get("z", plan["safe_z"]))))
-            plan["park"] = park
-            save_toolplan(plan_path, plan)
-            out_path = prompt("Output gcode path", "toolplan_combined.gcode")
-            generate_toolchange_gcode(tools, plan, out_path)
-            print(f"Wrote {out_path}")
+                self.setMaximumHeight(16777215)
+                self.setMinimumWidth(self._pre_collapse_min_w)
 
+        def _ctx_menu(self, pos):
+            if not self.isFloating():
+                return
+            menu = QMenu(self)
+            menu.addAction("⬅  Dock Left",   lambda: self._snap(Qt.DockWidgetArea.LeftDockWidgetArea))
+            menu.addAction("➡  Dock Right",  lambda: self._snap(Qt.DockWidgetArea.RightDockWidgetArea))
+            menu.addAction("⬇  Dock Bottom", lambda: self._snap(Qt.DockWidgetArea.BottomDockWidgetArea))
+            menu.exec(self.mapToGlobal(pos))
 
-def menu_art(config: OSConfig) -> None:
-    while True:
-        print("\nArt")
-        print("1) Run UI.py")
-        print("2) Plot G-code file")
-        print("0) Back")
-        choice = prompt(">")
-        if choice == "0":
-            return
-        if choice == "1":
-            run_ui_py()
-        elif choice == "2":
-            if not config.port:
-                print("Set a port first.")
-                continue
-            path = prompt("G-code path")
-            home = prompt("Home first? (y/n)", "n").lower().startswith("y")
-            plot_gcode_file(config.port, config.baud, path, home_first=home, verbose=True)
+        def _snap(self, area):
+            mw = self.parent()
+            while mw and not isinstance(mw, QMainWindow):
+                mw = mw.parent()
+            if mw:
+                mw.addDockWidget(area, self)
 
+    class PlotterApp(QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle(f"Pl0tb0t Control v{__version__}")
 
-def run_menu(config: OSConfig) -> None:
-    while True:
-        print("\nPl0tb0t OS")
-        print("1) Machine")
-        print("2) Tools")
-        print("3) Art")
-        print("4) Settings")
-        print("0) Exit")
-        choice = prompt(">")
-        if choice == "0":
-            return
-        if choice == "1":
-            menu_machine(config)
-        elif choice == "2":
-            menu_tools(config)
-        elif choice == "3":
-            menu_art(config)
-        elif choice == "4":
-            config.port = prompt("Default port", config.port)
-            config.baud = int(prompt("Baud", str(config.baud)))
-            config.tools_path = prompt("Tools file", config.tools_path)
-            config.planner_path = prompt("Planner file", config.planner_path)
-            save_config(config)
-            print("Saved.")
+            _migrate_legacy_config()
+            self.config = load_config()
+            self.port = None
+            self.tools = load_tools()
+            self.machine_pos = {"x": 0.0, "y": 0.0, "z": 0.0}
+            self.work_pos    = {"x": 0.0, "y": 0.0, "z": 0.0}
+            self.work_offset = {"x": 0.0, "y": 0.0, "z": 0.0}
 
+            self.gcode_path = None
+            self.gcode_segments = []
+            self.gcode_bounds = None
+            self.gcode_preview_truncated = False
+            self.gcode_total_lines = 0
+            self.gcode_sent_lines = 0
+            self.gcode_lines = []
+            self.gcode_line_index = 0
+            self.gcode_running = False
+            self.gcode_paused = False
+            self.gcode_stop = False
 
-# -------------------------
-# CLI
-# -------------------------
+            self._svg_layers = []
+            self._layer_colors = []       # [(hex, label), ...]
+            self._visible_colors = set()
+            self._serial_lock = threading.Lock()
+            self._poll_running = False
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Pl0tb0t OS")
-    sub = parser.add_subparsers(dest="cmd")
+            self.jog_keys_held = set()
+            self._continuous_jog_active = False
+            self._shift_held = False
+            self.rapid_jog_speed = 3000
+            self._release_timers = {}   # debounce X11 fake auto-repeat releases
+            self._jog_seq = 0           # incremented on cancel to invalidate stale send threads
 
-    sub.add_parser("menu", help="Run interactive menu")
+            self.signals = _Signals()
+            self.signals.update_status.connect(self._on_update_status)
+            self.signals.update_dro.connect(self._on_update_dro)
+            self.signals.update_progress.connect(lambda v: self.gcode_progress.setValue(int(v)))
+            self.signals.show_error.connect(lambda t, m: QMessageBox.critical(self, t, m))
+            self.signals.show_info.connect(lambda t, m: QMessageBox.information(self, t, m))
+            self.signals.gcode_done.connect(self._reset_gcode_buttons)
+            self.signals.wcs_offset_ready.connect(self._on_wcs_offset_ready)
+            self.signals.gcode_status.connect(lambda s: self.gcode_status_label.setText(s))
+            self.signals.gcode_highlight.connect(self._highlight_gcode_line_at)
+            self.signals.grbl_log.connect(self._append_grbl_log)
 
-    ports = sub.add_parser("ports", help="List serial ports")
-    ports.set_defaults(cmd="ports")
+            self._build_ui()
+            self._restore_layout()
+            QApplication.instance().installEventFilter(self)
+            self.refresh_ports()
+            self.refresh_tool_list()
+            self.refresh_pen_buttons()
 
-    machine = sub.add_parser("machine", help="Machine actions")
-    machine.add_argument("--port", dest="port", default=None)
-    machine.add_argument("--baud", dest="baud", type=int, default=None)
-    machine.add_argument("--home", action="store_true")
-    machine.add_argument("--status", action="store_true")
-    machine.add_argument("--send", dest="send", default=None, help="Send raw G-code line")
+            self._status_timer = QTimer()
+            self._status_timer.timeout.connect(self._poll_status)
+            self._status_timer.start(500)
 
-    jog = sub.add_parser("jog", help="Jog the machine")
-    jog.add_argument("axis", choices=["X", "Y", "Z"])
-    jog.add_argument("distance", type=float)
-    jog.add_argument("--feed", type=float, default=500)
-    jog.add_argument("--units", choices=["mm", "in"], default="mm")
-    jog.add_argument("--port", dest="port", default=None)
-    jog.add_argument("--baud", dest="baud", type=int, default=None)
+            screen = QApplication.primaryScreen().size()
+            self.resize(min(1400, screen.width() - 40), min(900, screen.height() - 60))
+            self.setMinimumSize(900, 600)
 
-    tools = sub.add_parser("tools", help="Manage tools")
-    tools.add_argument("action", choices=["list", "add", "update", "remove", "move"])
-    tools.add_argument("--name", default=None)
-    tools.add_argument("--color", default="black")
-    tools.add_argument("--x", type=float, default=0)
-    tools.add_argument("--y", type=float, default=0)
-    tools.add_argument("--z", type=float, default=0)
-    tools.add_argument("--safe-z", dest="safe_z", type=float, default=0)
-    tools.add_argument("--port", dest="port", default=None)
-    tools.add_argument("--baud", dest="baud", type=int, default=None)
+        # ------------------------------------------------------------------
+        # UI construction
+        # ------------------------------------------------------------------
 
-    art = sub.add_parser("art", help="Art workflows")
-    art.add_argument("action", choices=["run-ui", "plot-gcode"])
-    art.add_argument("--gcode", dest="gcode", default=None)
-    art.add_argument("--home", action="store_true")
-    art.add_argument("--port", dest="port", default=None)
-    art.add_argument("--baud", dest="baud", type=int, default=None)
+        def _dock(self, title, widget, name=None):
+            d = _SnapDock(title, self)
+            if name:
+                d.setObjectName(name)
+            d.setWidget(widget)
+            return d
 
-    toolplan = sub.add_parser("toolplan", help="Generate tool-change gcode from a plan file")
-    toolplan.add_argument("--plan", dest="plan", default=None)
-    toolplan.add_argument("--out", dest="out", default="toolplan_combined.gcode")
+        def _scrolled(self, widget):
+            s = QScrollArea()
+            s.setWidgetResizable(True)
+            s.setWidget(widget)
+            return s
 
-    return parser
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    config = load_config()
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.cmd in (None, "menu"):
-        run_menu(config)
-        return 0
-
-    if args.cmd == "ports":
-        for dev, desc in list_serial_ports():
-            print(f"{dev} ({desc})")
-        return 0
-
-    if args.cmd == "machine":
-        port = args.port or config.port
-        baud = args.baud or config.baud
-        if not port:
-            print("No port specified.")
-            return 1
-        s = open_port(port, baud)
-        if args.home:
-            grbl_home(s, verbose=True)
-        if args.status:
-            print(grbl_status(s))
-        if args.send:
-            grbl_send(s, args.send, wait_ok=True, verbose=True)
-        s.close()
-        return 0
-
-    if args.cmd == "jog":
-        port = args.port or config.port
-        baud = args.baud or config.baud
-        if not port:
-            print("No port specified.")
-            return 1
-        s = open_port(port, baud)
-        grbl_jog(s, args.axis, args.distance, args.feed, units=args.units)
-        s.close()
-        return 0
-
-    if args.cmd == "tools":
-        tools = load_tools(config.tools_path)
-        if args.action == "list":
-            for t in tools:
-                print(f"{t.name} color={t.color} x={t.x} y={t.y} z={t.z} safe_z={t.safe_z}")
-            return 0
-        if args.action in {"add", "update"}:
-            if not args.name:
-                print("--name required")
-                return 1
-            add_or_update_tool(
-                tools,
-                Tool(
-                    name=args.name,
-                    color=args.color,
-                    x=args.x,
-                    y=args.y,
-                    z=args.z,
-                    safe_z=args.safe_z,
-                ),
+        def _build_ui(self):
+            self.setDockNestingEnabled(True)
+            self.setDockOptions(
+                QMainWindow.DockOption.AnimatedDocks |
+                QMainWindow.DockOption.AllowNestedDocks |
+                QMainWindow.DockOption.AllowTabbedDocks
             )
-            save_tools(config.tools_path, tools)
-            return 0
-        if args.action == "remove":
-            if not args.name:
-                print("--name required")
-                return 1
-            if not remove_tool(tools, args.name):
-                print("Tool not found.")
-                return 1
-            save_tools(config.tools_path, tools)
-            return 0
-        if args.action == "move":
-            if not args.name:
-                print("--name required")
-                return 1
-            port = args.port or config.port
-            baud = args.baud or config.baud
-            if not port:
-                print("No port specified.")
-                return 1
-            tool = find_tool(tools, args.name)
-            if tool is None:
-                print("Tool not found.")
-                return 1
-            s = open_port(port, baud)
-            if tool.safe_z != tool.z:
-                grbl_move_abs(s, tool.x, tool.y, tool.safe_z)
-            grbl_move_abs(s, tool.x, tool.y, tool.z)
-            s.close()
-            return 0
 
-    if args.cmd == "art":
-        port = args.port or config.port
-        baud = args.baud or config.baud
-        if args.action == "run-ui":
-            return run_ui_py()
-        if args.action == "plot-gcode":
-            if not args.gcode:
-                print("--gcode required")
-                return 1
-            if not port:
-                print("No port specified.")
-                return 1
-            plot_gcode_file(port, baud, args.gcode, home_first=args.home, verbose=True)
-            return 0
+            # status bar — compact fixed toolbar, not a dock
+            status_bar = QToolBar("Status")
+            status_bar.setObjectName("toolbar_status")
+            status_bar.setMovable(False)
+            status_bar.setFloatable(False)
+            status_widget = QWidget()
+            status_widget.setLayout(self._make_status_bar())
+            status_bar.addWidget(status_widget)
+            self.addToolBar(Qt.ToolBarArea.TopToolBarArea, status_bar)
 
-    if args.cmd == "toolplan":
-        plan_path = args.plan or config.planner_path
-        tools = load_tools(config.tools_path)
-        plan = load_toolplan(plan_path)
-        generate_toolchange_gcode(tools, plan, args.out)
-        print(f"Wrote {args.out}")
-        return 0
+            # individual panel docks — click ▼ to collapse, right-click to re-dock
+            conn_dock     = self._dock("Connection",         self._scrolled(self._build_connection_panel()), "dock_conn")
+            jog_dock      = self._dock("Jogging",            self._scrolled(self._build_jog_panel()),        "dock_jog")
+            zero_dock     = self._dock("Work Zero",          self._scrolled(self._build_workzero_panel()),   "dock_zero")
+            mset_dock     = self._dock("Machine Settings",   self._scrolled(self._build_settings_panel()),   "dock_mset")
+            tool_dock     = self._dock("Tool Management",    self._build_tool_panel(),                       "dock_tools")
+            testpen_dock  = self._dock("Test Pen Generator", self._scrolled(self._build_testpen_panel()),    "dock_testpen")
+            vpype_dock    = self._dock("vpype Generator",    self._scrolled(self._build_vpype_panel()),      "dock_vpype")
+            gcode_dock    = self._dock("G-code Runner",      self._build_gcode_panel(),                      "dock_gcode")
 
-    parser.print_help()
-    return 1
+            L = Qt.DockWidgetArea.LeftDockWidgetArea
+            H = Qt.Orientation.Horizontal
+            V = Qt.Orientation.Vertical
+
+            self.addDockWidget(L, conn_dock)
+
+            self.splitDockWidget(conn_dock,  tool_dock,    H)
+            self.splitDockWidget(tool_dock,  vpype_dock,   H)
+
+            self.splitDockWidget(conn_dock,  jog_dock,    V)
+            self.splitDockWidget(jog_dock,   zero_dock,   V)
+            self.splitDockWidget(zero_dock,  mset_dock,   V)
+
+            self.splitDockWidget(vpype_dock, testpen_dock, V)
+            self.splitDockWidget(testpen_dock, gcode_dock, V)
+
+        def _make_status_bar(self):
+            layout = QHBoxLayout()
+            layout.setContentsMargins(8, 4, 8, 4)
+            layout.setSpacing(12)
+
+            self.status_label = QLabel("🔴 DISCONNECTED")
+            f = QFont("Arial", 12)
+            f.setBold(True)
+            self.status_label.setFont(f)
+            layout.addWidget(self.status_label)
+
+            self.port_label = QLabel("Port: None")
+            self.port_label.setFont(QFont("Arial", 10))
+            layout.addWidget(self.port_label)
+
+            for attr, heading in [("machine_label", "Machine:"), ("work_label", "Work (G54):")]:
+                grp = QWidget()
+                v = QVBoxLayout(grp)
+                v.setContentsMargins(0, 0, 0, 0)
+                v.setSpacing(0)
+                lbl = QLabel(heading)
+                lbl.setFont(QFont("Arial", 8))
+                v.addWidget(lbl)
+                val = QLabel("X: 0.00  Y: 0.00  Z: 0.00")
+                val.setFont(QFont("Courier", 9))
+                setattr(self, attr, val)
+                v.addWidget(val)
+                layout.addWidget(grp)
+
+            wcs_grp = QWidget()
+            wcs_v = QVBoxLayout(wcs_grp)
+            wcs_v.setContentsMargins(0, 0, 0, 0)
+            wcs_v.setSpacing(0)
+            wcs_v.addWidget(QLabel("Work Offset:"))
+            self.wcs_combo = QComboBox()
+            self.wcs_combo.addItems(["G54", "G55", "G56", "G57", "G58", "G59"])
+            self.wcs_combo.setFixedWidth(80)
+            self.wcs_combo.currentTextChanged.connect(self._on_wcs_combo_changed)
+            wcs_v.addWidget(self.wcs_combo)
+            layout.addWidget(wcs_grp)
+
+            layout.addStretch()
+            ver = QLabel(f"v{__version__}")
+            ver.setFont(QFont("Arial", 9))
+            layout.addWidget(ver)
+            return layout
+
+        def _build_connection_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(6)
+
+            port_row = QHBoxLayout()
+            port_row.addWidget(QLabel("Port:"))
+            self.port_combo = QComboBox()
+            self.port_combo.setMinimumWidth(120)
+            port_row.addWidget(self.port_combo, 1)
+            layout.addLayout(port_row)
+
+            row1 = QHBoxLayout()
+            for text, cmd in [("Refresh", self.refresh_ports),
+                               ("Connect", self.connect_port),
+                               ("Disconnect", self.disconnect_port)]:
+                btn = QPushButton(text)
+                btn.clicked.connect(cmd)
+                row1.addWidget(btn)
+            layout.addLayout(row1)
+
+            row2 = QHBoxLayout()
+            home_btn = QPushButton("🏠 Home")
+            home_btn.clicked.connect(self.home_machine)
+            unlock_btn = QPushButton("🔓 Unlock")
+            unlock_btn.clicked.connect(self.unlock_machine)
+            grbl_btn = QPushButton("$$ Settings")
+            grbl_btn.clicked.connect(self.query_grbl_settings)
+            row2.addWidget(home_btn)
+            row2.addWidget(unlock_btn)
+            row2.addWidget(grbl_btn)
+            row2.addStretch()
+            layout.addLayout(row2)
+            layout.addStretch()
+            return w
+
+        def _build_jog_panel(self):
+            grp = QWidget()
+            layout = QVBoxLayout(grp)
+            layout.setContentsMargins(6, 6, 6, 6)
+
+            info = QLabel("Tap = step  |  Hold (0.35s) = continuous  |  Shift = rapid")
+            info.setStyleSheet("color: blue; font-style: italic;")
+            info.setFont(QFont("Arial", 8))
+            layout.addWidget(info)
+
+            layout.addWidget(QLabel("Distance (mm):"))
+            self.jog_dist_slider = QSlider(Qt.Orientation.Horizontal)
+            self.jog_dist_slider.setRange(1, 500)   # /10 → 0.1–50
+            self.jog_dist_slider.setValue(10)
+            layout.addWidget(self.jog_dist_slider)
+            self.jog_dist_label = QLabel("1.0 mm")
+            self.jog_dist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.jog_dist_label)
+            self.jog_dist_slider.valueChanged.connect(
+                lambda v: self.jog_dist_label.setText(f"{v/10.0:.1f} mm"))
+
+            layout.addWidget(QLabel("Speed (mm/min):"))
+            self.jog_speed_slider = QSlider(Qt.Orientation.Horizontal)
+            self.jog_speed_slider.setRange(10, 2000)
+            self.jog_speed_slider.setValue(500)
+            layout.addWidget(self.jog_speed_slider)
+            self.jog_speed_label = QLabel("500 mm/min")
+            self.jog_speed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.jog_speed_label)
+            self.jog_speed_slider.valueChanged.connect(
+                lambda v: self.jog_speed_label.setText(f"{v} mm/min"))
+
+            grid = QGridLayout()
+            grid.setSpacing(4)
+            grid.addWidget(self._jog_btn("↑↑↑ +Y", lambda: self.jog_axis("Y",  self._jog_dist())), 0, 1)
+            grid.addWidget(self._jog_btn("← -X",   lambda: self.jog_axis("X", -self._jog_dist())), 1, 0)
+            center = QPushButton("CENTER")
+            center.setToolTip("Set work offset to current position")
+            center.clicked.connect(self.jog_zero)
+            grid.addWidget(center, 1, 1)
+            grid.addWidget(self._jog_btn("+X →",   lambda: self.jog_axis("X",  self._jog_dist())), 1, 2)
+            grid.addWidget(self._jog_btn("↓↓↓ -Y", lambda: self.jog_axis("Y", -self._jog_dist())), 2, 1)
+            layout.addLayout(grid)
+
+            z_row = QHBoxLayout()
+            z_row.addWidget(self._jog_btn("↑ +Z", lambda: self.jog_axis("Z",  self._jog_dist())))
+            z_row.addWidget(self._jog_btn("↓ -Z", lambda: self.jog_axis("Z", -self._jog_dist())))
+            z_row.addStretch()
+            layout.addLayout(z_row)
+            layout.addStretch()
+            return grp
+
+        def _jog_btn(self, label, fn):
+            b = QPushButton(label)
+            b.clicked.connect(fn)
+            return b
+
+        def _jog_dist(self):
+            return self.jog_dist_slider.value() / 10.0
+
+        def _jog_speed(self):
+            return self.jog_speed_slider.value()
+
+        def _build_workzero_panel(self):
+            grp = QWidget()
+            layout = QVBoxLayout(grp)
+            layout.setContentsMargins(6, 6, 6, 6)
+
+            hdr = QHBoxLayout()
+            hdr.addWidget(QLabel("Active WCS:"))
+            self.wcs_active_label = QLabel("G54")
+            self.wcs_active_label.setFont(QFont("Arial", 9))
+            hdr.addWidget(self.wcs_active_label)
+            hdr.addStretch()
+            ref_btn = QPushButton("↺")
+            ref_btn.setFixedWidth(30)
+            ref_btn.setToolTip("Fetch stored WCS offsets from GRBL ($#)")
+            ref_btn.clicked.connect(
+                lambda: threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start())
+            hdr.addWidget(ref_btn)
+            layout.addLayout(hdr)
+
+            self.wcs_offset_label = QLabel("Offset  X: —    Y: —    Z: —")
+            self.wcs_offset_label.setFont(QFont("Courier", 8))
+            self.wcs_offset_label.setStyleSheet("color: gray;")
+            layout.addWidget(self.wcs_offset_label)
+
+            zero_row = QHBoxLayout()
+            for axis in ["X", "Y", "Z"]:
+                btn = QPushButton(f"Zero {axis}")
+                btn.clicked.connect(lambda _, a=axis: self.zero_wcs_axis(a))
+                zero_row.addWidget(btn)
+            all_btn = QPushButton("Zero All")
+            all_btn.clicked.connect(self.zero_wcs_all)
+            zero_row.addWidget(all_btn)
+            layout.addLayout(zero_row)
+
+            touch_row = QHBoxLayout()
+            touch_row.addWidget(QLabel("Touch off Z:"))
+            self.touchoff_z_edit = QLineEdit("0.0")
+            self.touchoff_z_edit.setFixedWidth(70)
+            touch_row.addWidget(self.touchoff_z_edit)
+            touch_row.addWidget(QLabel("mm"))
+            set_btn = QPushButton("Set")
+            set_btn.setToolTip("Tell GRBL the current Z is this value in the active WCS.")
+            set_btn.clicked.connect(self.touchoff_z)
+            touch_row.addWidget(set_btn)
+            touch_row.addStretch()
+            layout.addLayout(touch_row)
+
+            # Travel-to buttons
+            travel_lbl = QLabel("Travel to:")
+            travel_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            layout.addWidget(travel_lbl)
+
+            travel_row1 = QHBoxLayout()
+            for label, cmd in [
+                ("→ X0",   lambda: self._travel_to(x=0)),
+                ("→ Y0",   lambda: self._travel_to(y=0)),
+                ("→ Z0",   lambda: self._travel_to(z=0)),
+                ("→ XYZ0", lambda: self._travel_to(x=0, y=0, z=0)),
+            ]:
+                b = QPushButton(label)
+                b.clicked.connect(cmd)
+                travel_row1.addWidget(b)
+            travel_row1.addStretch()
+            layout.addLayout(travel_row1)
+
+            travel_row2 = QHBoxLayout()
+            xy_safe_btn = QPushButton("→ XY0 at Safe Z")
+            xy_safe_btn.setToolTip("Raise to safe clearance height, then move to work X0 Y0")
+            xy_safe_btn.clicked.connect(self._travel_xy_safe)
+            travel_row2.addWidget(xy_safe_btn)
+            travel_row2.addStretch()
+            layout.addLayout(travel_row2)
+
+            layout.addStretch()
+            return grp
+
+        def _build_settings_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(10)
+
+            def _section(title):
+                lbl = QLabel(title)
+                lbl.setStyleSheet("font-weight: bold; color: #444;")
+                lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                layout.addWidget(lbl)
+
+            def _field(label, attr, tooltip=""):
+                row = QHBoxLayout()
+                lbl = QLabel(label)
+                lbl.setFixedWidth(170)
+                row.addWidget(lbl)
+                edit = QLineEdit(str(getattr(self.config, attr)))
+                edit.setFixedWidth(80)
+                if tooltip:
+                    edit.setToolTip(tooltip)
+                def _save(text, a=attr):
+                    try:
+                        val = float(text)
+                        setattr(self.config, a, int(val) if isinstance(getattr(self.config, a), int) else val)
+                        save_config(self.config)
+                    except ValueError:
+                        pass
+                edit.editingFinished.connect(lambda e=edit, a=attr: _save(e.text(), a))
+                row.addWidget(edit)
+                row.addStretch()
+                layout.addLayout(row)
+                return edit
+
+            _section("Pen / Drawing")
+            self._cfg_draw_speed  = _field("Draw speed (mm/min):", "draw_speed",
+                                           "G1 feed rate while drawing — saved to OSConfig and patched into the vpype .cfg")
+            # When draw speed changes, also patch the F value in the vpype .cfg file
+            self._cfg_draw_speed.editingFinished.connect(self._sync_draw_speed_to_vpype_cfg)
+            self._cfg_pen_lift    = _field("Lift Z between segments (mm):", "pen_lift_z",
+                                           "How high Z rises between strokes inside vpype layer G-code")
+            self._cfg_pen_contact = _field("Contact Z (pen on paper) (mm):", "pen_contact_z",
+                                           "Z position when the pen is on the paper surface")
+
+            _section("Tool Changes")
+            self._cfg_tc_unplug   = _field("Unplug offset (mm):",  "tc_unplug_mm",
+                                           "Y distance behind dock centre for approach/release")
+            self._cfg_tc_rapid    = _field("Rapid speed (mm/min):", "tc_rapid",
+                                           "Travel speed for non-contact tool-change moves")
+            self._cfg_tc_approach = _field("Approach speed (mm/min):", "tc_approach",
+                                           "Slow docking/undocking speed")
+
+            layout.addStretch()
+            return w
+
+        def _build_tool_panel(self):
+            splitter = QSplitter(Qt.Orientation.Vertical)
+            splitter.setChildrenCollapsible(False)
+            splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+            # --- top: tool list ---
+            list_widget = QWidget()
+            ll = QVBoxLayout(list_widget)
+            ll.setContentsMargins(0, 0, 0, 0)
+            ll.setSpacing(2)
+            hdr = QLabel("Tools:")
+            hdr.setFont(QFont("Arial", 10))
+            hdr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            ll.addWidget(hdr)
+            self.tools_list = QListWidget()
+            self.tools_list.setFont(QFont("Courier", 9))
+            self.tools_list.setMinimumHeight(40)
+            self.tools_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+            self.tools_list.currentRowChanged.connect(self.on_tool_select)
+            ll.addWidget(self.tools_list)
+            splitter.addWidget(list_widget)
+
+            # --- bottom: edit form + action buttons + pen shortcuts ---
+            controls_widget = QWidget()
+            cl = QVBoxLayout(controls_widget)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(6)
+
+            edit_grp = QGroupBox("Edit Tool")
+            eg = QGridLayout(edit_grp)
+            eg.setSpacing(4)
+            eg.addWidget(QLabel("Name:"), 0, 0)
+            self.tool_name_edit = QLineEdit()
+            eg.addWidget(self.tool_name_edit, 0, 1)
+            eg.addWidget(QLabel("Color:"), 0, 2)
+            self.tool_color_edit = QLineEdit()
+            eg.addWidget(self.tool_color_edit, 0, 3)
+            for row, (lx, ax, ly, ay) in enumerate([
+                ("X:", "tool_x_edit", "Y:", "tool_y_edit"),
+                ("Z:", "tool_z_edit", "Safe Z:", "tool_safe_z_edit"),
+            ], start=1):
+                eg.addWidget(QLabel(lx), row, 0)
+                ex = QLineEdit("0.0")
+                setattr(self, ax, ex)
+                eg.addWidget(ex, row, 1)
+                eg.addWidget(QLabel(ly), row, 2)
+                ey = QLineEdit("0.0" if ay != "tool_safe_z_edit" else "50")
+                setattr(self, ay, ey)
+                eg.addWidget(ey, row, 3)
+            eg.setColumnStretch(1, 1)
+            eg.setColumnStretch(3, 1)
+            cl.addWidget(edit_grp)
+
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(4)
+            for text, cmd in [
+                ("➕ Add", self.add_tool),
+                ("💾 Save", self.save_tool),
+                ("🎯 Go To", self.go_to_tool),
+                ("🗑️ Delete", self.delete_tool),
+                ("🔄 Refresh", self.refresh_tool_list),
+                ("📤 Export TOML", self.export_toml),
+            ]:
+                b = QPushButton(text)
+                b.clicked.connect(cmd)
+                btn_row.addWidget(b)
+            cl.addLayout(btn_row)
+
+            pen_grp = QGroupBox("Pen Shortcuts")
+            pen_inner = QVBoxLayout(pen_grp)
+            pen_inner.setSpacing(2)
+            self.pen_quarter_speed_cb = QCheckBox("¼ speed")
+            self.pen_quarter_speed_cb.setToolTip("Move at 25% speed — useful for verifying pen positions")
+            pen_inner.addWidget(self.pen_quarter_speed_cb)
+            self.pen_buttons_widget = QWidget()
+            self.pen_buttons_layout = QVBoxLayout(self.pen_buttons_widget)
+            self.pen_buttons_layout.setContentsMargins(0, 0, 0, 0)
+            self.pen_buttons_layout.setSpacing(2)
+            pen_inner.addWidget(self.pen_buttons_widget)
+            cl.addWidget(pen_grp)
+            cl.addStretch()   # collect extra space at bottom, don't stretch widgets
+
+            # wrap controls in a scroll area so dragging the splitter adds
+            # whitespace at the bottom rather than stretching fields/buttons
+            controls_scroll = QScrollArea()
+            controls_scroll.setWidgetResizable(True)
+            controls_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            controls_scroll.setWidget(controls_widget)
+
+            splitter.addWidget(controls_scroll)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 0)
+            splitter.setSizes([300, 400])
+            return splitter
+
+        def _build_testpen_panel(self):
+            container = QWidget()
+            vl = QVBoxLayout(container)
+            vl.setContentsMargins(6, 6, 6, 6)
+            vl.setSpacing(4)
+
+            fields_widget = QWidget()
+            layout = QGridLayout(fields_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            fields = [
+                ("Number of pens to cycle:", "testpen_count_edit",    "3"),
+                ("Number of cycles:",        "testpen_cycles_edit",   "5"),
+                ("Rapid speed (mm/min):",    "testpen_rapid_edit",    "800"),
+                ("Approach speed (mm/min):", "testpen_approach_edit", "50"),
+                ("Overshoot (mm):",          "testpen_overshoot_edit","0.03"),
+                ("Unplug offset (mm):",      "testpen_unplug_edit",   "20.0"),
+                ("Lift offset (mm):",        "testpen_lift_edit",     "50.0"),
+            ]
+            for row, (label, attr, default) in enumerate(fields):
+                layout.addWidget(QLabel(label), row, 0)
+                edit = QLineEdit(default)
+                setattr(self, attr, edit)
+                layout.addWidget(edit, row, 1)
+            gen = QPushButton("Generate Test G-code")
+            gen.clicked.connect(self.generate_testpen_gcode)
+            layout.addWidget(gen, len(fields), 0, 1, 2)
+
+            vl.addWidget(fields_widget)
+            vl.addStretch()
+            return container
+
+        def _build_vpype_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(6, 6, 6, 6)
+
+            svg_row = QHBoxLayout()
+            svg_row.addWidget(QLabel("SVG:"))
+            self.vpype_svg_edit = QLineEdit()
+            svg_row.addWidget(self.vpype_svg_edit, 1)
+            b = QPushButton("Browse")
+            b.clicked.connect(self.browse_vpype_svg)
+            svg_row.addWidget(b)
+            layout.addLayout(svg_row)
+
+            self.svg_layer_grp = QGroupBox("Detected Layers")
+            sll = QVBoxLayout(self.svg_layer_grp)
+            self.svg_layer_hint = QLabel("Load an SVG to see layers & pen order")
+            self.svg_layer_hint.setStyleSheet("color: gray; font-style: italic;")
+            self.svg_layer_hint.setFont(QFont("Arial", 8))
+            sll.addWidget(self.svg_layer_hint)
+            self.svg_layer_rows_widget = QWidget()
+            self.svg_layer_rows_layout = QVBoxLayout(self.svg_layer_rows_widget)
+            self.svg_layer_rows_layout.setContentsMargins(0, 0, 0, 0)
+            self.svg_layer_rows_layout.setSpacing(2)
+            sll.addWidget(self.svg_layer_rows_widget)
+            self.svg_pen_order_label = QLabel("")
+            self.svg_pen_order_label.setFont(QFont("Arial", 8))
+            self.svg_pen_order_label.setStyleSheet("color: #555; font-weight: bold;")
+            sll.addWidget(self.svg_pen_order_label)
+            layout.addWidget(self.svg_layer_grp)
+
+            out_row = QHBoxLayout()
+            out_row.addWidget(QLabel("Output:"))
+            self.vpype_output_edit = QLineEdit()
+            out_row.addWidget(self.vpype_output_edit, 1)
+            bb = QPushButton("Browse")
+            bb.clicked.connect(self.browse_vpype_output)
+            out_row.addWidget(bb)
+            layout.addLayout(out_row)
+
+            opt_row = QHBoxLayout()
+            self.vpype_linemerge_cb   = QCheckBox("linemerge");   self.vpype_linemerge_cb.setChecked(True)
+            self.vpype_linesort_cb    = QCheckBox("linesort");    self.vpype_linesort_cb.setChecked(True)
+            self.vpype_reloop_cb      = QCheckBox("reloop")
+            self.vpype_toolchanges_cb = QCheckBox("tool changes"); self.vpype_toolchanges_cb.setChecked(True)
+            for cb in [self.vpype_linemerge_cb, self.vpype_linesort_cb,
+                       self.vpype_reloop_cb, self.vpype_toolchanges_cb]:
+                opt_row.addWidget(cb)
+            layout.addLayout(opt_row)
+
+            simp_row = QHBoxLayout()
+            self.vpype_linesimplify_cb = QCheckBox("linesimplify"); self.vpype_linesimplify_cb.setChecked(True)
+            simp_row.addWidget(self.vpype_linesimplify_cb)
+            simp_row.addWidget(QLabel("tol (mm):"))
+            self.vpype_simplify_tol_edit = QLineEdit("0.05")
+            self.vpype_simplify_tol_edit.setFixedWidth(60)
+            simp_row.addWidget(self.vpype_simplify_tol_edit)
+            simp_row.addStretch()
+            gen_btn = QPushButton("Generate via vpype")
+            gen_btn.clicked.connect(self.run_vpype)
+            simp_row.addWidget(gen_btn)
+            layout.addLayout(simp_row)
+            layout.addStretch()
+            return w
+
+        def _build_gcode_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(6, 6, 6, 6)
+
+            file_row = QHBoxLayout()
+            file_row.addWidget(QLabel("File:"))
+            self.gcode_entry = QLineEdit()
+            file_row.addWidget(self.gcode_entry, 1)
+            bb = QPushButton("Browse")
+            bb.clicked.connect(self.browse_gcode_file)
+            file_row.addWidget(bb)
+            layout.addLayout(file_row)
+
+            self.gcode_home_first_cb = QCheckBox("Home before run")
+            layout.addWidget(self.gcode_home_first_cb)
+
+            self.gcode_status_label = QLabel("No file loaded")
+            layout.addWidget(self.gcode_status_label)
+
+            self.gcode_progress = QProgressBar()
+            self.gcode_progress.setRange(0, 100)
+            layout.addWidget(self.gcode_progress)
+
+            # layer color toggles — populated after file load, hidden for single-color files
+            self.layer_toggles_widget = QWidget()
+            self.layer_toggles_layout = QHBoxLayout(self.layer_toggles_widget)
+            self.layer_toggles_layout.setContentsMargins(0, 0, 0, 0)
+            self.layer_toggles_layout.setSpacing(6)
+            self.layer_toggles_widget.hide()
+            layout.addWidget(self.layer_toggles_widget)
+
+            pv_split = QSplitter(Qt.Orientation.Vertical)
+            pv_split.setChildrenCollapsible(False)
+            pv_split.setHandleWidth(6)
+
+            # --- top: text viewer ---
+            viewer_tabs = QSplitter(Qt.Orientation.Horizontal)
+            viewer_tabs.setChildrenCollapsible(False)
+
+            viewer_grp = QGroupBox("G-code Text Viewer")
+            vl = QVBoxLayout(viewer_grp)
+            self.gcode_list = QListWidget()
+            self.gcode_list.setFont(QFont("Courier", 8))
+            self.gcode_list.setMinimumHeight(40)
+            self.gcode_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+            vl.addWidget(self.gcode_list)
+            vbr = QHBoxLayout()
+            for text, cmd in [
+                ("Send Selected Line", self.send_selected_gcode_line),
+                ("Send Next Line",     self.send_next_gcode_line),
+                ("Reset Line Index",   self.reset_gcode_line_index),
+            ]:
+                b = QPushButton(text)
+                b.clicked.connect(cmd)
+                vbr.addWidget(b)
+            vl.addLayout(vbr)
+            viewer_tabs.addWidget(viewer_grp)
+
+            grbl_grp = QGroupBox("GRBL Log")
+            gl = QVBoxLayout(grbl_grp)
+            self.grbl_log_list = QListWidget()
+            self.grbl_log_list.setFont(QFont("Courier", 8))
+            self.grbl_log_list.setMinimumHeight(40)
+            self.grbl_log_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+            gl.addWidget(self.grbl_log_list)
+            clr_btn = QPushButton("Clear")
+            clr_btn.clicked.connect(self.grbl_log_list.clear)
+            gl.addWidget(clr_btn)
+            viewer_tabs.addWidget(grbl_grp)
+            viewer_tabs.setSizes([9999, 9999])
+
+            pv_split.addWidget(viewer_tabs)
+
+            # --- bottom: preview canvas ---
+            preview_container = QWidget()
+            pcl = QVBoxLayout(preview_container)
+            pcl.setContentsMargins(0, 0, 0, 0)
+            pcl.setSpacing(2)
+            preview_lbl = QLabel("Gcode Visualizer")
+            preview_lbl.setStyleSheet("font-weight: bold; color: #555;")
+            preview_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            pcl.addWidget(preview_lbl)
+            self.preview_widget = GcodePreviewWidget()
+            self.preview_widget.setMinimumHeight(150)
+            self.preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+            pcl.addWidget(self.preview_widget)
+            pv_split.addWidget(preview_container)
+
+            pv_split.setStretchFactor(0, 0)
+            pv_split.setStretchFactor(1, 1)
+            pv_split.setSizes([80, 300])
+            layout.addWidget(pv_split, 1)
+
+            # --- feed overrides (placed above run buttons, away from accidental clicks) ---
+            def _override_row(label, attr):
+                row = QHBoxLayout()
+                lbl = QLabel(label)
+                lbl.setFixedWidth(90)
+                row.addWidget(lbl)
+                slider = QSlider(Qt.Orientation.Horizontal)
+                slider.setRange(10, 300)
+                slider.setValue(100)
+                slider.setTickInterval(25)
+                slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+                row.addWidget(slider, 1)
+                val_lbl = QLabel("100%")
+                val_lbl.setFixedWidth(42)
+                val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                row.addWidget(val_lbl)
+                reset = QPushButton("↺")
+                reset.setFixedWidth(24)
+                reset.setToolTip("Reset to 100%")
+                reset.clicked.connect(lambda: slider.setValue(100))
+                row.addWidget(reset)
+                def _on_change(v, lbl=val_lbl):
+                    lbl.setText(f"{v}%")
+                    lbl.setStyleSheet(
+                        "color: red; font-weight: bold;" if v != 100 else "")
+                slider.valueChanged.connect(_on_change)
+                setattr(self, attr, slider)
+                return row
+
+            layout.addLayout(_override_row("Draw:", "feed_override_slider"))
+            layout.addLayout(_override_row("TC:", "tc_override_slider"))
+
+            # --- run controls pinned to bottom ---
+            btn_row = QHBoxLayout()
+            self.gcode_run_btn = QPushButton("▶ Run")
+            self.gcode_run_btn.clicked.connect(self.run_gcode)
+            self.gcode_pause_btn = QPushButton("⏸ Pause")
+            self.gcode_pause_btn.clicked.connect(self.toggle_pause_gcode)
+            self.gcode_pause_btn.setEnabled(False)
+            self.gcode_stop_btn = QPushButton("⏹ Stop")
+            self.gcode_stop_btn.clicked.connect(self.stop_gcode)
+            self.gcode_stop_btn.setEnabled(False)
+            for b in [self.gcode_run_btn, self.gcode_pause_btn, self.gcode_stop_btn]:
+                btn_row.addWidget(b)
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+            return w
+
+        # ------------------------------------------------------------------
+        # Signal slots
+        # ------------------------------------------------------------------
+
+        def _on_update_status(self, state):
+            ok = {"Idle", "Run", "Jog", "Hold", "Home", "Check", "Connected"}
+            sym = "🟢" if state in ok else "🔴"
+            self.status_label.setText(f"{sym} {state.upper()}")
+            if self.config.port:
+                self.port_label.setText(f"Port: {self.config.port}")
+
+        def _on_update_dro(self, mpos, wpos):
+            self.machine_label.setText(
+                f"X: {mpos['x']:.2f}  Y: {mpos['y']:.2f}  Z: {mpos['z']:.2f}")
+            self.work_label.setText(
+                f"X: {wpos['x']:.2f}  Y: {wpos['y']:.2f}  Z: {wpos['z']:.2f}")
+
+        def _on_wcs_offset_ready(self, x, y, z):
+            self.wcs_offset_label.setText(f"Offset  X:{x:.3f}  Y:{y:.3f}  Z:{z:.3f}")
+
+        # ------------------------------------------------------------------
+        # Serial / GRBL
+        # ------------------------------------------------------------------
+
+        def _grbl_status_safe(self) -> str:
+            try:
+                self.port.reset_input_buffer()
+                self.port.write(b"?\n")
+                for _ in range(10):
+                    line = self.port.readline().decode("utf-8", errors="ignore").strip()
+                    if line.startswith("<"):
+                        return line
+                return ""
+            except Exception:
+                return ""
+
+        def _poll_status(self):
+            if self.port and not self._poll_running:
+                threading.Thread(target=self._update_position_internal, daemon=True).start()
+
+        def _update_position_internal(self):
+            self._poll_running = True
+            try:
+                if not self.port or self._continuous_jog_active or self.gcode_running:
+                    return
+                with self._serial_lock:
+                    status = self._grbl_status_safe()
+                if not status:
+                    return
+                state = status[1:].split("|")[0] if "|" in status else "Connected"
+                # WCO arrives periodically and after any WCS change — always update when present
+                if "|WCO:" in status:
+                    s = status.split("|WCO:")[1].split("|")[0].rstrip(">")
+                    cx, cy, cz = map(float, s.split(","))
+                    self.work_offset = {"x": cx, "y": cy, "z": cz}
+                if "|MPos:" in status:
+                    s = status.split("|MPos:")[1].split("|")[0].rstrip(">")
+                    x, y, z = map(float, s.split(","))
+                    self.machine_pos = {"x": x, "y": y, "z": z}
+                    self.work_pos = {
+                        "x": x - self.work_offset["x"],
+                        "y": y - self.work_offset["y"],
+                        "z": z - self.work_offset["z"],
+                    }
+                elif "|WPos:" in status:
+                    s = status.split("|WPos:")[1].split("|")[0].rstrip(">")
+                    wx, wy, wz = map(float, s.split(","))
+                    self.work_pos = {"x": wx, "y": wy, "z": wz}
+                self.signals.update_status.emit(state)
+                self.signals.update_dro.emit(self.machine_pos, self.work_pos)
+            except Exception:
+                pass
+            finally:
+                self._poll_running = False
+
+        def _query_grbl_max_rates(self):
+            if not self.port:
+                return
+            try:
+                with self._serial_lock:
+                    self.port.write(b"$$\n")
+                    time.sleep(0.3)
+                    lines = []
+                    while self.port.in_waiting:
+                        line = self.port.readline().decode("utf-8", errors="ignore").strip()
+                        if line:
+                            lines.append(line)
+                rates = {}
+                for line in lines:
+                    m = re.match(r"\$(\d+)=([\d.]+)", line)
+                    if m:
+                        rates[int(m.group(1))] = float(m.group(2))
+                if 110 in rates and 111 in rates:
+                    self.rapid_jog_speed = int(min(rates[110], rates[111]))
+                # Store all max rates for display
+                self._grbl_max_rates = {
+                    k: int(v) for k, v in rates.items()
+                    if k in (110, 111, 112)
+                }
+                self.signals.gcode_status.connect  # ensure signal exists
+                x = rates.get(110, '?')
+                y = rates.get(111, '?')
+                z = rates.get(112, '?')
+                # Show in status label briefly
+                QTimer.singleShot(0, lambda: self.gcode_status_label.setText(
+                    f"GRBL max rates — X:{int(x) if isinstance(x,float) else x}  "
+                    f"Y:{int(y) if isinstance(y,float) else y}  "
+                    f"Z:{int(z) if isinstance(z,float) else z}  mm/min"))
+            except Exception:
+                pass
+
+        def _refresh_wcs_offsets(self):
+            if not self.port:
+                return
+            try:
+                with self._serial_lock:
+                    self.port.write(b"$#\n")
+                    time.sleep(0.25)
+                    lines = []
+                    while self.port.in_waiting:
+                        line = self.port.readline().decode("utf-8", errors="ignore").strip()
+                        if line:
+                            lines.append(line)
+                wcs = self.wcs_combo.currentText()
+                for line in lines:
+                    if line.startswith(f"[{wcs}:"):
+                        inner = line[len(f"[{wcs}:"):-1]
+                        parts = inner.split(",")
+                        if len(parts) == 3:
+                            x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                            self.work_offset = {"x": x, "y": y, "z": z}
+                            self.signals.wcs_offset_ready.emit(x, y, z)
+                            return
+            except Exception:
+                pass
+
+        def wcs_to_p(self, wcs: str) -> int:
+            return {"G54": 1, "G55": 2, "G56": 3, "G57": 4, "G58": 5, "G59": 6}.get(wcs, 1)
+
+        # ------------------------------------------------------------------
+        # Connection
+        # ------------------------------------------------------------------
+
+        def refresh_ports(self):
+            ports = list_serial_ports()
+            names = [dev for dev, _ in ports]
+            self.port_combo.blockSignals(True)
+            self.port_combo.clear()
+            self.port_combo.addItems(names)
+            if self.config.port in names:
+                self.port_combo.setCurrentText(self.config.port)
+            elif names:
+                self.port_combo.setCurrentIndex(0)
+            self.port_combo.blockSignals(False)
+
+        def connect_port(self):
+            port_name = self.port_combo.currentText()
+            if not port_name:
+                QMessageBox.critical(self, "Error", "Select a port first")
+                return
+            def _do():
+                try:
+                    if self.port:
+                        self.port.close()
+                    self.port = open_port(port_name, self.config.baud)
+                    self.config.port = port_name
+                    save_config(self.config)
+                    self.apply_wcs_selection(silent=True)
+                    self._update_position_internal()
+                    self._query_grbl_max_rates()
+                    self._refresh_wcs_offsets()
+                    self.signals.show_info.emit("Success", f"Connected to {port_name}")
+                except Exception as e:
+                    self.signals.show_error.emit("Error", f"Failed to connect: {e}")
+            threading.Thread(target=_do, daemon=True).start()
+
+        def disconnect_port(self):
+            if not self.port:
+                QMessageBox.information(self, "Info", "Not connected")
+                return
+            try:
+                self.port.close()
+            except Exception:
+                pass
+            self.port = None
+            self.status_label.setText("🔴 DISCONNECTED")
+            self.port_label.setText("Port: None")
+            QMessageBox.information(self, "Disconnected", "Port closed")
+
+        def query_grbl_settings(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            def _do():
+                try:
+                    with self._serial_lock:
+                        self.port.reset_input_buffer()
+                        self.port.write(b"$$\n")
+                        time.sleep(0.5)
+                        lines = []
+                        while self.port.in_waiting:
+                            line = self.port.readline().decode("utf-8", errors="ignore").strip()
+                            if line:
+                                lines.append(line)
+                    text = "\n".join(lines) if lines else "(no response)"
+                    self.signals.show_info.emit("GRBL $$ Settings", text)
+                except Exception as e:
+                    self.signals.show_error.emit("Error", str(e))
+            threading.Thread(target=_do, daemon=True).start()
+
+        def unlock_machine(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                with self._serial_lock:
+                    grbl_send(self.port, "$X")
+                QMessageBox.information(self, "Unlocked", "Machine unlocked")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Unlock failed: {e}")
+
+        def home_machine(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            if QMessageBox.question(self, "Confirm", "Home the machine?") == QMessageBox.StandardButton.Yes:
+                try:
+                    with self._serial_lock:
+                        grbl_home(self.port, verbose=False)
+                    QTimer.singleShot(1000, self._update_position_internal)
+                    QMessageBox.information(self, "Success", "Homing complete")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Home failed: {e}")
+
+        # ------------------------------------------------------------------
+        # WCS
+        # ------------------------------------------------------------------
+
+        def _on_wcs_combo_changed(self, text):
+            self.wcs_active_label.setText(text)
+            self.apply_wcs_selection(silent=False)
+            threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start()
+
+        def apply_wcs_selection(self, silent=False):
+            if not self.port:
+                if not silent:
+                    QMessageBox.warning(self, "Warning", "Not connected; WCS will apply after connect")
+                return
+            try:
+                wcs = self.wcs_combo.currentText()
+                with self._serial_lock:
+                    grbl_send(self.port, wcs)
+                QTimer.singleShot(200, self._update_position_internal)
+                if not silent:
+                    QMessageBox.information(self, "WCS", f"Active work coordinate system: {wcs}")
+            except Exception as e:
+                if not silent:
+                    QMessageBox.critical(self, "Error", f"Failed to set WCS: {e}")
+
+        def zero_wcs_axis(self, axis: str):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                wcs = self.wcs_combo.currentText()
+                with self._serial_lock:
+                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} {axis}0")
+                QTimer.singleShot(200, self._update_position_internal)
+                threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start()
+                QMessageBox.information(self, "Work Zero", f"{wcs} {axis} set to 0")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to zero {axis}: {e}")
+
+        def zero_wcs_all(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                wcs = self.wcs_combo.currentText()
+                with self._serial_lock:
+                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
+                QTimer.singleShot(200, self._update_position_internal)
+                threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start()
+                QMessageBox.information(self, "Work Zero", f"{wcs} X/Y/Z set to 0")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to zero all: {e}")
+
+        def touchoff_z(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                val = float(self.touchoff_z_edit.text())
+                wcs = self.wcs_combo.currentText()
+                with self._serial_lock:
+                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} Z{val:.3f}")
+                QTimer.singleShot(200, self._update_position_internal)
+                QTimer.singleShot(350, lambda: threading.Thread(
+                    target=self._refresh_wcs_offsets, daemon=True).start())
+                QMessageBox.information(self, "Touch Off",
+                    f"{wcs} Z set to {val:.3f} mm at current position")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Touch off failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Jogging
+        # ------------------------------------------------------------------
+
+        def jog_axis(self, axis, distance):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                with self._serial_lock:
+                    grbl_jog(self.port, axis, distance, self._jog_speed())
+                self._update_position_internal()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Jog failed: {e}")
+
+        def jog_zero(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            try:
+                wcs = self.wcs_combo.currentText()
+                with self._serial_lock:
+                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
+                QTimer.singleShot(200, self._update_position_internal)
+                QMessageBox.information(self, "Info", f"{wcs} zero set to current position")
+            except Exception as e:
+                self.work_offset = self.machine_pos.copy()
+                QMessageBox.warning(self, "Warning", f"Set local work offset only. Reason: {e}")
+
+        def eventFilter(self, obj, event):
+            t = event.type()
+            if t in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                focused = QApplication.focusWidget()
+                if isinstance(focused, QLineEdit):
+                    return False
+                key = event.key()
+                if key in self._JOG_KEY_MAP or key == Qt.Key.Key_Shift:
+                    if t == QEvent.Type.KeyPress:
+                        self.keyPressEvent(event)
+                    else:
+                        self.keyReleaseEvent(event)
+                    return True
+            return False
+
+        _JOG_KEY_MAP = {
+            Qt.Key.Key_Up:       ("Y",  1),
+            Qt.Key.Key_Down:     ("Y", -1),
+            Qt.Key.Key_Left:     ("X", -1),
+            Qt.Key.Key_Right:    ("X",  1),
+            Qt.Key.Key_U:        ("Z",  1),
+            Qt.Key.Key_D:        ("Z", -1),
+            Qt.Key.Key_PageUp:   ("Z",  1),
+            Qt.Key.Key_PageDown: ("Z", -1),
+        }
+
+        def _jog_cancel(self):
+            """Real-time jog cancel — invalidates pending send threads, no lock needed."""
+            self._jog_seq += 1
+            if self.port:
+                try:
+                    self.port.write(b"\x85")
+                    self.port.flush()
+                except Exception:
+                    pass
+
+        def _start_continuous_jog(self):
+            """Send a single combined jog command for all currently held axes."""
+            if not self.jog_keys_held or not self.port:
+                return
+            self._continuous_jog_active = True
+            self._jog_seq += 1
+            seq = self._jog_seq
+            speed = self.rapid_jog_speed if self._shift_held else self._jog_speed()
+            parts = []
+            for key in list(self.jog_keys_held):
+                axis, sign = self._JOG_KEY_MAP[key]
+                parts.append(f"{axis}{sign * 10000:.1f}")
+            cmd = f"$J=G91 G21 {' '.join(parts)} F{speed:.1f}\n".encode()
+            def _send():
+                if self._jog_seq != seq:
+                    return   # superseded by a newer cancel or jog command
+                try:
+                    with self._serial_lock:
+                        if self._jog_seq == seq:   # re-check after acquiring lock
+                            self.port.write(cmd)
+                except Exception:
+                    pass
+            threading.Thread(target=_send, daemon=True).start()
+
+        def _restart_status_poll(self):
+            self._update_position_internal()
+            if not self._status_timer.isActive():
+                self._status_timer.start(500)
+
+        _JOG_RELEASE_DEBOUNCE_MS = 15   # absorbs X11 fake auto-repeat release+press pairs (< 5ms)
+
+        def keyPressEvent(self, event):
+            if event.isAutoRepeat():
+                return
+            key = event.key()
+
+            # If a debounced release is pending for this key it was X11 auto-repeat — cancel it
+            if key in self._release_timers:
+                self._release_timers.pop(key).stop()
+                return
+
+            if key == Qt.Key.Key_Shift:
+                self._shift_held = True
+                if self.jog_keys_held and self.port:
+                    self._jog_cancel()
+                    self._start_continuous_jog()
+                return
+
+            if not self.port or key not in self._JOG_KEY_MAP:
+                super().keyPressEvent(event)
+                return
+            if key in self.jog_keys_held:
+                return
+
+            if not self.jog_keys_held:
+                self._status_timer.stop()
+
+            was_jogging = bool(self.jog_keys_held)
+            self.jog_keys_held.add(key)
+
+            if was_jogging:
+                self._jog_cancel()
+                self._start_continuous_jog()
+            else:
+                self._start_continuous_jog()
+
+        def keyReleaseEvent(self, event):
+            if event.isAutoRepeat():
+                return
+            key = event.key()
+
+            if key == Qt.Key.Key_Shift:
+                # Shift release: just clear the flag, don't cancel or restart.
+                # The running jog continues at whatever speed it was started with.
+                # Speed change on Shift release introduces races; user can re-press
+                # the arrow key to get normal speed.
+                self._shift_held = False
+                return
+
+            if key not in self._JOG_KEY_MAP:
+                super().keyReleaseEvent(event)
+                return
+
+            if key in self._release_timers:
+                self._release_timers.pop(key).stop()
+            t = QTimer()
+            t.setSingleShot(True)
+            t.timeout.connect(lambda k=key: self._do_jog_release(k))
+            self._release_timers[key] = t
+            t.start(self._JOG_RELEASE_DEBOUNCE_MS)
+
+        def _do_jog_release(self, key):
+            self._release_timers.pop(key, None)
+            self.jog_keys_held.discard(key)
+            # Only send cancel when ALL jog keys are released.
+            # Never restart for remaining keys — that's what caused the
+            # one-motor-keeps-running bug on simultaneous release.
+            if not self.jog_keys_held:
+                self._jog_cancel()
+                self._continuous_jog_active = False
+                QTimer.singleShot(300, self._restart_status_poll)
+
+        # ------------------------------------------------------------------
+        # Tool management
+        # ------------------------------------------------------------------
+
+        def refresh_tool_list(self):
+            self.tools_list.clear()
+            for t in self.tools:
+                self.tools_list.addItem(
+                    f"{t.name} ({t.color}) - X:{t.x:.1f} Y:{t.y:.1f} Z:{t.z:.1f}")
+
+        def on_tool_select(self, idx):
+            if idx < 0 or idx >= len(self.tools):
+                return
+            t = self.tools[idx]
+            self.tool_name_edit.setText(t.name)
+            self.tool_color_edit.setText(t.color)
+            self.tool_x_edit.setText(str(t.x))
+            self.tool_y_edit.setText(str(t.y))
+            self.tool_z_edit.setText(str(t.z))
+            self.tool_safe_z_edit.setText(str(t.safe_z))
+
+        def _read_tool_form(self) -> Tool:
+            return Tool(
+                name=self.tool_name_edit.text().strip(),
+                color=self.tool_color_edit.text().strip(),
+                x=float(self.tool_x_edit.text()),
+                y=float(self.tool_y_edit.text()),
+                z=float(self.tool_z_edit.text()),
+                safe_z=float(self.tool_safe_z_edit.text()),
+            )
+
+        def add_tool(self):
+            try:
+                tool = self._read_tool_form()
+            except Exception:
+                QMessageBox.critical(self, "Error", "Invalid coordinates")
+                return
+            if not tool.name:
+                QMessageBox.warning(self, "Warning", "Enter a tool name")
+                return
+            add_or_update_tool(self.tools, tool)
+            save_tools(tools=self.tools)
+            self.refresh_tool_list()
+            self.refresh_pen_buttons()
+            QMessageBox.information(self, "Success", f"Tool '{tool.name}' added")
+
+        def save_tool(self):
+            idx = self.tools_list.currentRow()
+            if idx < 0:
+                QMessageBox.warning(self, "Warning", "Select a tool to edit")
+                return
+            try:
+                tool = self._read_tool_form()
+            except Exception:
+                QMessageBox.critical(self, "Error", "Invalid coordinates")
+                return
+            if not tool.name:
+                QMessageBox.warning(self, "Warning", "Enter a tool name")
+                return
+            self.tools[idx] = tool
+            save_tools(tools=self.tools)
+            self.refresh_tool_list()
+            self.refresh_pen_buttons()
+            QMessageBox.information(self, "Success", f"Tool '{tool.name}' updated")
+
+        def go_to_tool(self):
+            idx = self.tools_list.currentRow()
+            if idx < 0:
+                QMessageBox.warning(self, "Warning", "Select a tool")
+                return
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            t = self.tools[idx]
+            try:
+                if t.safe_z != t.z:
+                    with self._serial_lock:
+                        grbl_move_abs(self.port, t.x, t.y, t.safe_z, use_machine_coords=True)
+                    time.sleep(0.5)
+                with self._serial_lock:
+                    grbl_move_abs(self.port, t.x, t.y, t.z, use_machine_coords=True)
+                QTimer.singleShot(1000, self._update_position_internal)
+                QMessageBox.information(self, "Success", f"Moved to {t.name}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Move failed: {e}")
+
+        def delete_tool(self):
+            idx = self.tools_list.currentRow()
+            if idx < 0:
+                QMessageBox.warning(self, "Warning", "Select a tool")
+                return
+            t = self.tools[idx]
+            if QMessageBox.question(self, "Confirm", f"Delete '{t.name}'?") == QMessageBox.StandardButton.Yes:
+                remove_tool(self.tools, t.name)
+                save_tools(tools=self.tools)
+                self.refresh_tool_list()
+                self.refresh_pen_buttons()
+                QMessageBox.information(self, "Success", f"Deleted '{t.name}'")
+
+        def export_toml(self):
+            try:
+                from toml import dumps as toml_dumps
+            except ImportError:
+                QMessageBox.critical(self, "Error", "toml module not installed. Run: pip install toml")
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export TOML", "pl0tb0t_tools_export.toml", "TOML files (*.toml)")
+            if not path:
+                return
+            data = {"tools": [{"name": t.name, "color": t.color,
+                                "x": t.x, "y": t.y, "z": t.z, "safe_z": t.safe_z}
+                               for t in self.tools]}
+            with open(path, "w") as f:
+                f.write(toml_dumps(data))
+            QMessageBox.information(self, "Exported", f"Exported to {path}")
+
+        def refresh_pen_buttons(self):
+            while self.pen_buttons_layout.count():
+                child = self.pen_buttons_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            if not self.tools:
+                self.pen_buttons_layout.addWidget(QLabel("(No tools)"))
+                return
+            for tool in self.tools:
+                row = QWidget()
+                row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.setSpacing(4)
+                lbl = QLabel(tool.name)
+                lbl.setFixedWidth(80)
+                rl.addWidget(lbl)
+                for text, fn in [
+                    ("⇑ SafeY↑", lambda *_, t=tool: self.move_to_pen_safe_y(t, use_safe_z=True)),
+                    ("⇓ SafeY↓", lambda *_, t=tool: self.move_to_pen_safe_y(t, use_safe_z=False)),
+                    ("↑ Up",     lambda *_, t=tool: self.move_to_pen_safe_z(t)),
+                    ("↓ Down",   lambda *_, t=tool: self.move_to_pen(t)),
+                ]:
+                    b = QPushButton(text)
+                    b.clicked.connect(fn)
+                    rl.addWidget(b)
+                rl.addStretch()
+                self.pen_buttons_layout.addWidget(row)
+
+        def _pen_speeds(self):
+            rapid    = self.config.tc_rapid
+            approach = self.config.tc_approach
+            if self.pen_quarter_speed_cb.isChecked():
+                rapid    = max(1, rapid // 4)
+                approach = max(1, approach // 4)
+            return rapid, approach
+
+        def _pen_send(self, *cmds):
+            """Send a sequence of G-code strings, checking port each time."""
+            for cmd in cmds:
+                if not self.port:
+                    return
+                with self._serial_lock:
+                    grbl_send(self.port, cmd, wait_ok=True)
+                time.sleep(0.1)
+            time.sleep(0.2)
+            self._update_position_internal()
+
+        # ⇑ SafeY↑ — approach lane (Y+offset), safe_z height
+        # Y moves first (approach direction), then X, then Z if needed
+        def move_to_pen_safe_y(self, tool, use_safe_z=True):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            rapid, approach = self._pen_speeds()
+            offset_y = tool.y + self.config.tc_unplug_mm
+            target_z = tool.safe_z if use_safe_z else tool.z
+            speed    = approach if not use_safe_z else rapid
+            try:
+                self._pen_send(
+                    f"G53 G1 Y{offset_y:.3f} F{rapid}",
+                    f"G53 G1 X{tool.x:.3f} F{rapid}",
+                    *([] if use_safe_z else [f"G53 G1 Z{target_z:.3f} F{approach}"]),
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Move failed: {e}")
+
+        # ↑ Up — dock position (X,Y), safe_z height — all axes together
+        def move_to_pen_safe_z(self, tool):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            rapid, approach = self._pen_speeds()
+            try:
+                self._pen_send(f"G53 G1 X{tool.x:.3f} Y{tool.y:.3f} Z{tool.safe_z:.3f} F{rapid}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Move failed: {e}")
+
+        # ↓ Down — dock position (X,Y), dock_z height — all axes together
+        def move_to_pen(self, tool):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            rapid, approach = self._pen_speeds()
+            try:
+                self._pen_send(f"G53 G1 X{tool.x:.3f} Y{tool.y:.3f} Z{tool.z:.3f} F{approach}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Move failed: {e}")
+
+        def _travel_to(self, x=None, y=None, z=None):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            parts = []
+            if x is not None: parts.append(f"X{x:.3f}")
+            if y is not None: parts.append(f"Y{y:.3f}")
+            if z is not None: parts.append(f"Z{z:.3f}")
+            if not parts:
+                return
+            def _do():
+                try:
+                    with self._serial_lock:
+                        grbl_send(self.port, f"G90 G0 {' '.join(parts)}")
+                    self._update_position_internal()
+                except Exception as e:
+                    self.signals.show_error.emit("Error", f"Travel failed: {e}")
+            threading.Thread(target=_do, daemon=True).start()
+
+        def _travel_xy_safe(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            safe_z = self.tools[0].safe_z if self.tools else None
+            def _do():
+                try:
+                    with self._serial_lock:
+                        if safe_z is not None:
+                            grbl_send(self.port, f"G53 G0 Z{safe_z:.3f}")
+                        grbl_send(self.port, "G90 G0 X0 Y0")
+                    self._update_position_internal()
+                except Exception as e:
+                    self.signals.show_error.emit("Error", f"Travel failed: {e}")
+            threading.Thread(target=_do, daemon=True).start()
+
+        # ------------------------------------------------------------------
+        # SVG / color helpers  (pure logic — unchanged from tkinter version)
+        # ------------------------------------------------------------------
+
+        _HEX_COLOR_NAMES = {
+            "#000000": "black",  "#1a1a1a": "black",  "#111111": "black",
+            "#ffffff": "white",
+            "#ff0000": "red",    "#cc0000": "red",
+            "#00ff00": "green",  "#008000": "green",
+            "#0000ff": "blue",   "#0000cc": "blue",
+            "#ffff00": "yellow", "#ffd700": "yellow",
+            "#00ffff": "cyan",   "#00b4d8": "cyan",   "#0099cc": "cyan",
+            "#ff00ff": "magenta","#cc00cc": "magenta","#ff00b4": "magenta",
+            "#ff8000": "orange", "#ffa500": "orange",
+            "#800080": "purple", "#8b008b": "purple",
+        }
+
+        def _hex_to_rgb(self, hex_color: str):
+            h = hex_color.lstrip("#")
+            if len(h) == 3:
+                h = "".join(c * 2 for c in h)
+            if len(h) != 6:
+                return None
+            try:
+                return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+            except ValueError:
+                return None
+
+        def _closest_color_name(self, hex_color: str) -> str:
+            if not hex_color or not hex_color.startswith("#"):
+                return hex_color or ""
+            low = hex_color.lower()
+            if low in self._HEX_COLOR_NAMES:
+                return self._HEX_COLOR_NAMES[low]
+            rgb = self._hex_to_rgb(low)
+            if rgb is None:
+                return hex_color
+            best_name, best_dist = hex_color, float("inf")
+            for ref_hex, name in self._HEX_COLOR_NAMES.items():
+                ref_rgb = self._hex_to_rgb(ref_hex)
+                if ref_rgb is None:
+                    continue
+                dist = sum((a - b) ** 2 for a, b in zip(rgb, ref_rgb))
+                if dist < best_dist:
+                    best_dist, best_name = dist, name
+            return best_name
+
+        def _parse_svg_layers(self, svg_path: str) -> list:
+            INK_NS = "http://www.inkscape.org/namespaces/inkscape"
+            _SKIP = {"none", "inherit", "transparent", "white", "#ffffff", "#fff"}
+
+            def style_color(style_str):
+                m = re.search(r"stroke\s*:\s*([^;]+)", style_str or "")
+                if m:
+                    val = m.group(1).strip()
+                    if val.lower() not in _SKIP:
+                        return val
+                return None
+
+            def elem_color(el):
+                c = style_color(el.get("style", ""))
+                if c:
+                    return c
+                v = el.get("stroke", "")
+                if v and v.lower() not in _SKIP:
+                    return v
+                return None
+
+            def layer_dominant_color(group):
+                for child in group.iter():
+                    tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                    if tag in ("path", "line", "polyline", "circle", "ellipse"):
+                        c = elem_color(child)
+                        if c:
+                            return c
+                return None
+
+            layers = []
+            try:
+                tree = ET.parse(svg_path)
+                root = tree.getroot()
+                ink_layers = [el for el in root.iter()
+                              if el.get(f"{{{INK_NS}}}groupmode") == "layer"]
+                if ink_layers:
+                    for g in ink_layers:
+                        label = g.get(f"{{{INK_NS}}}label", "Unnamed Layer")
+                        layers.append({"label": label, "color": layer_dominant_color(g)})
+                else:
+                    seen = []
+                    for el in root.iter():
+                        tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+                        if tag in ("path", "line", "polyline", "circle", "ellipse"):
+                            c = elem_color(el)
+                            if c and c not in seen:
+                                seen.append(c)
+                                layers.append({"label": c, "color": c})
+            except Exception:
+                pass
+            return layers
+
+        def _match_color_to_tool(self, label: str, color_hex):
+            label_low = (label or "").lower()
+            color_name = self._closest_color_name(color_hex) if color_hex else ""
+            for tool in self.tools:
+                t = tool.color.lower()
+                if t and (t in label_low or label_low in t or t == color_name):
+                    return tool
+            for tool in self.tools:
+                if tool.name.lower() in label_low or label_low in tool.name.lower():
+                    return tool
+            return None
+
+        def _luminance(self, hex_color: str) -> float:
+            rgb = self._hex_to_rgb(hex_color or "")
+            if rgb is None:
+                return 0.0
+            r, g, b = rgb
+            return 0.299 * r + 0.587 * g + 0.114 * b
+
+        def _sort_layers_light_to_dark(self, layers: list) -> list:
+            return sorted(layers, key=lambda e: -self._luminance(e.get("color") or ""))
+
+        def _sort_layers_light_to_dark_matched(self, matched: list) -> list:
+            return sorted(matched, key=lambda x: -self._luminance(x[0].get("color") or ""))
+
+        def _split_svg_by_color(self, svg_path: str, target_color: str, tmp_path: str) -> bool:
+            for prefix, uri in [
+                ("",         "http://www.w3.org/2000/svg"),
+                ("xlink",    "http://www.w3.org/1999/xlink"),
+                ("inkscape", "http://www.inkscape.org/namespaces/inkscape"),
+                ("sodipodi", "http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd"),
+                ("dc",       "http://purl.org/dc/elements/1.1/"),
+                ("cc",       "http://creativecommons.org/ns#"),
+                ("rdf",      "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+            ]:
+                ET.register_namespace(prefix, uri)
+            DRAW_TAGS = {"path", "line", "polyline", "circle", "ellipse"}
+            target = target_color.lower()
+
+            def stroke_of(el):
+                m = re.search(r"stroke\s*:\s*([^;]+)", el.get("style", ""))
+                if m:
+                    return m.group(1).strip().lower()
+                return el.get("stroke", "").lower()
+
+            try:
+                tree = ET.parse(svg_path)
+                root = tree.getroot()
+                new_root = ET.Element(root.tag, root.attrib)
+                found = False
+                for child in root:
+                    raw_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                    if raw_tag in DRAW_TAGS:
+                        if stroke_of(child) == target:
+                            new_root.append(child)
+                            found = True
+                    elif raw_tag == "g":
+                        new_g = ET.Element(child.tag, child.attrib)
+                        for gc in child:
+                            gtag = gc.tag.split("}")[-1] if "}" in gc.tag else gc.tag
+                            if gtag in DRAW_TAGS and stroke_of(gc) == target:
+                                new_g.append(gc)
+                                found = True
+                        if len(new_g):
+                            new_root.append(new_g)
+                if not found:
+                    return False
+                ET.ElementTree(new_root).write(tmp_path, encoding="unicode", xml_declaration=True)
+                return True
+            except Exception:
+                return False
+
+        def _sync_draw_speed_to_vpype_cfg(self):
+            """Patch the F value in the user's vpype .cfg segment line to match draw_speed."""
+            cfg_path = self.config.vpype_config.strip()
+            if not cfg_path or not os.path.exists(cfg_path):
+                return
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                speed = self.config.draw_speed
+                # Replace or insert F value on the segment = "G1 ..." line
+                updated = re.sub(
+                    r'(^\s*segment\s*=\s*"G1\s+[^"]*?)(?:\s+F[\d.]+)?(\\n"\s*$)',
+                    f'\\1 F{speed}\\2',
+                    content, flags=re.MULTILINE
+                )
+                if updated != content:
+                    with open(cfg_path, "w", encoding="utf-8") as f:
+                        f.write(updated)
+            except Exception:
+                pass
+
+        def _apply_feed_override(self, line: str) -> str:
+            """Scale F values using separate sliders for draw and tool-change moves."""
+            is_g53 = line.upper().startswith("G53")
+            pct = self.tc_override_slider.value() if is_g53 else self.feed_override_slider.value()
+            if pct == 100:
+                return line
+            factor = pct / 100.0
+            return re.sub(
+                r'F([\d.]+)',
+                lambda m: f"F{max(1, int(float(m.group(1)) * factor))}",
+                line, flags=re.IGNORECASE
+            )
+
+        def _write_layer_vpype_config(self, path: str, safe_z: float = -5.0) -> None:
+            lift    = self.config.pen_lift_z
+            contact = self.config.pen_contact_z
+            speed   = self.config.draw_speed
+            content = (
+                '[gwrite.pl0tb0t_layer]\n'
+                'unit = "mm"\n'
+                'vertical_flip = true\n'
+                f'segment_first = "G0 Z{lift:.3f}\\nG0 X{{x:.4f}} Y{{y:.4f}}\\nG0 Z{contact:.3f}\\n"\n'
+                f'segment = "G1 X{{x:.4f}} Y{{y:.4f}} F{speed}\\n"\n'
+            )
+            with open(path, "w") as f:
+                f.write(content)
+
+        def _first_draw_xy(self, gcode_path: str):
+            """Return (x, y) of the first X/Y move in a G-code file, or None."""
+            try:
+                with open(gcode_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        m = re.search(r'[Xx]([-\d.]+).*[Yy]([-\d.]+)', line)
+                        if not m:
+                            m = re.search(r'[Yy]([-\d.]+).*[Xx]([-\d.]+)', line)
+                            if m:
+                                return float(m.group(2)), float(m.group(1))
+                        else:
+                            return float(m.group(1)), float(m.group(2))
+            except Exception:
+                pass
+            return None
+
+        def _tool_pickup_gcode(self, tool) -> list:
+            rapid    = self.config.tc_rapid
+            approach = self.config.tc_approach
+            ay = tool.y + self.config.tc_unplug_mm
+            return [
+                f"; === PICK UP: {tool.name} ===",
+                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z (fast)
+                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y to unplug (fast)
+                f"G53 G1 X{tool.x:.3f} F{rapid}",         # X to dock column (fast)
+                f"G53 G1 Z{tool.z:.3f} F{rapid}",         # lower Z at unplug (fast)
+                f"G53 G1 Y{tool.y:.3f} F{approach}",      # Y to dock while down (slow)
+                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z with pen (fast)
+                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y back to unplug — clearance before X rapid (fast)
+            ]
+
+        def _tool_drop_gcode(self, tool) -> list:
+            rapid    = self.config.tc_rapid
+            approach = self.config.tc_approach
+            ay = tool.y + self.config.tc_unplug_mm
+            return [
+                f"; === DROP: {tool.name} ===",
+                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z with pen (fast)
+                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y to unplug position (fast)
+                f"G53 G1 X{tool.x:.3f} F{rapid}",         # X to dock column (fast)
+                f"G53 G1 Y{tool.y:.3f} F{rapid}",         # Y to dock while up (fast)
+                f"G53 G1 Z{tool.z:.3f} F{approach}",      # Z down to seat pen (slow)
+                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y retract to unplug — undock carriage (fast)
+                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z empty (fast)
+            ]
+
+        # ------------------------------------------------------------------
+        # SVG layer display
+        # ------------------------------------------------------------------
+
+        def _update_svg_layer_display(self, layers: list):
+            while self.svg_layer_rows_layout.count():
+                child = self.svg_layer_rows_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            self.svg_pen_order_label.setText("")
+
+            if not layers:
+                self.svg_layer_hint.setText("No layers detected in SVG")
+                return
+
+            self.svg_layer_hint.setText("")
+            pen_order = []
+            display_layers = (self._sort_layers_light_to_dark(layers)
+                              if self.vpype_toolchanges_cb.isChecked() else layers)
+
+            for entry in display_layers:
+                label = entry["label"]
+                color = entry["color"]
+                tool  = self._match_color_to_tool(label, color)
+
+                row = QWidget()
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.setSpacing(4)
+
+                swatch = QLabel()
+                swatch.setFixedSize(14, 14)
+                fill = color if (color and color.startswith("#") and len(color) in (4, 7)) else "#333333"
+                swatch.setStyleSheet(f"background: {fill}; border: 1px solid #555;")
+                rl.addWidget(swatch)
+
+                color_hint = f" ({self._closest_color_name(color)})" if color else ""
+                rl.addWidget(QLabel(f'"{label}"{color_hint}'))
+                rl.addWidget(QLabel("→"))
+
+                if tool:
+                    ml = QLabel(tool.name)
+                    ml.setStyleSheet("color: #2a9d2a; font-weight: bold;")
+                    rl.addWidget(ml)
+                    pen_order.append(tool.name)
+                else:
+                    nm = QLabel("⚠ no tool match")
+                    nm.setStyleSheet("color: orange;")
+                    rl.addWidget(nm)
+                    pen_order.append(f"? ({self._closest_color_name(color) or label})")
+
+                rl.addStretch()
+                self.svg_layer_rows_layout.addWidget(row)
+
+            if pen_order:
+                self.svg_pen_order_label.setText("Pen order:  " + "  →  ".join(pen_order))
+
+        # ------------------------------------------------------------------
+        # vpype
+        # ------------------------------------------------------------------
+
+        def browse_vpype_svg(self):
+            path, _ = QFileDialog.getOpenFileName(self, "Open SVG", "", "SVG files (*.svg)")
+            if not path:
+                return
+            self.vpype_svg_edit.setText(path)
+            if not self.vpype_output_edit.text():
+                self.vpype_output_edit.setText(os.path.splitext(path)[0] + "_vpype.gcode")
+            layers = self._parse_svg_layers(path)
+            self._svg_layers = layers
+            self._update_svg_layer_display(layers)
+
+        def browse_vpype_config(self):
+            pass   # config path is now in Machine Settings
+
+        def browse_vpype_output(self):
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save G-code", "", "G-code files (*.gcode)")
+            if path:
+                self.vpype_output_edit.setText(path)
+
+        def _run_vpype_cmd(self, svg_path, cfg_path, profile, out_path, silent=False) -> bool:
+            steps = ["read", svg_path]
+            if self.vpype_linemerge_cb.isChecked():   steps.append("linemerge")
+            if self.vpype_linesort_cb.isChecked():    steps.append("linesort")
+            if self.vpype_reloop_cb.isChecked():      steps.append("reloop")
+            if self.vpype_linesimplify_cb.isChecked():
+                try:
+                    tol = float(self.vpype_simplify_tol_edit.text())
+                except Exception:
+                    tol = 0.05
+                steps.extend(["linesimplify", "-t", f"{tol}mm"])
+            cmd = ["vpype", "-c", cfg_path, *steps, "gwrite", "-p", profile, out_path]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                if not silent:
+                    QMessageBox.critical(self, "Error",
+                        "vpype not found — install it and ensure it's on PATH")
+                return False
+            if result.returncode != 0:
+                if not silent:
+                    QMessageBox.critical(self, "vpype Error",
+                        result.stderr.strip() or "vpype failed")
+                return False
+            return True
+
+        def _run_vpype_with_toolchanges(self, svg_path, cfg_path, profile, output_path, matched):
+            tmp_dir = tempfile.mkdtemp(prefix="pl0tb0t_")
+            try:
+                layer_cfg = os.path.join(tmp_dir, "layer.cfg")
+                safe_z = matched[0][1].safe_z
+                self._write_layer_vpype_config(layer_cfg, safe_z=safe_z)
+                final_lines = [
+                    "; Pl0tb0t multi-color plot — auto-generated tool changes",
+                    "; Assumes: machine is homed, all pens are in holders, carriage is empty",
+                    "G21 G90",
+                    f"G53 G0 Z{safe_z:.3f}",
+                    f"G1 F{self.config.draw_speed}",
+                ]
+                for i, (layer, tool) in enumerate(matched):
+                    color = layer.get("color", "")
+                    label = layer.get("label", color)
+                    tmp_svg   = os.path.join(tmp_dir, f"layer_{i}.svg")
+                    tmp_gcode = os.path.join(tmp_dir, f"layer_{i}.gcode")
+                    if not self._split_svg_by_color(svg_path, color, tmp_svg):
+                        QMessageBox.critical(self, "Error",
+                            f"No elements found for color {color} ({label})")
+                        return
+                    if not self._run_vpype_cmd(tmp_svg, layer_cfg, "pl0tb0t_layer",
+                                               tmp_gcode, silent=True):
+                        QMessageBox.critical(self, "Error", f"vpype failed for layer: {label}")
+                        return
+                    final_lines.extend(self._tool_pickup_gcode(tool))
+                    # Pre-position XY over the drawing start (work coords) while still
+                    # at safe_z, so the first descent happens over the paper not over
+                    # the tool holder.
+                    first_xy = self._first_draw_xy(tmp_gcode)
+                    if first_xy:
+                        final_lines.append(
+                            f"; pre-position over drawing start at safe height")
+                        final_lines.append(
+                            f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
+                    final_lines.append(f"; --- Layer {i+1}: {label} ({color}) ---")
+                    with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
+                        for ln in f:
+                            ln = ln.strip()
+                            if ln:
+                                final_lines.append(ln)
+                    final_lines.extend(self._tool_drop_gcode(tool))
+                final_lines += [f"; === END ===", f"G53 G0 Z{safe_z:.3f}", "M2"]
+                with open(output_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(final_lines) + "\n")
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            self.load_gcode_file(output_path)
+            QMessageBox.information(self, "Success",
+                f"G-code with tool changes saved to {output_path}")
+
+        def run_vpype(self):
+            svg_path    = self.vpype_svg_edit.text().strip()
+            config_path = self.config.vpype_config.strip()
+            profile     = self.config.vpype_profile.strip()
+            output_path = self.vpype_output_edit.text().strip()
+
+            if not svg_path:
+                QMessageBox.critical(self, "Error", "Select an SVG file first"); return
+            if not os.path.exists(svg_path):
+                QMessageBox.critical(self, "Error", "SVG file not found"); return
+            if not config_path:
+                QMessageBox.critical(self, "Error",
+                    "Set vpype config path in Machine Settings first"); return
+            if not os.path.exists(config_path):
+                QMessageBox.critical(self, "Error",
+                    f"vpype config not found: {config_path}"); return
+            if not output_path:
+                output_path = os.path.splitext(svg_path)[0] + "_vpype.gcode"
+                self.vpype_output_edit.setText(output_path)
+
+            if self.vpype_toolchanges_cb.isChecked() and self._svg_layers:
+                matched = [(l, self._match_color_to_tool(l["label"], l["color"]))
+                           for l in self._svg_layers]
+                matched = [(l, t) for l, t in matched if t is not None]
+                if matched:
+                    self._run_vpype_with_toolchanges(
+                        svg_path, config_path, profile, output_path,
+                        self._sort_layers_light_to_dark_matched(matched))
+                    return
+                else:
+                    QMessageBox.warning(self, "No tool matches",
+                        "Tool changes enabled but no layers matched tools — "
+                        "falling back to single-pass vpype.")
+
+            if not self._run_vpype_cmd(svg_path, config_path, profile, output_path):
+                return
+            self.load_gcode_file(output_path)
+            QMessageBox.information(self, "Success", f"G-code saved to {output_path}")
+
+        # ------------------------------------------------------------------
+        # G-code
+        # ------------------------------------------------------------------
+
+        def _clean_gcode_line(self, line: str) -> str:
+            line = line.strip()
+            if not line:
+                return ""
+            line = re.sub(r"\(.*?\)", "", line)
+            if line.lstrip().startswith(";"):
+                return ""
+            if ";" in line:
+                line = line.split(";", 1)[0]
+            return line.strip().upper()
+
+        def browse_gcode_file(self):
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open G-code", "",
+                "G-code files (*.gcode *.gc *.nc *.tap);;All files (*)")
+            if path:
+                self.load_gcode_file(path)
+
+        def load_gcode_file(self, file_path: str):
+            self.gcode_path = file_path
+            self.gcode_entry.setText(file_path)
+            self._load_gcode_lines(file_path)
+            self.parse_gcode_for_preview(file_path)
+            self.refresh_gcode_viewer()
+
+        def _load_gcode_lines(self, file_path: str):
+            self.gcode_lines = []
+            self.gcode_line_index = 0
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for raw in f:
+                        clean = self._clean_gcode_line(raw)
+                        if clean:
+                            self.gcode_lines.append(clean)
+            except Exception:
+                self.gcode_lines = []
+
+        def refresh_gcode_viewer(self):
+            self.gcode_list.clear()
+            if not self.gcode_lines:
+                self.gcode_list.addItem("(no executable gcode lines)")
+                return
+            for i, line in enumerate(self.gcode_lines):
+                self.gcode_list.addItem(f"{i+1:04d}: {line}")
+            self._highlight_gcode_line()
+
+        def _highlight_gcode_line(self):
+            if not self.gcode_lines:
+                return
+            idx = min(self.gcode_line_index, len(self.gcode_lines) - 1)
+            self.gcode_list.setCurrentRow(idx)
+            self.gcode_list.scrollToItem(self.gcode_list.currentItem())
+
+        def _highlight_gcode_line_at(self, idx):
+            if not self.gcode_lines:
+                return
+            idx = min(idx, len(self.gcode_lines) - 1)
+            self.gcode_line_index = idx
+            self.gcode_list.setCurrentRow(idx)
+            self.gcode_list.scrollToItem(self.gcode_list.currentItem())
+
+        _GRBL_LOG_MAX = 500
+
+        def _append_grbl_log(self, text):
+            self.grbl_log_list.addItem(text)
+            if self.grbl_log_list.count() > self._GRBL_LOG_MAX:
+                self.grbl_log_list.takeItem(0)
+            self.grbl_log_list.scrollToBottom()
+
+        def reset_gcode_line_index(self):
+            self.gcode_line_index = 0
+            self._highlight_gcode_line()
+
+        def send_selected_gcode_line(self):
+            if self.gcode_running:
+                QMessageBox.warning(self, "Warning", "Stop the current run first")
+                return
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            idx = self.gcode_list.currentRow()
+            if idx < 0 or idx >= len(self.gcode_lines):
+                QMessageBox.warning(self, "Warning", "Select a line first")
+                return
+            try:
+                with self._serial_lock:
+                    grbl_send(self.port, self.gcode_lines[idx], wait_ok=True)
+                self.gcode_line_index = min(idx + 1, len(self.gcode_lines) - 1)
+                self._highlight_gcode_line()
+                self.gcode_status_label.setText(f"Sent line {idx+1}")
+            except Exception as e:
+                QMessageBox.critical(self, "G-code Error", str(e))
+
+        def send_next_gcode_line(self):
+            if self.gcode_running:
+                QMessageBox.warning(self, "Warning", "Stop the current run first")
+                return
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!")
+                return
+            if not self.gcode_lines:
+                QMessageBox.warning(self, "Warning", "Load a G-code file first")
+                return
+            idx = min(self.gcode_line_index, len(self.gcode_lines) - 1)
+            try:
+                with self._serial_lock:
+                    grbl_send(self.port, self.gcode_lines[idx], wait_ok=True)
+                self.gcode_line_index = min(idx + 1, len(self.gcode_lines) - 1)
+                self._highlight_gcode_line()
+                self.gcode_status_label.setText(f"Sent line {idx+1}")
+            except Exception as e:
+                QMessageBox.critical(self, "G-code Error", str(e))
+
+        def parse_gcode_for_preview(self, file_path: str):
+            segments, bounds = [], None
+            truncated = False
+            max_seg = 10000
+            x = y = 0.0
+            abs_mode = True
+            motion_mode = "G0"
+            total_lines = 0
+            current_color = "#222222"
+            layer_colors = []   # [(hex, label), ...] ordered by first appearance
+
+            def _register_color(hex_color, label):
+                if not any(h == hex_color for h, _ in layer_colors):
+                    layer_colors.append((hex_color, label))
+
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for raw in f:
+                        raw_s = raw.strip()
+                        # Parse color hints from tool-change comments
+                        if raw_s.startswith(";"):
+                            m = re.search(r"PICK UP:\s*(.+?)\s*===", raw_s)
+                            if m:
+                                tool = find_tool(self.tools, m.group(1).strip())
+                                if tool:
+                                    c = QColor(tool.color)
+                                    if not c.isValid():
+                                        c = QColor("#222222")
+                                    current_color = c.name()
+                                    _register_color(current_color, tool.name)
+                            m = re.search(r"Layer \d+:.*?\((#[0-9a-fA-F]{6})\)", raw_s)
+                            if m:
+                                current_color = m.group(1).lower()
+                                label = re.search(r"Layer \d+:\s*(.+?)\s*\(", raw_s)
+                                _register_color(current_color, label.group(1) if label else current_color)
+                            continue
+
+                        clean = self._clean_gcode_line(raw)
+                        if not clean:
+                            continue
+                        if clean.startswith("G53"):
+                            continue
+                        total_lines += 1
+                        words = re.findall(r"([A-Z])\s*([-+]?\d*\.?\d+)", clean)
+                        if not words:
+                            continue
+                        g_codes = [int(float(v)) for l, v in words if l == "G"]
+                        if 90 in g_codes: abs_mode = True
+                        if 91 in g_codes: abs_mode = False
+                        if 0 in g_codes:  motion_mode = "G0"
+                        if 1 in g_codes:  motion_mode = "G1"
+                        x_val = y_val = None
+                        for letter, val in words:
+                            if letter == "X": x_val = float(val)
+                            elif letter == "Y": y_val = float(val)
+                        if x_val is None and y_val is None:
+                            continue
+                        new_x = (x + x_val if not abs_mode else x_val) if x_val is not None else x
+                        new_y = (y + y_val if not abs_mode else y_val) if y_val is not None else y
+                        if new_x != x or new_y != y:
+                            if bounds is None:
+                                bounds = [x, y, x, y]
+                            bounds[0] = min(bounds[0], x, new_x)
+                            bounds[1] = min(bounds[1], y, new_y)
+                            bounds[2] = max(bounds[2], x, new_x)
+                            bounds[3] = max(bounds[3], y, new_y)
+                            if len(segments) < max_seg:
+                                segments.append((x, y, new_x, new_y, motion_mode, current_color))
+                            else:
+                                truncated = True
+                            x, y = new_x, new_y
+
+                self.gcode_segments = segments
+                self.gcode_bounds = bounds
+                self.gcode_preview_truncated = truncated
+                self.gcode_total_lines = total_lines
+                self._layer_colors = layer_colors
+                self.preview_widget.set_data(segments, bounds)
+                self._rebuild_layer_toggles()
+
+                if bounds:
+                    w = bounds[2] - bounds[0]
+                    h = bounds[3] - bounds[1]
+                    extra = " (preview truncated)" if truncated else ""
+                    self.gcode_status_label.setText(
+                        f"Loaded: {Path(file_path).name}  |  Bounds {w:.2f} x {h:.2f} mm{extra}")
+                else:
+                    self.gcode_status_label.setText(
+                        f"Loaded: {Path(file_path).name}  |  No XY moves found")
+            except Exception as e:
+                self.gcode_segments = []
+                self.gcode_bounds = None
+                self.preview_widget.set_data([], None)
+                self.gcode_status_label.setText(f"Failed to load: {e}")
+
+        def run_gcode(self):
+            if not self.port:
+                QMessageBox.critical(self, "Error", "Not connected!"); return
+            if not self.gcode_path:
+                QMessageBox.critical(self, "Error", "Load a G-code file first"); return
+            if self.gcode_running:
+                QMessageBox.warning(self, "Warning", "G-code already running"); return
+
+            draw_pct = self.feed_override_slider.value()
+            tc_pct   = self.tc_override_slider.value()
+            if draw_pct != 100 or tc_pct != 100:
+                msg = f"Feed overrides are not at 100%:\n  Draw: {draw_pct}%\n  TC:   {tc_pct}%\n\nReset to 100% before running?"
+                reply = QMessageBox.question(self, "Override Active", msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                    QMessageBox.StandardButton.Cancel)
+                if reply == QMessageBox.StandardButton.Cancel:
+                    return
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.feed_override_slider.setValue(100)
+                    self.tc_override_slider.setValue(100)
+
+            self.gcode_running = True
+            self.gcode_paused = False
+            self.gcode_stop = False
+            self.gcode_sent_lines = 0
+            self._status_timer.stop()   # no status queries during gcode run
+            self.gcode_progress.setValue(0)
+            self.gcode_run_btn.setEnabled(False)
+            self.gcode_pause_btn.setEnabled(True)
+            self.gcode_pause_btn.setText("⏸ Pause")
+            self.gcode_stop_btn.setEnabled(True)
+
+            def runner():
+                try:
+                    if self.gcode_home_first_cb.isChecked():
+                        grbl_home(self.port, verbose=False)
+                        time.sleep(0.5)
+                    total = self.gcode_total_lines
+                    if total <= 0:
+                        with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f:
+                            total = sum(1 for ln in f if self._clean_gcode_line(ln))
+                        self.gcode_total_lines = total
+                    with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f:
+                        for raw in f:
+                            if self.gcode_stop:
+                                break
+                            while self.gcode_paused and not self.gcode_stop:
+                                time.sleep(0.1)
+                            line = self._clean_gcode_line(raw)
+                            if not line:
+                                continue
+                            line = self._apply_feed_override(line)
+                            self.signals.grbl_log.emit(f"→ {line}")
+                            with self._serial_lock:
+                                responses = grbl_send(self.port, line, wait_ok=True)
+                            for resp in responses:
+                                self.signals.grbl_log.emit(f"← {resp}")
+                                rl = resp.lower()
+                                if rl.startswith("error") or rl.startswith("alarm"):
+                                    self.gcode_stop = True
+                                    self.signals.show_error.emit(
+                                        "GRBL Error",
+                                        f"GRBL stopped the run:\n{resp}\n\nLine sent:\n{line}")
+                                    break
+                            if self.gcode_stop:
+                                break
+                            self.gcode_sent_lines += 1
+                            self.signals.gcode_highlight.emit(self.gcode_sent_lines - 1)
+                            if total > 0:
+                                self.signals.update_progress.emit(
+                                    (self.gcode_sent_lines / total) * 100.0)
+                except Exception as e:
+                    self.signals.show_error.emit("G-code Error", str(e))
+                finally:
+                    self.gcode_running = False
+                    self.gcode_paused = False
+                    self.gcode_stop = False
+                    self._status_timer.start(500)   # resume status polling
+                    self.signals.gcode_done.emit()
+
+            threading.Thread(target=runner, daemon=True).start()
+
+        def _reset_gcode_buttons(self):
+            self.gcode_run_btn.setEnabled(True)
+            self.gcode_pause_btn.setEnabled(False)
+            self.gcode_pause_btn.setText("⏸ Pause")
+            self.gcode_stop_btn.setEnabled(False)
+
+        def toggle_pause_gcode(self):
+            if not self.gcode_running:
+                return
+            self.gcode_paused = not self.gcode_paused
+            if self.port:
+                try:
+                    with self._serial_lock:
+                        self.port.write(b"!" if self.gcode_paused else b"~")
+                    self.gcode_pause_btn.setText(
+                        "▶ Resume" if self.gcode_paused else "⏸ Pause")
+                except Exception:
+                    pass
+
+        def stop_gcode(self):
+            self.gcode_stop = True
+            self.gcode_paused = False
+            if self.port:
+                try:
+                    self.port.write(b"!")    # feed hold — machine decelerates immediately
+                    self.port.flush()
+                except Exception:
+                    pass
+                # Soft reset after short delay: clears GRBL buffer and unblocks
+                # any grbl_send() call waiting for 'ok' so the runner thread can exit
+                QTimer.singleShot(300, self._grbl_soft_reset)
+
+        def _grbl_soft_reset(self):
+            if self.port:
+                try:
+                    self.port.write(b"\x18")  # Ctrl-X soft reset
+                    self.port.flush()
+                except Exception:
+                    pass
+
+        def _rebuild_layer_toggles(self):
+            while self.layer_toggles_layout.count():
+                child = self.layer_toggles_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+
+            if len(self._layer_colors) < 2:
+                self.layer_toggles_widget.hide()
+                self.preview_widget.set_visible_colors(None)
+                return
+
+            self._visible_colors = {c for c, _ in self._layer_colors}
+            self.layer_toggles_widget.show()
+
+            for color, label in self._layer_colors:
+                cb = QCheckBox(label)
+                cb.setChecked(True)
+                cb.setStyleSheet(
+                    f"QCheckBox::indicator:checked {{"
+                    f"  background: {color}; border: 2px solid #333; border-radius: 2px; }}"
+                    f"QCheckBox::indicator:unchecked {{"
+                    f"  background: #eee; border: 2px solid #aaa; border-radius: 2px; }}"
+                )
+                cb.toggled.connect(lambda checked, c=color: self._toggle_layer_color(c, checked))
+                self.layer_toggles_layout.addWidget(cb)
+
+            self.layer_toggles_layout.addStretch()
+            self.preview_widget.set_visible_colors(None)
+
+        def _toggle_layer_color(self, color, visible):
+            if visible:
+                self._visible_colors.add(color)
+            else:
+                self._visible_colors.discard(color)
+            all_visible = len(self._visible_colors) == len(self._layer_colors)
+            self.preview_widget.set_visible_colors(
+                None if all_visible else set(self._visible_colors)
+            )
+
+        # ------------------------------------------------------------------
+        # Test pen
+        # ------------------------------------------------------------------
+
+        def generate_testpen_gcode(self):
+            try:
+                pen_count    = int(self.testpen_count_edit.text())
+                cycles       = int(self.testpen_cycles_edit.text())
+                rapid        = int(self.testpen_rapid_edit.text())
+                approach     = int(self.testpen_approach_edit.text())
+                if self.testpen_quarter_speed_cb.isChecked():
+                    rapid    = max(1, rapid // 4)
+                    approach = max(1, approach // 4)
+                overshoot    = float(self.testpen_overshoot_edit.text())
+                unplug_offset = float(self.testpen_unplug_edit.text())
+                lift_offset  = float(self.testpen_lift_edit.text())
+            except Exception:
+                QMessageBox.critical(self, "Error", "All fields must be numeric")
+                return
+            if pen_count < 1 or cycles < 1:
+                QMessageBox.critical(self, "Error", "Pen count and cycles must be > 0")
+                return
+            self.tools = load_tools()
+            if pen_count > len(self.tools):
+                QMessageBox.critical(self, "Error",
+                    f"Not enough tools defined (have {len(self.tools)})")
+                return
+            tools = self.tools[:pen_count]
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Test G-code", "test_pen_cycle.gcode", "G-code files (*.gcode)")
+            if not file_path:
+                return
+
+            lines = [
+                f"; Test pen cycle: {pen_count} pens, {cycles} cycles, rapid {rapid}, "
+                f"approach {approach}, overshoot {overshoot}",
+                f"; Unplug offset: {unplug_offset}, lift offset: {lift_offset}",
+                "G21 ; mm mode", "G90 ; absolute mode", "G17 ; XY plane",
+            ]
+            unplug_offset = abs(unplug_offset)
+            prev_tool = None
+            for c in range(cycles):
+                for t in tools:
+                    unplug_y = t.y + unplug_offset
+                    undock_z = t.z + lift_offset
+                    approach_step = min(10.0, unplug_offset)
+                    if c == 0 and prev_tool is None:
+                        lines.append(f"G53 G0 Z{t.safe_z:.2f} F{rapid}")
+                        lines.append(f"G53 G0 X{t.x:.2f} Y{unplug_y:.2f} F{rapid}")
+                        lines.append(f"G53 G1 Z{t.z:.2f} F{approach}")
+                    else:
+                        lines.append(f"G53 G0 X{t.x:.2f} Y{unplug_y:.2f} Z{t.z:.2f} F{rapid}")
+                    if unplug_offset > approach_step:
+                        lines.append(f"G53 G0 X{t.x:.2f} Y{t.y + approach_step:.2f} F{rapid}")
+                    lines.append(f"G53 G1 X{t.x:.2f} Y{t.y:.2f} F{approach}")
+                    if abs(undock_z - t.z) > 10.0:
+                        lines.append(f"G53 G1 Z{t.z + 10.0:.2f} F{approach}")
+                        lines.append(f"G53 G0 Z{undock_z:.2f} F{rapid}")
+                    else:
+                        lines.append(f"G53 G1 Z{undock_z:.2f} F{approach}")
+                    lines.append(f"G3 X{t.x:.2f} Y{t.y:.2f} I0.00 J5.00 F{rapid}")
+                    if abs(undock_z - t.z) > 10.0:
+                        lines.append(f"G53 G0 Z{t.z + 10.0:.2f} F{rapid}")
+                        lines.append(f"G53 G1 Z{t.z:.2f} F{approach}")
+                    else:
+                        lines.append(f"G53 G1 Z{t.z:.2f} F{approach}")
+                    lines.append(f"G53 G1 X{t.x:.2f} Y{t.y:.2f} F{approach}")
+                    lines.append(f"G53 G1 X{t.x:.2f} Y{t.y + approach_step:.2f} F{approach}")
+                    if unplug_offset > approach_step:
+                        lines.append(f"G53 G0 X{t.x:.2f} Y{unplug_y:.2f} F{rapid}")
+                    else:
+                        lines.append(f"G53 G1 X{t.x:.2f} Y{unplug_y:.2f} F{approach}")
+                    prev_tool = t
+            if tools:
+                lines.append(f"G53 G0 Z{tools[-1].safe_z:.2f} F{rapid}")
+            lines.append("M2")
+
+            with open(file_path, "w") as f:
+                f.write("\n".join(lines))
+            self.load_gcode_file(file_path)
+            QMessageBox.information(self, "Success",
+                f"Test G-code saved to {file_path} ({len(lines)} lines)")
+
+        # ------------------------------------------------------------------
+        # Layout persistence
+        # ------------------------------------------------------------------
+
+        _LAYOUT_PATH = "pl0tb0t_layout.json"
+
+        def _save_layout(self):
+            data = {
+                "geometry": self.saveGeometry().toHex().data().decode(),
+                "state":    self.saveState().toHex().data().decode(),
+            }
+            _save_json(self._LAYOUT_PATH, data)
+
+        def _restore_layout(self):
+            data = _load_json(self._LAYOUT_PATH, {})
+            if "geometry" in data:
+                from PyQt6.QtCore import QByteArray
+                self.restoreGeometry(QByteArray.fromHex(data["geometry"].encode()))
+            if "state" in data:
+                from PyQt6.QtCore import QByteArray
+                self.restoreState(QByteArray.fromHex(data["state"].encode()))
+
+        # ------------------------------------------------------------------
+        # Close
+        # ------------------------------------------------------------------
+
+        def closeEvent(self, event):
+            self._save_layout()
+            self._status_timer.stop()
+            if self.port:
+                try:
+                    self.port.close()
+                except Exception:
+                    pass
+            event.accept()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    if not has_display:
+        print("No display found. Running terminal mode instead...")
+        import pl0tb0t_control
+        try:
+            controller = pl0tb0t_control.PlotterControl()
+            controller.menu_main()
+        except KeyboardInterrupt:
+            print("\n\nInterrupted!")
+            sys.exit(0)
+    else:
+        # Wayland's mouse-grab restriction breaks QDockWidget drag/float.
+        # Prefer XWayland (xcb) when available; fall back to native Wayland if not.
+        if "WAYLAND_DISPLAY" in os.environ and "QT_QPA_PLATFORM" not in os.environ:
+            import ctypes.util
+            if ctypes.util.find_library("xcb-cursor") is not None:
+                os.environ["QT_QPA_PLATFORM"] = "xcb"
+        app = QApplication(sys.argv)
+        app.setStyle("Fusion")
+        window = PlotterApp()
+        window.show()
+        sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
