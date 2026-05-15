@@ -12,3 +12,5 @@ queue_svgs/
 *_export_*.toml
 old_WIP_*.py
 .*.swp
+
+queue_config.json
