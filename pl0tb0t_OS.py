@@ -2739,11 +2739,15 @@ if has_display:
             import urllib.request, json as _j
             url  = self._queue_url_edit.text().rstrip("/") + path
             data = (_j.dumps(body).encode() if body else None)
-            req  = urllib.request.Request(
-                url, data=data, method=method,
-                headers={"X-API-Key": self._queue_key_edit.text(),
-                         "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=6) as r:
+            headers = {
+                "User-Agent": f"pl0tb0t-OS/{__version__}",
+                "Content-Type": "application/json",
+            }
+            key = self._queue_key_edit.text().strip()
+            if key:
+                headers["X-API-Key"] = key
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as r:
                 return _j.loads(r.read())
 
         def _queue_refresh(self):
@@ -2840,9 +2844,12 @@ if has_display:
                     import urllib.request
                     url = (self._queue_url_edit.text().rstrip("/") +
                            f"/jobs/{job_id}/svg")
-                    req = urllib.request.Request(
-                        url, headers={"X-API-Key": self._queue_key_edit.text()})
-                    with urllib.request.urlopen(req, timeout=8) as r:
+                    headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
+                    key = self._queue_key_edit.text().strip()
+                    if key:
+                        headers["X-API-Key"] = key
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=20) as r:
                         data = r.read()
                     self._queue_preview_cache[job_id] = data
                     self.signals.update_status.emit(f"__q_prev__{job_id}")
@@ -2887,12 +2894,17 @@ if has_display:
                         "paper_size": "8.5x11",
                         "orientation": "portrait",
                     }).encode()
+                    headers = {
+                        "User-Agent": f"pl0tb0t-OS/{__version__}",
+                        "Content-Type": "application/json",
+                    }
+                    key = self._queue_key_edit.text().strip()
+                    if key:
+                        headers["X-API-Key"] = key
                     req = urllib.request.Request(
                         self._queue_url_edit.text().rstrip("/") + "/jobs",
-                        data=body, method="POST",
-                        headers={"X-API-Key": self._queue_key_edit.text(),
-                                 "Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=10) as r:
+                        data=body, method="POST", headers=headers)
+                    with urllib.request.urlopen(req, timeout=20) as r:
                         result = _j.loads(r.read())
                     self.signals.update_status.emit(
                         f"__q_ok__{len(self._queue_jobs_cache) + 1}")
@@ -2915,9 +2927,12 @@ if has_display:
                 try:
                     url = (self._queue_url_edit.text().rstrip("/") +
                            f"/jobs/{job_id}/svg")
-                    req = urllib.request.Request(
-                        url, headers={"X-API-Key": self._queue_key_edit.text()})
-                    with urllib.request.urlopen(req, timeout=10) as r:
+                    headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
+                    key = self._queue_key_edit.text().strip()
+                    if key:
+                        headers["X-API-Key"] = key
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=30) as r:
                         svg_data = r.read()
                     # Strip visual-only gray border rect before vpype.
                     import re as _re
@@ -2956,9 +2971,12 @@ if has_display:
                     import urllib.request
                     url = (self._queue_url_edit.text().rstrip("/") +
                            f"/jobs/{job_id}/svg")
-                    req = urllib.request.Request(
-                        url, headers={"X-API-Key": self._queue_key_edit.text()})
-                    with urllib.request.urlopen(req, timeout=10) as r:
+                    headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
+                    key = self._queue_key_edit.text().strip()
+                    if key:
+                        headers["X-API-Key"] = key
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=30) as r:
                         _svg_raw = r.read()
                     # Strip visual-only gray border rect before vpype.
                     # SVG exports include <rect stroke="#b4b4b4"> for web display
