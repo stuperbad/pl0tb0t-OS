@@ -504,11 +504,16 @@ if has_display:
             header.addWidget(del_btn)
             root.addLayout(header)
 
-            # ── meta row: paper + orientation ───────────────────────────────
+            # ── meta row: paper + orientation + file size ───────────────────
             paper   = job.get('paper_size', '')
             orient  = job.get('orientation', '')
             job_id  = job.get('id', '')
-            meta_lbl = QLabel(f'{paper}  {orient}  ·  #{job_id}')
+            size    = self._format_bytes(job.get('file_size') or job.get('file_size_bytes'))
+            meta_parts = [p for p in [paper, orient, size] if p]
+            meta = '  ·  '.join(meta_parts)
+            if job_id:
+                meta = f'{meta}  ·  #{job_id}' if meta else f'#{job_id}'
+            meta_lbl = QLabel(meta)
             meta_lbl.setStyleSheet('color: #666; font-size: 11px;')
             root.addWidget(meta_lbl)
 
@@ -530,6 +535,19 @@ if has_display:
             if delta < 3600:  return f'{int(delta/60)}m ago'
             if delta < 86400: return f'{int(delta/3600)}h ago'
             return f'{int(delta/86400)}d ago'
+
+        def _format_bytes(self, n):
+            try:
+                n = int(n or 0)
+            except Exception:
+                return ''
+            if n <= 0:
+                return ''
+            if n < 1024:
+                return f'{n} B'
+            if n < 1024 * 1024:
+                return f'{n / 1024:.1f} KB' if n < 10 * 1024 else f'{n / 1024:.0f} KB'
+            return f'{n / (1024 * 1024):.1f} MB' if n < 10 * 1024 * 1024 else f'{n / (1024 * 1024):.0f} MB'
 
         def _confirm_delete(self):
             name = self.job.get('sketch_name') or 'this job'
