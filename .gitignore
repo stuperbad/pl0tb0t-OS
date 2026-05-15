@@ -2,3 +2,13 @@
 *.gcode
 __pycache__/
 *.pyc
+
+# Runtime/local state
+pl0tb0t_layout*.json
+queue.db
+queue_svgs/
+*.bak
+*.bak_*
+*_export_*.toml
+old_WIP_*.py
+.*.swp

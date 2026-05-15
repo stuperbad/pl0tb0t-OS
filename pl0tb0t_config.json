@@ -1,4 +1,13 @@
 {
+  "baud": 115200,
+  "draw_speed": 2500,
+  "pen_contact_z": 0.0,
+  "pen_lift_z": 3.5,
+  "planner_path": "pl0tb0t_toolplan.json",
+  "port": "/dev/ttyUSB0",
+  "tc_approach": 450,
+  "tc_rapid": 2500,
+  "tc_unplug_mm": 25.0,
   "tools": [
     {
       "color": "cyan",
@@ -32,5 +41,8 @@
       "y": -585.6,
       "z": -43.9
     }
-  ]
+  ],
+  "tools_path": "pl0tb0t_tools.json",
+  "vpype_config": "pl0tb0t_0x0_config.cfg",
+  "vpype_profile": "pl0tb0t_0x0"
 }
