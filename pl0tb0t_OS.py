@@ -39,10 +39,11 @@ if has_display:
         QGroupBox, QLabel, QPushButton, QComboBox, QLineEdit,
         QSlider, QCheckBox, QProgressBar, QListWidget,
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
-        QFileDialog, QMessageBox, QMenu,
+        QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
     )
     from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
+    from PyQt6.QtSvgWidgets import QSvgWidget
 
 
 # ---------------------------------------------------------------------------
@@ -409,13 +410,22 @@ if has_display:
             if w:
                 w.setVisible(not self._collapsed)
             self._caret.setText("▶" if self._collapsed else "▼")
+            title_h = max(24, self.titleBarWidget().sizeHint().height() if self.titleBarWidget() else 24)
             if self._collapsed:
                 self._pre_collapse_min_w = self.minimumWidth()
-                self.setMinimumWidth(self.width())  # hold column width
-                self.setMaximumHeight(26)
+                self.setMinimumWidth(0)
+                self.setMinimumHeight(title_h)
+                self.setMaximumHeight(title_h)
             else:
+                self.setMinimumHeight(0)
                 self.setMaximumHeight(16777215)
-                self.setMinimumWidth(self._pre_collapse_min_w)
+                self.setMinimumWidth(0)
+                if w:
+                    w.setVisible(True)
+                    w.updateGeometry()
+            mw = self.window()
+            if hasattr(mw, "_rebalance_dock_heights"):
+                QTimer.singleShot(0, mw._rebalance_dock_heights)
 
         def _ctx_menu(self, pos):
             if not self.isFloating():
@@ -432,6 +442,109 @@ if has_display:
                 mw = mw.parent()
             if mw:
                 mw.addDockWidget(area, self)
+
+
+    class JobCard(QFrame):
+        """One queue job displayed as a card with a top-right delete button."""
+        deleted  = pyqtSignal(str)   # emits job_id
+        selected = pyqtSignal(str)   # emits job_id
+
+        STATUS_COLORS = {
+            'queued':   ('#888888', '#f5f5f5'),
+            'plotting': ('#c06000', '#fff8ee'),
+            'done':     ('#2a7a2a', '#f0fff0'),
+            'error':    ('#aa0000', '#fff0f0'),
+        }
+
+        def __init__(self, job: dict, parent=None):
+            super().__init__(parent)
+            self.job = job
+            self.job_id = job['id']
+            self._setup_ui()
+
+        def _setup_ui(self):
+            job = self.job
+            status = job.get('status', 'queued')
+            dot_color, bg = self.STATUS_COLORS.get(status, ('#888', '#f5f5f5'))
+
+            self.setFrameShape(QFrame.Shape.StyledPanel)
+            self.setStyleSheet(f"""
+                JobCard {{
+                    background: {bg};
+                    border: 1px solid #ddd;
+                    border-radius: 8px;
+                    margin: 2px 0;
+                }}
+                JobCard:hover {{ border-color: #999; }}
+            """)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            root = QVBoxLayout(self)
+            root.setContentsMargins(10, 8, 10, 8)
+            root.setSpacing(3)
+
+            # ── header row: sketch name + X button ──────────────────────────
+            header = QHBoxLayout()
+            name_lbl = QLabel(job.get('sketch_name') or 'Untitled')
+            name_lbl.setStyleSheet('font-weight: 600; font-size: 13px;')
+            header.addWidget(name_lbl, 1)
+
+            del_btn = QPushButton('✕')
+            del_btn.setFixedSize(22, 22)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setStyleSheet("""
+                QPushButton {
+                    border: none; border-radius: 11px;
+                    background: transparent;
+                    color: #bbb; font-size: 14px; font-weight: bold;
+                }
+                QPushButton:hover { background: #ffdddd; color: #c00; }
+            """)
+            del_btn.clicked.connect(self._confirm_delete)
+            header.addWidget(del_btn)
+            root.addLayout(header)
+
+            # ── meta row: paper + orientation ───────────────────────────────
+            paper   = job.get('paper_size', '')
+            orient  = job.get('orientation', '')
+            job_id  = job.get('id', '')
+            meta_lbl = QLabel(f'{paper}  {orient}  ·  #{job_id}')
+            meta_lbl.setStyleSheet('color: #666; font-size: 11px;')
+            root.addWidget(meta_lbl)
+
+            # ── status + age row ────────────────────────────────────────────
+            age      = self._time_ago(job.get('created_at', 0))
+            status_lbl = QLabel(f'● {status}  ·  {age}')
+            status_lbl.setStyleSheet(f'color: {dot_color}; font-size: 11px;')
+            root.addWidget(status_lbl)
+
+            if job.get('notes'):
+                notes_lbl = QLabel(job['notes'])
+                notes_lbl.setStyleSheet('color: #888; font-size: 10px; font-style: italic;')
+                root.addWidget(notes_lbl)
+
+        def _time_ago(self, ts):
+            if not ts: return ''
+            delta = __import__('time').time() - ts
+            if delta < 60:    return 'just now'
+            if delta < 3600:  return f'{int(delta/60)}m ago'
+            if delta < 86400: return f'{int(delta/3600)}h ago'
+            return f'{int(delta/86400)}d ago'
+
+        def _confirm_delete(self):
+            name = self.job.get('sketch_name') or 'this job'
+            reply = QMessageBox.question(
+                self, 'Delete Job',
+                f"Remove '{name}' from the print queue? This cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.deleted.emit(self.job_id)
+
+        def mousePressEvent(self, ev):
+            self.selected.emit(self.job_id)
+            super().mousePressEvent(ev)
 
     class PlotterApp(QMainWindow):
         def __init__(self):
@@ -506,24 +619,149 @@ if has_display:
             d = _SnapDock(title, self)
             if name:
                 d.setObjectName(name)
+            d.setMinimumWidth(0)
             d.setWidget(widget)
+            if widget:
+                widget.setMinimumWidth(0)
+            if not hasattr(self, "_managed_docks"):
+                self._managed_docks = []
+            self._managed_docks.append(d)
             return d
+
+        def _dock_target_height(self, dock):
+            if getattr(dock, "_collapsed", False):
+                return max(24, dock.titleBarWidget().sizeHint().height() if dock.titleBarWidget() else 24)
+            w = dock.widget()
+            if not w:
+                return 120
+            hint = w.sizeHint().height()
+            minimum = w.minimumSizeHint().height()
+            return max(60, min(max(hint, minimum), 520))
+
+        def _rebalance_dock_heights(self):
+            docks = [d for d in getattr(self, "_managed_docks", [])
+                     if d.isVisible() and not d.isFloating()]
+            if not docks:
+                return
+            try:
+                self.resizeDocks(docks, [self._dock_target_height(d) for d in docks],
+                                 Qt.Orientation.Vertical)
+            except Exception:
+                pass
 
         def _scrolled(self, widget):
             s = QScrollArea()
             s.setWidgetResizable(True)
+            s.setMinimumWidth(0)
+            s.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+            s.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            s.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            if widget:
+                widget.setMinimumWidth(0)
+                widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             s.setWidget(widget)
             return s
 
-        def _build_ui(self):
-            self.setDockNestingEnabled(True)
-            self.setDockOptions(
-                QMainWindow.DockOption.AnimatedDocks |
-                QMainWindow.DockOption.AllowNestedDocks |
-                QMainWindow.DockOption.AllowTabbedDocks
-            )
+        def _panel(self, title, widget, collapsed=False):
+            panel = QFrame()
+            panel.setFrameShape(QFrame.Shape.StyledPanel)
+            panel.setMinimumWidth(0)
+            panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            root = QVBoxLayout(panel)
+            root.setContentsMargins(0, 0, 0, 0)
+            root.setSpacing(0)
 
-            # status bar — compact fixed toolbar, not a dock
+            bar = QWidget()
+            bar.setMinimumHeight(24)
+            bar_lay = QHBoxLayout(bar)
+            bar_lay.setContentsMargins(4, 2, 4, 2)
+            bar_lay.setSpacing(4)
+            caret = QPushButton("▶" if collapsed else "▼")
+            caret.setFixedSize(18, 18)
+            caret.setFlat(True)
+            label = QLabel(title)
+            font = label.font()
+            font.setBold(True)
+            label.setFont(font)
+            bar_lay.addWidget(caret)
+            bar_lay.addWidget(label, 1)
+            root.addWidget(bar)
+
+            content = widget
+            content.setMinimumWidth(0)
+            root.addWidget(content, 1)
+            panel._collapsed = bool(collapsed)
+            panel._panel_stretch = 1
+            panel._content_widget = content
+            panel._title_bar = bar
+
+            def apply_state():
+                content.setVisible(not panel._collapsed)
+                caret.setText("▶" if panel._collapsed else "▼")
+                title_h = max(24, bar.sizeHint().height())
+                if panel._collapsed:
+                    panel.setMinimumHeight(title_h)
+                    panel.setMaximumHeight(title_h)
+                    panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+                else:
+                    panel.setMinimumHeight(title_h)
+                    panel.setMaximumHeight(16777215)
+                    panel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                panel.updateGeometry()
+
+            def toggle():
+                panel._collapsed = not panel._collapsed
+                apply_state()
+                parent = panel.parent()
+                if isinstance(parent, QSplitter):
+                    QTimer.singleShot(0, lambda p=parent: self._pack_panel_splitter(p))
+
+            caret.clicked.connect(toggle)
+            bar.mouseDoubleClickEvent = lambda event: toggle()
+            apply_state()
+            return panel
+
+        def _pack_panel_splitter(self, splitter):
+            sizes = []
+            used = 0
+            for i in range(splitter.count()):
+                panel = splitter.widget(i)
+                if getattr(panel, "_column_spacer", False):
+                    continue
+                if getattr(panel, "_collapsed", False):
+                    title_bar = getattr(panel, "_title_bar", None)
+                    size = max(24, title_bar.sizeHint().height() if title_bar else 24)
+                else:
+                    stretch = max(1, int(getattr(panel, "_panel_stretch", 1)))
+                    size = 220 * stretch
+                sizes.append(size)
+                used += size
+            spacer_size = max(1, splitter.height() - used - 12 * max(0, splitter.count() - 1))
+            sizes.append(spacer_size)
+            splitter.setSizes(sizes)
+
+        def _panel_column(self, panel_specs):
+            splitter = QSplitter(Qt.Orientation.Vertical)
+            splitter.setChildrenCollapsible(False)
+            splitter.setHandleWidth(7)
+            splitter.setMinimumWidth(0)
+            splitter.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            for i, (title, widget, collapsed, stretch) in enumerate(panel_specs):
+                panel = self._panel(title, widget, collapsed)
+                panel._panel_stretch = max(1, int(stretch))
+                splitter.addWidget(panel)
+                splitter.setStretchFactor(i, panel._panel_stretch)
+            spacer = QWidget()
+            spacer._column_spacer = True
+            spacer.setMinimumHeight(1)
+            spacer.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            splitter.addWidget(spacer)
+            splitter.setStretchFactor(splitter.count() - 1, 100)
+            QTimer.singleShot(0, lambda s=splitter: self._pack_panel_splitter(s))
+            return splitter
+
+        def _build_ui(self):
+            # status bar — compact fixed toolbar
             status_bar = QToolBar("Status")
             status_bar.setObjectName("toolbar_status")
             status_bar.setMovable(False)
@@ -533,31 +771,35 @@ if has_display:
             status_bar.addWidget(status_widget)
             self.addToolBar(Qt.ToolBarArea.TopToolBarArea, status_bar)
 
-            # individual panel docks — click ▼ to collapse, right-click to re-dock
-            conn_dock     = self._dock("Connection",         self._scrolled(self._build_connection_panel()), "dock_conn")
-            jog_dock      = self._dock("Jogging",            self._scrolled(self._build_jog_panel()),        "dock_jog")
-            zero_dock     = self._dock("Work Zero",          self._scrolled(self._build_workzero_panel()),   "dock_zero")
-            mset_dock     = self._dock("Machine Settings",   self._scrolled(self._build_settings_panel()),   "dock_mset")
-            tool_dock     = self._dock("Tool Management",    self._build_tool_panel(),                       "dock_tools")
-            testpen_dock  = self._dock("Test Pen Generator", self._scrolled(self._build_testpen_panel()),    "dock_testpen")
-            vpype_dock    = self._dock("vpype Generator",    self._scrolled(self._build_vpype_panel()),      "dock_vpype")
-            gcode_dock    = self._dock("G-code Runner",      self._build_gcode_panel(),                      "dock_gcode")
+            main_splitter = QSplitter(Qt.Orientation.Horizontal)
+            main_splitter.setChildrenCollapsible(False)
+            main_splitter.setHandleWidth(7)
+            main_splitter.setMinimumWidth(0)
+            self.setCentralWidget(main_splitter)
 
-            L = Qt.DockWidgetArea.LeftDockWidgetArea
-            H = Qt.Orientation.Horizontal
-            V = Qt.Orientation.Vertical
+            left_col = self._panel_column([
+                ("Connection",       self._scrolled(self._build_connection_panel()), False, 0),
+                ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
+                ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
+                ("Machine Settings", self._scrolled(self._build_settings_panel()),   False, 1),
+            ])
+            middle_col = self._panel_column([
+                ("Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
+                ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), False, 1),
+            ])
+            right_col = self._panel_column([
+                ("Print Queue",     self._scrolled(self._build_queue_panel()),  False, 1),
+                ("Vpype Settings",  self._scrolled(self._build_vpype_panel()),  True,  0),
+                ("G-code Runner",   self._scrolled(self._build_gcode_panel()),  False, 2),
+            ])
 
-            self.addDockWidget(L, conn_dock)
-
-            self.splitDockWidget(conn_dock,  tool_dock,    H)
-            self.splitDockWidget(tool_dock,  vpype_dock,   H)
-
-            self.splitDockWidget(conn_dock,  jog_dock,    V)
-            self.splitDockWidget(jog_dock,   zero_dock,   V)
-            self.splitDockWidget(zero_dock,  mset_dock,   V)
-
-            self.splitDockWidget(vpype_dock, testpen_dock, V)
-            self.splitDockWidget(testpen_dock, gcode_dock, V)
+            main_splitter.addWidget(left_col)
+            main_splitter.addWidget(middle_col)
+            main_splitter.addWidget(right_col)
+            main_splitter.setStretchFactor(0, 0)
+            main_splitter.setStretchFactor(1, 1)
+            main_splitter.setStretchFactor(2, 1)
+            main_splitter.setSizes([300, 520, 520])
 
         def _make_status_bar(self):
             layout = QHBoxLayout()
@@ -868,12 +1110,11 @@ if has_display:
             edit_grp = QGroupBox("Edit Tool")
             eg = QGridLayout(edit_grp)
             eg.setSpacing(4)
-            eg.addWidget(QLabel("Name:"), 0, 0)
+            eg.addWidget(QLabel("Holder:"), 0, 0)
             self.tool_name_edit = QLineEdit()
-            eg.addWidget(self.tool_name_edit, 0, 1)
-            eg.addWidget(QLabel("Color:"), 0, 2)
+            eg.addWidget(self.tool_name_edit, 0, 1, 1, 3)
             self.tool_color_edit = QLineEdit()
-            eg.addWidget(self.tool_color_edit, 0, 3)
+            self.tool_color_edit.hide()
             for row, (lx, ax, ly, ay) in enumerate([
                 ("X:", "tool_x_edit", "Y:", "tool_y_edit"),
                 ("Z:", "tool_z_edit", "Safe Z:", "tool_safe_z_edit"),
@@ -923,7 +1164,11 @@ if has_display:
             # whitespace at the bottom rather than stretching fields/buttons
             controls_scroll = QScrollArea()
             controls_scroll.setWidgetResizable(True)
+            controls_scroll.setMinimumWidth(0)
+            controls_scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+            controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             controls_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            controls_widget.setMinimumWidth(0)
             controls_scroll.setWidget(controls_widget)
 
             splitter.addWidget(controls_scroll)
@@ -1004,12 +1249,14 @@ if has_display:
             layout.addLayout(out_row)
 
             opt_row = QHBoxLayout()
+            self.vpype_splitall_cb    = QCheckBox("splitall"); self.vpype_splitall_cb.setToolTip("Split paths into segments before linemerge; useful for dense meshes, slower.")
             self.vpype_linemerge_cb   = QCheckBox("linemerge");   self.vpype_linemerge_cb.setChecked(True)
             self.vpype_linesort_cb    = QCheckBox("linesort");    self.vpype_linesort_cb.setChecked(True)
+            self.vpype_twoopt_cb      = QCheckBox("two-opt"); self.vpype_twoopt_cb.setToolTip("Extra linesort optimization; slower, good for final plots.")
             self.vpype_reloop_cb      = QCheckBox("reloop")
             self.vpype_toolchanges_cb = QCheckBox("tool changes"); self.vpype_toolchanges_cb.setChecked(True)
-            for cb in [self.vpype_linemerge_cb, self.vpype_linesort_cb,
-                       self.vpype_reloop_cb, self.vpype_toolchanges_cb]:
+            for cb in [self.vpype_splitall_cb, self.vpype_linemerge_cb, self.vpype_linesort_cb,
+                       self.vpype_twoopt_cb, self.vpype_reloop_cb, self.vpype_toolchanges_cb]:
                 opt_row.addWidget(cb)
             layout.addLayout(opt_row)
 
@@ -1175,6 +1422,12 @@ if has_display:
         # ------------------------------------------------------------------
 
         def _on_update_status(self, state):
+            if hasattr(self, "_queue_on_signal") and isinstance(state, str) and state.startswith("__q_"):
+                self._queue_on_signal(state); return
+
+            if hasattr(self, "_queue_on_signal") and isinstance(state, str) and state.startswith("__q_"):
+                self._queue_on_signal(state); return
+
             ok = {"Idle", "Run", "Jog", "Hold", "Home", "Check", "Connected"}
             sym = "🟢" if state in ok else "🔴"
             self.status_label.setText(f"{sym} {state.upper()}")
@@ -1647,9 +1900,9 @@ if has_display:
 
         def refresh_tool_list(self):
             self.tools_list.clear()
-            for t in self.tools:
+            for idx, t in enumerate(self.tools, start=1):
                 self.tools_list.addItem(
-                    f"{t.name} ({t.color}) - X:{t.x:.1f} Y:{t.y:.1f} Z:{t.z:.1f}")
+                    f"{idx}. {t.name} - X:{t.x:.1f} Y:{t.y:.1f} Z:{t.z:.1f}")
 
         def on_tool_select(self, idx):
             if idx < 0 or idx >= len(self.tools):
@@ -1665,7 +1918,7 @@ if has_display:
         def _read_tool_form(self) -> Tool:
             return Tool(
                 name=self.tool_name_edit.text().strip(),
-                color=self.tool_color_edit.text().strip(),
+                color=self.tool_color_edit.text().strip() or "holder",
                 x=float(self.tool_x_edit.text()),
                 y=float(self.tool_y_edit.text()),
                 z=float(self.tool_z_edit.text()),
@@ -2006,6 +2259,35 @@ if has_display:
         def _sort_layers_light_to_dark_matched(self, matched: list) -> list:
             return sorted(matched, key=lambda x: -self._luminance(x[0].get("color") or ""))
 
+        def _ordered_svg_layers_for_plot(self, layers: list) -> list:
+            drawable = [l for l in layers if l.get("color")]
+            if not self.vpype_toolchanges_cb.isChecked():
+                return drawable
+
+            cmyk_order = ["#00ffff", "#ff00ff", "#ffff00", "#000000"]
+            colors = {(l.get("color") or "").lower() for l in drawable}
+            if all(c in colors for c in cmyk_order):
+                ordered = []
+                used = set()
+                for c in cmyk_order:
+                    for idx, layer in enumerate(drawable):
+                        if idx not in used and (layer.get("color") or "").lower() == c:
+                            ordered.append(layer)
+                            used.add(idx)
+                rest = [layer for idx, layer in enumerate(drawable) if idx not in used]
+                return ordered + self._sort_layers_light_to_dark(rest)
+
+            return self._sort_layers_light_to_dark(drawable)
+
+        def _assign_layers_to_holder_slots(self, layers: list) -> list:
+            ordered = self._ordered_svg_layers_for_plot(layers)
+            assignments = []
+            for idx, layer in enumerate(ordered):
+                if idx >= len(self.tools):
+                    break
+                assignments.append((layer, self.tools[idx]))
+            return assignments
+
         def _split_svg_by_color(self, svg_path: str, target_color: str, tmp_path: str) -> bool:
             for prefix, uri in [
                 ("",         "http://www.w3.org/2000/svg"),
@@ -2164,13 +2446,13 @@ if has_display:
 
             self.svg_layer_hint.setText("")
             pen_order = []
-            display_layers = (self._sort_layers_light_to_dark(layers)
-                              if self.vpype_toolchanges_cb.isChecked() else layers)
+            display_layers = self._ordered_svg_layers_for_plot(layers)
+            assignments = self._assign_layers_to_holder_slots(layers)
 
-            for entry in display_layers:
+            for idx, entry in enumerate(display_layers):
                 label = entry["label"]
                 color = entry["color"]
-                tool  = self._match_color_to_tool(label, color)
+                tool = assignments[idx][1] if idx < len(assignments) else None
 
                 row = QWidget()
                 rl = QHBoxLayout(row)
@@ -2188,15 +2470,15 @@ if has_display:
                 rl.addWidget(QLabel("→"))
 
                 if tool:
-                    ml = QLabel(tool.name)
+                    ml = QLabel(f"{tool.name} holder")
                     ml.setStyleSheet("color: #2a9d2a; font-weight: bold;")
                     rl.addWidget(ml)
-                    pen_order.append(tool.name)
+                    pen_order.append(f"{tool.name}: {color}")
                 else:
-                    nm = QLabel("⚠ no tool match")
+                    nm = QLabel("no holder slot")
                     nm.setStyleSheet("color: orange;")
                     rl.addWidget(nm)
-                    pen_order.append(f"? ({self._closest_color_name(color) or label})")
+                    pen_order.append(f"? ({color or label})")
 
                 rl.addStretch()
                 self.svg_layer_rows_layout.addWidget(row)
@@ -2230,8 +2512,13 @@ if has_display:
 
         def _run_vpype_cmd(self, svg_path, cfg_path, profile, out_path, silent=False) -> bool:
             steps = ["read", svg_path]
+            if getattr(self, "vpype_splitall_cb", None) and self.vpype_splitall_cb.isChecked():
+                steps.append("splitall")
             if self.vpype_linemerge_cb.isChecked():   steps.append("linemerge")
-            if self.vpype_linesort_cb.isChecked():    steps.append("linesort")
+            if self.vpype_linesort_cb.isChecked():
+                steps.append("linesort")
+                if getattr(self, "vpype_twoopt_cb", None) and self.vpype_twoopt_cb.isChecked():
+                    steps.append("--two-opt")
             if self.vpype_reloop_cb.isChecked():      steps.append("reloop")
             if self.vpype_linesimplify_cb.isChecked():
                 try:
@@ -2239,7 +2526,10 @@ if has_display:
                 except Exception:
                     tol = 0.05
                 steps.extend(["linesimplify", "-t", f"{tol}mm"])
-            cmd = ["vpype", "-c", cfg_path, *steps, "gwrite", "-p", profile, out_path]
+            # pre_steps can inject scaleto/crop before the optimisation steps
+            all_steps = getattr(self, "_vpype_pre_steps", []) + steps
+            vpype_bin = str(__import__("pathlib").Path.home() / ".local/bin/vpype")
+            cmd = [vpype_bin, "-c", cfg_path, *all_steps, "gwrite", "-p", profile, out_path]
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
@@ -2290,7 +2580,7 @@ if has_display:
                             f"; pre-position over drawing start at safe height")
                         final_lines.append(
                             f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
-                    final_lines.append(f"; --- Layer {i+1}: {label} ({color}) ---")
+                    final_lines.append(f"; --- Layer {i+1}: {tool.name} holder - {label} ({color}) ---")
                     with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
                         for ln in f:
                             ln = ln.strip()
@@ -2305,6 +2595,423 @@ if has_display:
             self.load_gcode_file(output_path)
             QMessageBox.information(self, "Success",
                 f"G-code with tool changes saved to {output_path}")
+
+
+        # ======================================================================
+        # Print Queue dock
+        # ======================================================================
+
+        def _build_queue_panel(self):
+            # Outer widget holds a horizontal splitter: list | preview
+            outer = QWidget()
+            outer_lay = QVBoxLayout(outer)
+            outer_lay.setContentsMargins(0, 0, 0, 0)
+            outer_lay.setSpacing(0)
+
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            splitter.setHandleWidth(4)
+            outer_lay.addWidget(splitter)
+
+            # ── Left side: controls + card list ──────────────────────────────
+            w = QWidget()
+            lay = QVBoxLayout(w)
+            lay.setContentsMargins(8, 8, 4, 8)
+            lay.setSpacing(6)
+            splitter.addWidget(w)
+
+            # ── Right side: SVG preview ───────────────────────────────────────
+            preview_container = QWidget()
+            preview_container.setMinimumWidth(70)
+            preview_container.setStyleSheet(
+                "background:#f8f8f8;border-left:1px solid #ddd;")
+            prev_lay = QVBoxLayout(preview_container)
+            prev_lay.setContentsMargins(6, 6, 6, 6)
+            prev_lay.setSpacing(4)
+
+            self._queue_svg_widget = QSvgWidget()
+            self._queue_svg_widget.setStyleSheet(
+                "background:white;border:1px solid #eee;border-radius:4px;")
+            self._queue_svg_widget.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            prev_lay.addWidget(self._queue_svg_widget, 1)
+
+            self._queue_preview_lbl = QLabel("Select a job\nto preview")
+            self._queue_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._queue_preview_lbl.setStyleSheet(
+                "color:#bbb;font-size:10px;background:transparent;")
+            prev_lay.addWidget(self._queue_preview_lbl)
+
+            splitter.addWidget(preview_container)
+            splitter.setStretchFactor(0, 3)
+            splitter.setStretchFactor(1, 2)
+
+            self._queue_preview_cache = {}   # job_id → svg bytes
+
+            # Server config
+            cfg_row = QHBoxLayout()
+            cfg_row.addWidget(QLabel("Server:"))
+            self._queue_url_edit = QLineEdit(
+                self._queue_load_cfg().get("url", "http://localhost:5001"))
+            self._queue_url_edit.setPlaceholderText("http://pl0tb0tpi5:5001")
+            cfg_row.addWidget(self._queue_url_edit, 1)
+            cfg_row.addWidget(QLabel("Key:"))
+            self._queue_key_edit = QLineEdit(
+                self._queue_load_cfg().get("key", "pl0tb0t-secret"))
+            self._queue_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._queue_key_edit.setFixedWidth(120)
+            cfg_row.addWidget(self._queue_key_edit)
+            save_btn = QPushButton("Save")
+            save_btn.setFixedWidth(48)
+            save_btn.clicked.connect(self._queue_save_cfg)
+            cfg_row.addWidget(save_btn)
+            lay.addLayout(cfg_row)
+
+            # Filter + refresh
+            ctrl = QHBoxLayout()
+            self._queue_filter = QComboBox()
+            self._queue_filter.addItems(["All", "Queued", "Plotting", "Done", "Error"])
+            self._queue_filter.currentTextChanged.connect(self._queue_refresh)
+            ctrl.addWidget(self._queue_filter, 1)
+            ref_btn = QPushButton("\u27f3 Refresh")
+            ref_btn.clicked.connect(self._queue_refresh)
+            ctrl.addWidget(ref_btn)
+            lay.addLayout(ctrl)
+
+            self._queue_status_lbl = QLabel("")
+            self._queue_status_lbl.setStyleSheet("color:#666;font-size:11px;")
+            lay.addWidget(self._queue_status_lbl)
+
+            # Job cards
+            self._queue_cards_widget = QWidget()
+            self._queue_cards_vlay   = QVBoxLayout(self._queue_cards_widget)
+            self._queue_cards_vlay.setContentsMargins(0, 0, 0, 0)
+            self._queue_cards_vlay.setSpacing(4)
+            self._queue_cards_vlay.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(self._queue_cards_widget)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            lay.addWidget(scroll, 1)
+
+            # Action buttons
+            btn_row = QHBoxLayout()
+            add_local_btn = QPushButton("\u002b Add Local SVG")
+            add_local_btn.setToolTip("Add a local SVG file to the print queue")
+            add_local_btn.clicked.connect(self._queue_add_local_svg)
+            btn_row.addWidget(add_local_btn)
+            lay.addLayout(btn_row)
+
+            self._queue_plot_btn = QPushButton("\u2699  SVG \u2192 Gcode")
+            self._queue_plot_btn.setEnabled(False)
+            self._queue_plot_btn.setToolTip(
+                "Download SVG, run vpype with current panel settings, load gcode")
+            self._queue_plot_btn.setStyleSheet(
+                "QPushButton:enabled{background:#4477bb;color:white;font-weight:bold;"
+                "border-radius:4px;padding:5px 12px;}"
+                "QPushButton:disabled{color:#aaa;}")
+            self._queue_plot_btn.clicked.connect(self._queue_load_into_vpype)
+            lay.addWidget(self._queue_plot_btn)
+
+            self._queue_selected_id = None
+            self._queue_jobs_cache  = {}
+            self._queue_auto_timer  = QTimer()
+            self._queue_auto_timer.timeout.connect(self._queue_refresh)
+            self._queue_auto_timer.start(8000)
+            self._queue_refresh()
+            return outer
+
+        def _queue_load_cfg(self):
+            import pathlib, json as _j
+            p = pathlib.Path(__file__).parent / "queue_config.json"
+            try:    return _j.loads(p.read_text())
+            except: return {"url": "http://localhost:5001", "key": "pl0tb0t-secret"}
+
+        def _queue_save_cfg(self):
+            import pathlib, json as _j
+            cfg = {"url": self._queue_url_edit.text().rstrip("/"),
+                   "key": self._queue_key_edit.text()}
+            (pathlib.Path(__file__).parent / "queue_config.json").write_text(
+                _j.dumps(cfg, indent=2))
+            self._queue_status_lbl.setText("Config saved.")
+            self._queue_refresh()
+
+        def _queue_http(self, path, method="GET", body=None):
+            import urllib.request, json as _j
+            url  = self._queue_url_edit.text().rstrip("/") + path
+            data = (_j.dumps(body).encode() if body else None)
+            req  = urllib.request.Request(
+                url, data=data, method=method,
+                headers={"X-API-Key": self._queue_key_edit.text(),
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=6) as r:
+                return _j.loads(r.read())
+
+        def _queue_refresh(self):
+            import threading
+            def _fetch():
+                try:
+                    filt = self._queue_filter.currentText().lower()
+                    path = f"/jobs?status={filt}" if filt != "all" else "/jobs"
+                    jobs = self._queue_http(path)
+                    self._queue_jobs_cache = {j["id"]: j for j in jobs}
+                    self.signals.update_status.emit(f"__q_ok__{len(jobs)}")
+                except Exception as e:
+                    self.signals.update_status.emit(f"__q_err__{e}")
+            threading.Thread(target=_fetch, daemon=True).start()
+
+        def _queue_on_signal(self, msg):
+            if msg.startswith("__q_ok__"):
+                n = msg.split("__q_ok__", 1)[1]
+                self._queue_status_lbl.setText(f"{n} job(s) in queue")
+                self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+            elif msg.startswith("__q_err__"):
+                err = msg.split("__q_err__", 1)[1]
+                self._queue_status_lbl.setText(f"Error: {err}")
+            elif msg.startswith("__q_prev__") and not msg.startswith("__q_prev_err__"):
+                job_id = msg.split("__q_prev__", 1)[1]
+                if job_id == self._queue_selected_id:
+                    self._queue_apply_preview(job_id)
+            elif msg.startswith("__q_prev_err__"):
+                self._queue_preview_lbl.setText("Preview\nunavailable")
+            elif msg.startswith("__q_vpype__"):
+                svg_path = msg.split("__q_vpype__", 1)[1]
+                self._queue_status_lbl.setText("Running vpype\u2026")
+                # Populate vpype panel fields
+                self.vpype_svg_edit.setText(svg_path)
+                import os
+                base = os.path.splitext(svg_path)[0]
+                self.vpype_output_edit.setText(base + ".gcode")
+                layers = self._parse_svg_layers(svg_path)
+                self._svg_layers = layers
+                self._update_svg_layer_display(layers)
+                # Scale browser SVG coordinates to the physical paper.
+                # Do not crop here: crop 0 0 9in 12in clips 900x1200 SVGs.
+                job = self._queue_jobs_cache.get(self._queue_selected_id, {})
+                paper  = job.get("paper_size", "9x12")
+                orient = job.get("orientation", "portrait")
+                parts  = paper.replace("x", " ").split()
+                pw, ph = (parts + ["12"])[:2]
+                if orient == "landscape": pw, ph = ph, pw
+                self._vpype_pre_steps = ["scaleto", f"{pw}in", f"{ph}in"]
+                self.run_vpype()
+                self._vpype_pre_steps = []          # clear after use
+                self._queue_status_lbl.setText("Gcode ready \u2713")
+                self._queue_plot_btn.setEnabled(
+                    self._queue_selected_id is not None)
+
+        def _queue_rebuild_cards(self, jobs):
+            vlay = self._queue_cards_vlay
+            while vlay.count() > 1:
+                item = vlay.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            for job in jobs:
+                card = JobCard(job)
+                card.deleted.connect(self._queue_delete)
+                card.selected.connect(self._queue_select)
+                if job["id"] == self._queue_selected_id:
+                    card.setStyleSheet(card.styleSheet() +
+                                       "JobCard{border:2px solid #2a7;}")
+                vlay.insertWidget(vlay.count() - 1, card)
+            queued_sel = (
+                self._queue_selected_id is not None and
+                self._queue_jobs_cache.get(
+                    self._queue_selected_id, {}).get("status") == "queued")
+            self._queue_plot_btn.setEnabled(queued_sel)
+
+        def _queue_select(self, job_id):
+            self._queue_selected_id = job_id
+            self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+            self._queue_load_preview(job_id)
+
+        def _queue_load_preview(self, job_id):
+            """Download SVG for job_id and render it in the preview pane."""
+            if not hasattr(self, "_queue_svg_widget"):
+                return
+            # Instant render if already cached
+            if job_id in self._queue_preview_cache:
+                self._queue_apply_preview(job_id)
+                return
+            self._queue_svg_widget.load(b"")   # clear while loading
+            self._queue_preview_lbl.setText("Loading\u2026")
+            import threading
+            def _fetch():
+                try:
+                    import urllib.request
+                    url = (self._queue_url_edit.text().rstrip("/") +
+                           f"/jobs/{job_id}/svg")
+                    req = urllib.request.Request(
+                        url, headers={"X-API-Key": self._queue_key_edit.text()})
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        data = r.read()
+                    self._queue_preview_cache[job_id] = data
+                    self.signals.update_status.emit(f"__q_prev__{job_id}")
+                except Exception:
+                    self.signals.update_status.emit(f"__q_prev_err__{job_id}")
+            threading.Thread(target=_fetch, daemon=True).start()
+
+        def _queue_apply_preview(self, job_id):
+            data = self._queue_preview_cache.get(job_id, b"")
+            if data and hasattr(self, "_queue_svg_widget"):
+                self._queue_svg_widget.load(data)
+                self._queue_preview_lbl.setText("")
+            else:
+                self._queue_preview_lbl.setText("No preview")
+
+        def _queue_delete(self, job_id):
+            try:
+                self._queue_http(f"/jobs/{job_id}", method="DELETE")
+                if self._queue_selected_id == job_id:
+                    self._queue_selected_id = None
+                self._queue_jobs_cache.pop(job_id, None)
+                self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+                self._queue_status_lbl.setText("Job deleted.")
+            except Exception as e:
+                QMessageBox.warning(self, "Delete failed", str(e))
+
+        def _queue_add_local_svg(self):
+            """Open a file picker and add the chosen SVG to the print queue."""
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Add SVG to Queue", "", "SVG files (*.svg)")
+            if not path:
+                return
+            import pathlib, threading
+            fname = pathlib.Path(path).stem
+            svg_text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+            def _post():
+                try:
+                    import json as _j, urllib.request
+                    body = _j.dumps({
+                        "svg": svg_text,
+                        "sketch_name": fname,
+                        "paper_size": "8.5x11",
+                        "orientation": "portrait",
+                    }).encode()
+                    req = urllib.request.Request(
+                        self._queue_url_edit.text().rstrip("/") + "/jobs",
+                        data=body, method="POST",
+                        headers={"X-API-Key": self._queue_key_edit.text(),
+                                 "Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        result = _j.loads(r.read())
+                    self.signals.update_status.emit(
+                        f"__q_ok__{len(self._queue_jobs_cache) + 1}")
+                    self._queue_refresh()
+                except Exception as e:
+                    self.signals.show_error.emit("Queue", f"Add local SVG failed: {e}")
+            threading.Thread(target=_post, daemon=True).start()
+
+        def _queue_load_into_vpype(self):
+            """Download the selected queue job's SVG and load it into the vpype panel."""
+            job_id = self._queue_selected_id
+            job    = self._queue_jobs_cache.get(job_id)
+            if not job:
+                return
+            import threading
+            self._queue_plot_btn.setEnabled(False)
+            self._queue_status_lbl.setText(f"Downloading {job_id}\u2026")
+            def _run():
+                import tempfile, pathlib, urllib.request
+                try:
+                    url = (self._queue_url_edit.text().rstrip("/") +
+                           f"/jobs/{job_id}/svg")
+                    req = urllib.request.Request(
+                        url, headers={"X-API-Key": self._queue_key_edit.text()})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        svg_data = r.read()
+                    # Strip visual-only gray border rect before vpype.
+                    import re as _re
+                    svg_text = svg_data.decode("utf-8", errors="replace")
+                    svg_text = _re.sub(
+                        r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
+                        "", svg_text)
+                    # Write to a named temp file the vpype panel can read
+                    tmp = pathlib.Path(tempfile.mkdtemp())
+                    sketch = job.get("sketch_name", job_id) or job_id
+                    svg_path = tmp / f"{sketch}.svg"
+                    svg_path.write_text(svg_text, encoding="utf-8")
+                    # Set vpype SVG field and default output on main thread
+                    self.signals.update_status.emit(
+                        f"__q_vpype__{str(svg_path)}")
+                except Exception as e:
+                    self.signals.show_error.emit("Queue", f"Load failed: {e}")
+                finally:
+                    self._queue_refresh()
+            threading.Thread(target=_run, daemon=True).start()
+
+        def _queue_plot_selected(self):
+            job_id = self._queue_selected_id
+            job    = self._queue_jobs_cache.get(job_id)
+            if not job:
+                return
+            import threading
+            self._queue_plot_btn.setEnabled(False)
+            self._queue_status_lbl.setText(f"Processing {job_id}\u2026")
+            def _run():
+                import tempfile, subprocess, pathlib
+                tmp = pathlib.Path(tempfile.mkdtemp())
+                svg_path   = tmp / f"{job_id}.svg"
+                gcode_path = tmp / f"{job_id}.gcode"
+                try:
+                    import urllib.request
+                    url = (self._queue_url_edit.text().rstrip("/") +
+                           f"/jobs/{job_id}/svg")
+                    req = urllib.request.Request(
+                        url, headers={"X-API-Key": self._queue_key_edit.text()})
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        _svg_raw = r.read()
+                    # Strip visual-only gray border rect before vpype.
+                    # SVG exports include <rect stroke="#b4b4b4"> for web display
+                    # only; vpype would plot it as a rectangle around the paper.
+                    import re as _re
+                    _svg_txt = _svg_raw.decode("utf-8", errors="replace")
+                    _svg_txt = _re.sub(
+                        r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
+                        "", _svg_txt)
+                    svg_path.write_text(_svg_txt, encoding="utf-8")
+                    self._queue_http(f"/jobs/{job_id}/status",
+                                     "PATCH", {"status": "plotting"})
+                    paper  = job.get("paper_size", "8.5x11")
+                    orient = job.get("orientation", "portrait")
+                    parts  = paper.replace("x", " ").split()
+                    pw, ph = (parts + ["11"])[:2]
+                    ls     = (f"{ph}x{pw}in" if orient == "landscape"
+                               else f"{pw}x{ph}in")
+                    vpype = str(pathlib.Path.home() / ".local/bin/vpype")
+                    cfg   = self.config.vpype_config.strip()
+                    prof  = self.config.vpype_profile.strip()
+                    # Scale browser SVG coordinates to physical paper size.
+                    # Do not crop here: crop 0 0 9in 12in clips 900x1200 SVGs.
+                    cmd = (f"{vpype} read \"{svg_path}\""
+                           f" scaleto {pw}in {ph}in"
+                           f" linesimplify -t 0.05mm linemerge linesort --two-opt")
+                    if cfg and prof:
+                        cmd += f" gwrite -p {prof} \"{gcode_path}\""
+                    else:
+                        out = gcode_path.with_suffix(".out.svg")
+                        cmd += f" write \"{out}\""
+                        gcode_path = out
+                    if subprocess.call(cmd, shell=True) != 0:
+                        raise RuntimeError("vpype returned non-zero exit code")
+                    if self.port and gcode_path.suffix == ".gcode" and gcode_path.exists():
+                        self.gcode_path = str(gcode_path)
+                        self.signals.show_info.emit(
+                            "Queue", f"Job {job_id} ready — press Send in G-code Runner.")
+                    else:
+                        self.signals.show_info.emit(
+                            "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
+                    self._queue_http(f"/jobs/{job_id}/status",
+                                     "PATCH", {"status": "done"})
+                except Exception as e:
+                    try:
+                        self._queue_http(f"/jobs/{job_id}/status",
+                                         "PATCH", {"status": "error"})
+                    except Exception:
+                        pass
+                    self.signals.show_error.emit("Queue Error", str(e))
+                finally:
+                    self._queue_refresh()
+            threading.Thread(target=_run, daemon=True).start()
 
         def run_vpype(self):
             svg_path    = self.vpype_svg_edit.text().strip()
@@ -2327,17 +3034,18 @@ if has_display:
                 self.vpype_output_edit.setText(output_path)
 
             if self.vpype_toolchanges_cb.isChecked() and self._svg_layers:
-                matched = [(l, self._match_color_to_tool(l["label"], l["color"]))
-                           for l in self._svg_layers]
-                matched = [(l, t) for l, t in matched if t is not None]
-                if matched:
+                assignments = self._assign_layers_to_holder_slots(self._svg_layers)
+                if assignments:
+                    if len(assignments) < len(self._ordered_svg_layers_for_plot(self._svg_layers)):
+                        QMessageBox.warning(self, "Not enough holder slots",
+                            "More SVG colors/layers were detected than configured holder slots. "
+                            "Only assigned slots will be generated.")
                     self._run_vpype_with_toolchanges(
-                        svg_path, config_path, profile, output_path,
-                        self._sort_layers_light_to_dark_matched(matched))
+                        svg_path, config_path, profile, output_path, assignments)
                     return
                 else:
-                    QMessageBox.warning(self, "No tool matches",
-                        "Tool changes enabled but no layers matched tools — "
+                    QMessageBox.warning(self, "No holder slots",
+                        "Tool changes enabled but no holder slots are configured — "
                         "falling back to single-pass vpype.")
 
             if not self._run_vpype_cmd(svg_path, config_path, profile, output_path):
@@ -2465,7 +3173,7 @@ if has_display:
         def parse_gcode_for_preview(self, file_path: str):
             segments, bounds = [], None
             truncated = False
-            max_seg = 10000
+            max_seg = 250000
             x = y = 0.0
             abs_mode = True
             motion_mode = "G0"
@@ -2481,17 +3189,10 @@ if has_display:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     for raw in f:
                         raw_s = raw.strip()
-                        # Parse color hints from tool-change comments
+                        # Parse artwork color hints from generated layer comments.
+                        # Holder pickup/drop comments are machine instructions, not
+                        # preview color channels.
                         if raw_s.startswith(";"):
-                            m = re.search(r"PICK UP:\s*(.+?)\s*===", raw_s)
-                            if m:
-                                tool = find_tool(self.tools, m.group(1).strip())
-                                if tool:
-                                    c = QColor(tool.color)
-                                    if not c.isValid():
-                                        c = QColor("#222222")
-                                    current_color = c.name()
-                                    _register_color(current_color, tool.name)
                             m = re.search(r"Layer \d+:.*?\((#[0-9a-fA-F]{6})\)", raw_s)
                             if m:
                                 current_color = m.group(1).lower()
@@ -2522,16 +3223,20 @@ if has_display:
                         new_x = (x + x_val if not abs_mode else x_val) if x_val is not None else x
                         new_y = (y + y_val if not abs_mode else y_val) if y_val is not None else y
                         if new_x != x or new_y != y:
-                            if bounds is None:
-                                bounds = [x, y, x, y]
-                            bounds[0] = min(bounds[0], x, new_x)
-                            bounds[1] = min(bounds[1], y, new_y)
-                            bounds[2] = max(bounds[2], x, new_x)
-                            bounds[3] = max(bounds[3], y, new_y)
-                            if len(segments) < max_seg:
-                                segments.append((x, y, new_x, new_y, motion_mode, current_color))
-                            else:
-                                truncated = True
+                            # Preview and bounds should represent drawing moves only.
+                            # G0 travel/parking moves otherwise dominate the extents
+                            # and can hide most plotted content in dense CMYK files.
+                            if motion_mode == "G1":
+                                if bounds is None:
+                                    bounds = [x, y, x, y]
+                                bounds[0] = min(bounds[0], x, new_x)
+                                bounds[1] = min(bounds[1], y, new_y)
+                                bounds[2] = max(bounds[2], x, new_x)
+                                bounds[3] = max(bounds[3], y, new_y)
+                                if len(segments) < max_seg:
+                                    segments.append((x, y, new_x, new_y, motion_mode, current_color))
+                                else:
+                                    truncated = True
                             x, y = new_x, new_y
 
                 self.gcode_segments = segments
@@ -2805,7 +3510,7 @@ if has_display:
         # Layout persistence
         # ------------------------------------------------------------------
 
-        _LAYOUT_PATH = "pl0tb0t_layout.json"
+        _LAYOUT_PATH = "pl0tb0t_layout_splitter_v4.json"
 
         def _save_layout(self):
             data = {
