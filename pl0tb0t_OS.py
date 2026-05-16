@@ -2795,6 +2795,7 @@ if has_display:
             self._queue_jobs_cache = {j["id"]: j for j in jobs}
             self._queue_status_lbl.setText(f"{len(jobs)} job(s) in queue")
             self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+            self._queue_archive_missing_jobs(jobs)
 
         def _queue_on_signal(self, msg):
             if msg == "__q_refresh__":
@@ -2898,6 +2899,58 @@ if has_display:
                 self._queue_preview_lbl.setText("")
             else:
                 self._queue_preview_lbl.setText("No preview")
+
+        def _queue_archive_dir(self):
+            import pathlib
+            path = pathlib.Path(__file__).parent / "SVG Archive"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        def _queue_safe_filename(self, value: str) -> str:
+            import re as _re
+            safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "Untitled")).strip("-._")
+            return safe[:60] or "Untitled"
+
+        def _queue_archive_path_for_job(self, job: dict):
+            archive_dir = self._queue_archive_dir()
+            job_id = str(job.get("id", "unknown"))
+            existing = list(archive_dir.glob(f"*_{job_id}_*.svg"))
+            if existing:
+                return existing[0]
+            created = int(job.get("created_at") or __import__("time").time())
+            sketch = self._queue_safe_filename(job.get("sketch_name") or "Untitled")
+            return archive_dir / f"{created}_{job_id}_{sketch}.svg"
+
+        def _queue_archive_svg(self, job: dict, svg_text: str):
+            path = self._queue_archive_path_for_job(job)
+            if not path.exists():
+                path.write_text(svg_text, encoding="utf-8")
+            return path
+
+        def _queue_archive_missing_jobs(self, jobs):
+            import threading
+            base_url, key = self._queue_server_params()
+            pending = [job for job in jobs if not self._queue_archive_path_for_job(job).exists()]
+            if not pending:
+                return
+            def _run():
+                import urllib.request
+                for job in pending:
+                    job_id = str(job.get("id", ""))
+                    if not job_id:
+                        continue
+                    try:
+                        url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
+                        headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
+                        if key:
+                            headers["X-API-Key"] = key
+                        req = urllib.request.Request(url, headers=headers)
+                        with urllib.request.urlopen(req, timeout=30) as r:
+                            svg_text = r.read().decode("utf-8", errors="replace")
+                        self._queue_archive_svg(job, svg_text)
+                    except Exception:
+                        pass
+            threading.Thread(target=_run, daemon=True).start()
 
         def _queue_delete(self, job_id):
             self._queue_status_lbl.setText(f"Deleting {job_id}...")
@@ -3005,6 +3058,7 @@ if has_display:
                     svg_text = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", svg_text)
+                    self._queue_archive_svg(job, svg_text)
                     svg_text = self._queue_svg_physical_page(svg_text, job)
                     # Write to a named temp file the vpype panel can read
                     tmp = pathlib.Path(tempfile.mkdtemp())
@@ -3051,6 +3105,7 @@ if has_display:
                     _svg_txt = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", _svg_txt)
+                    self._queue_archive_svg(job, _svg_txt)
                     _svg_txt = self._queue_svg_physical_page(_svg_txt, job)
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     self._queue_http(f"/jobs/{job_id}/status",
