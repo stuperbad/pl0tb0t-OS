@@ -502,10 +502,6 @@ if has_display:
                 QPushButton:hover { background: #ffdddd; color: #c00; }
             """)
             del_btn.clicked.connect(self._confirm_delete)
-            if self.locked:
-                del_btn.setEnabled(False)
-                del_btn.setToolTip("Queue is locked while G-code is running")
-                self.setCursor(Qt.CursorShape.ArrowCursor)
             header.addWidget(del_btn)
             root.addLayout(header)
 
@@ -555,8 +551,6 @@ if has_display:
             return f'{n / (1024 * 1024):.1f} MB' if n < 10 * 1024 * 1024 else f'{n / (1024 * 1024):.0f} MB'
 
         def _confirm_delete(self):
-            if self.locked:
-                return
             name = self.job.get('sketch_name') or 'this job'
             reply = QMessageBox.question(
                 self, 'Delete Job',
@@ -568,9 +562,6 @@ if has_display:
                 self.deleted.emit(self.job_id)
 
         def mousePressEvent(self, ev):
-            if self.locked:
-                ev.ignore()
-                return
             self.selected.emit(self.job_id)
             super().mousePressEvent(ev)
 
@@ -598,7 +589,6 @@ if has_display:
             self.gcode_running = False
             self.gcode_paused = False
             self.gcode_stop = False
-            self._queue_locked = False
 
             self._svg_layers = []
             self._layer_colors = []       # [(hex, label), ...]
@@ -2749,32 +2739,6 @@ if has_display:
             self._queue_refresh()
             return outer
 
-        def _queue_is_locked(self):
-            return bool(getattr(self, "_queue_locked", False) or getattr(self, "gcode_running", False))
-
-        def _set_queue_locked(self, locked: bool):
-            self._queue_locked = bool(locked)
-            if not hasattr(self, "_queue_status_lbl"):
-                return
-            for name in (
-                "_queue_url_edit", "_queue_key_edit", "_queue_save_btn",
-                "_queue_filter", "_queue_refresh_btn", "_queue_add_local_btn",
-            ):
-                widget = getattr(self, name, None)
-                if widget is not None:
-                    widget.setEnabled(not locked)
-            if hasattr(self, "_queue_auto_timer"):
-                if locked and self._queue_auto_timer.isActive():
-                    self._queue_auto_timer.stop()
-                elif not locked and not self._queue_auto_timer.isActive():
-                    self._queue_auto_timer.start(8000)
-            if hasattr(self, "_queue_cards_vlay"):
-                self._queue_rebuild_cards(list(getattr(self, "_queue_jobs_cache", {}).values()))
-            if locked:
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-            else:
-                self._queue_refresh()
-
         def _queue_load_cfg(self):
             import pathlib, json as _j
             p = pathlib.Path(__file__).parent / "queue_config.json"
@@ -2782,9 +2746,6 @@ if has_display:
             except: return {"url": "http://localhost:5001", "key": "pl0tb0t-secret"}
 
         def _queue_save_cfg(self):
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-                return
             import pathlib, json as _j
             cfg = {"url": self._queue_url_edit.text().rstrip("/"),
                    "key": self._queue_key_edit.text()}
@@ -2809,9 +2770,6 @@ if has_display:
                 return _j.loads(r.read())
 
         def _queue_refresh(self):
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-                return
             import threading
             def _fetch():
                 try:
@@ -2830,14 +2788,11 @@ if has_display:
                 if self._queue_selected_id == job_id:
                     self._queue_selected_id = None
                 self._queue_jobs_cache.pop(job_id, None)
-                if not self._queue_is_locked():
-                    self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
-                self._queue_status_lbl.setText("Job deleted." if not self._queue_is_locked() else "Job deleted. Drawing active - queue locked")
+                self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+                self._queue_status_lbl.setText("Job deleted.")
             elif msg.startswith("__q_delete_err__"):
                 err = msg.split("__q_delete_err__", 1)[1]
                 self._queue_status_lbl.setText(f"Delete failed: {err}")
-            elif self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
             elif msg.startswith("__q_ok__"):
                 n = msg.split("__q_ok__", 1)[1]
                 self._queue_status_lbl.setText(f"{n} job(s) in queue")
@@ -2873,9 +2828,9 @@ if has_display:
                 item = vlay.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
-            locked = self._queue_is_locked()
+            locked = bool(getattr(self, "gcode_running", False))
             for job in jobs:
-                card = JobCard(job, locked=locked)
+                card = JobCard(job, locked=False)
                 card.deleted.connect(self._queue_delete)
                 card.selected.connect(self._queue_select)
                 if job["id"] == self._queue_selected_id:
@@ -2889,17 +2844,12 @@ if has_display:
             self._queue_plot_btn.setEnabled((not locked) and queued_sel)
 
         def _queue_select(self, job_id):
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-                return
             self._queue_selected_id = job_id
             self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
             self._queue_load_preview(job_id)
 
         def _queue_load_preview(self, job_id):
             """Download SVG for job_id and render it in the preview pane."""
-            if self._queue_is_locked():
-                return
             if not hasattr(self, "_queue_svg_widget"):
                 return
             # Instant render if already cached
@@ -2936,9 +2886,6 @@ if has_display:
                 self._queue_preview_lbl.setText("No preview")
 
         def _queue_delete(self, job_id):
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-                return
             self._queue_status_lbl.setText(f"Deleting {job_id}...")
             import threading
             def _run():
@@ -2951,9 +2898,6 @@ if has_display:
 
         def _queue_add_local_svg(self):
             """Open a file picker and add the chosen SVG to the print queue."""
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
-                return
             path, _ = QFileDialog.getOpenFileName(
                 self, "Add SVG to Queue", "", "SVG files (*.svg)")
             if not path:
@@ -3019,8 +2963,8 @@ if has_display:
 
         def _queue_load_into_vpype(self):
             """Download the selected queue job's SVG and load it into the vpype panel."""
-            if self._queue_is_locked():
-                self._queue_status_lbl.setText("Drawing active - queue locked")
+            if self.gcode_running:
+                self._queue_status_lbl.setText("Drawing active - SVG to G-code is disabled")
                 return
             job_id = self._queue_selected_id
             job    = self._queue_jobs_cache.get(job_id)
@@ -3411,7 +3355,7 @@ if has_display:
             self.gcode_pause_btn.setEnabled(True)
             self.gcode_pause_btn.setText("⏸ Pause")
             self.gcode_stop_btn.setEnabled(True)
-            self._set_queue_locked(True)
+            self._queue_rebuild_cards(list(getattr(self, "_queue_jobs_cache", {}).values()))
 
             def runner():
                 try:
@@ -3469,7 +3413,8 @@ if has_display:
             self.gcode_stop_btn.setEnabled(False)
             if not self._status_timer.isActive():
                 self._status_timer.start(500)
-            self._set_queue_locked(False)
+            if hasattr(self, "_queue_cards_vlay"):
+                self._queue_rebuild_cards(list(getattr(self, "_queue_jobs_cache", {}).values()))
 
         def toggle_pause_gcode(self):
             if not self.gcode_running:
