@@ -2817,9 +2817,25 @@ if has_display:
             self._queue_refresh()
 
         def _queue_server_params(self):
+            def _resolve_key(value):
+                key = (value or "").strip()
+                if not key:
+                    return ""
+                import pathlib
+                key_path = key[1:] if key.startswith("@") else key
+                p = pathlib.Path(key_path)
+                if not p.is_absolute():
+                    p = pathlib.Path(__file__).parent / key_path
+                if p.exists() and p.is_file():
+                    try:
+                        return p.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        return key
+                return key
+
             return (
                 self._queue_url_edit.text().rstrip("/"),
-                self._queue_key_edit.text().strip(),
+                _resolve_key(self._queue_key_edit.text()),
             )
 
         def _queue_http(self, path, method="GET", body=None, base_url=None, key=None, timeout=20):
@@ -3081,8 +3097,28 @@ if has_display:
                     return _re.sub(pattern, f' {name}="{value}"', tag, count=1, flags=_re.I)
                 return tag[:-1] + f' {name}="{value}">'
 
+            def _attr(tag: str, name: str):
+                m = _re.search(r'\s' + name + r'\s*=\s*["\']([^"\']*)["\']', tag, flags=_re.I)
+                return m.group(1) if m else None
+
+            def _numeric_length(value):
+                if not value:
+                    return None
+                m = _re.match(r'\s*([-+]?\d*\.?\d+)', value)
+                if not m:
+                    return None
+                try:
+                    return float(m.group(1))
+                except Exception:
+                    return None
+
             def _replace(match):
                 tag = match.group(0)
+                if not _attr(tag, "viewBox"):
+                    old_w = _numeric_length(_attr(tag, "width"))
+                    old_h = _numeric_length(_attr(tag, "height"))
+                    if old_w and old_h:
+                        tag = _set_attr(tag, "viewBox", f"0 0 {old_w:g} {old_h:g}")
                 tag = _set_attr(tag, "width", f"{pw:g}in")
                 tag = _set_attr(tag, "height", f"{ph:g}in")
                 return tag

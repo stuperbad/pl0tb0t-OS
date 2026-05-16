@@ -14,5 +14,6 @@ old_WIP_*.py
 .*.swp
 
 queue_config.json
+.queue-admin-token.local
 
 SVG Archive/
