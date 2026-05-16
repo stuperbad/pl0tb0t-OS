@@ -266,6 +266,7 @@ if has_display:
         gcode_status   = pyqtSignal(str)
         gcode_highlight = pyqtSignal(int)
         grbl_log       = pyqtSignal(str)
+        queue_jobs_ready = pyqtSignal(list)
 
     class GcodePreviewWidget(QWidget):
         def __init__(self):
@@ -614,6 +615,7 @@ if has_display:
             self.signals.gcode_status.connect(lambda s: self.gcode_status_label.setText(s))
             self.signals.gcode_highlight.connect(self._highlight_gcode_line_at)
             self.signals.grbl_log.connect(self._append_grbl_log)
+            self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
 
             self._build_ui()
             self._restore_layout()
@@ -2754,36 +2756,50 @@ if has_display:
             self._queue_status_lbl.setText("Config saved.")
             self._queue_refresh()
 
-        def _queue_http(self, path, method="GET", body=None):
+        def _queue_server_params(self):
+            return (
+                self._queue_url_edit.text().rstrip("/"),
+                self._queue_key_edit.text().strip(),
+            )
+
+        def _queue_http(self, path, method="GET", body=None, base_url=None, key=None, timeout=20):
             import urllib.request, json as _j
-            url  = self._queue_url_edit.text().rstrip("/") + path
+            if base_url is None or key is None:
+                base_url, key = self._queue_server_params()
+            url  = base_url.rstrip("/") + path
             data = (_j.dumps(body).encode() if body else None)
             headers = {
                 "User-Agent": f"pl0tb0t-OS/{__version__}",
                 "Content-Type": "application/json",
             }
-            key = self._queue_key_edit.text().strip()
             if key:
                 headers["X-API-Key"] = key
             req = urllib.request.Request(url, data=data, method=method, headers=headers)
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return _j.loads(r.read())
 
         def _queue_refresh(self):
             import threading
+            base_url, key = self._queue_server_params()
+            filt = self._queue_filter.currentText().lower()
             def _fetch():
                 try:
-                    filt = self._queue_filter.currentText().lower()
                     path = f"/jobs?status={filt}" if filt != "all" else "/jobs"
-                    jobs = self._queue_http(path)
-                    self._queue_jobs_cache = {j["id"]: j for j in jobs}
-                    self.signals.update_status.emit(f"__q_ok__{len(jobs)}")
+                    jobs = self._queue_http(path, base_url=base_url, key=key)
+                    self.signals.queue_jobs_ready.emit(jobs)
                 except Exception as e:
                     self.signals.update_status.emit(f"__q_err__{e}")
             threading.Thread(target=_fetch, daemon=True).start()
 
+        def _queue_apply_jobs(self, jobs):
+            self._queue_jobs_cache = {j["id"]: j for j in jobs}
+            self._queue_status_lbl.setText(f"{len(jobs)} job(s) in queue")
+            self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
+
         def _queue_on_signal(self, msg):
-            if msg.startswith("__q_deleted__"):
+            if msg == "__q_refresh__":
+                self._queue_refresh()
+            elif msg.startswith("__q_deleted__"):
                 job_id = msg.split("__q_deleted__", 1)[1]
                 if self._queue_selected_id == job_id:
                     self._queue_selected_id = None
@@ -2796,7 +2812,6 @@ if has_display:
             elif msg.startswith("__q_ok__"):
                 n = msg.split("__q_ok__", 1)[1]
                 self._queue_status_lbl.setText(f"{n} job(s) in queue")
-                self._queue_rebuild_cards(list(self._queue_jobs_cache.values()))
             elif msg.startswith("__q_err__"):
                 err = msg.split("__q_err__", 1)[1]
                 self._queue_status_lbl.setText(f"Error: {err}")
@@ -2859,13 +2874,12 @@ if has_display:
             self._queue_svg_widget.load(b"")   # clear while loading
             self._queue_preview_lbl.setText("Loading\u2026")
             import threading
+            base_url, key = self._queue_server_params()
             def _fetch():
                 try:
                     import urllib.request
-                    url = (self._queue_url_edit.text().rstrip("/") +
-                           f"/jobs/{job_id}/svg")
+                    url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
                     headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
-                    key = self._queue_key_edit.text().strip()
                     if key:
                         headers["X-API-Key"] = key
                     req = urllib.request.Request(url, headers=headers)
@@ -2888,9 +2902,10 @@ if has_display:
         def _queue_delete(self, job_id):
             self._queue_status_lbl.setText(f"Deleting {job_id}...")
             import threading
+            base_url, key = self._queue_server_params()
             def _run():
                 try:
-                    self._queue_http(f"/jobs/{job_id}", method="DELETE")
+                    self._queue_http(f"/jobs/{job_id}", method="DELETE", base_url=base_url, key=key)
                     self.signals.update_status.emit(f"__q_deleted__{job_id}")
                 except Exception as e:
                     self.signals.update_status.emit(f"__q_delete_err__{e}")
@@ -2905,6 +2920,7 @@ if has_display:
             import pathlib, threading
             fname = pathlib.Path(path).stem
             svg_text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+            base_url, key = self._queue_server_params()
             def _post():
                 try:
                     import json as _j, urllib.request
@@ -2918,17 +2934,16 @@ if has_display:
                         "User-Agent": f"pl0tb0t-OS/{__version__}",
                         "Content-Type": "application/json",
                     }
-                    key = self._queue_key_edit.text().strip()
                     if key:
                         headers["X-API-Key"] = key
                     req = urllib.request.Request(
-                        self._queue_url_edit.text().rstrip("/") + "/jobs",
+                        base_url.rstrip("/") + "/jobs",
                         data=body, method="POST", headers=headers)
                     with urllib.request.urlopen(req, timeout=20) as r:
                         result = _j.loads(r.read())
                     self.signals.update_status.emit(
                         f"__q_ok__{len(self._queue_jobs_cache) + 1}")
-                    self._queue_refresh()
+                    self.signals.update_status.emit("__q_refresh__")
                 except Exception as e:
                     self.signals.show_error.emit("Queue", f"Add local SVG failed: {e}")
             threading.Thread(target=_post, daemon=True).start()
@@ -2973,13 +2988,12 @@ if has_display:
             import threading
             self._queue_plot_btn.setEnabled(False)
             self._queue_status_lbl.setText(f"Downloading {job_id}\u2026")
+            base_url, key = self._queue_server_params()
             def _run():
                 import tempfile, pathlib, urllib.request
                 try:
-                    url = (self._queue_url_edit.text().rstrip("/") +
-                           f"/jobs/{job_id}/svg")
+                    url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
                     headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
-                    key = self._queue_key_edit.text().strip()
                     if key:
                         headers["X-API-Key"] = key
                     req = urllib.request.Request(url, headers=headers)
@@ -3003,7 +3017,7 @@ if has_display:
                 except Exception as e:
                     self.signals.show_error.emit("Queue", f"Load failed: {e}")
                 finally:
-                    self._queue_refresh()
+                    self.signals.update_status.emit("__q_refresh__")
             threading.Thread(target=_run, daemon=True).start()
 
         def _queue_plot_selected(self):
@@ -3014,6 +3028,7 @@ if has_display:
             import threading
             self._queue_plot_btn.setEnabled(False)
             self._queue_status_lbl.setText(f"Processing {job_id}\u2026")
+            base_url, key = self._queue_server_params()
             def _run():
                 import tempfile, subprocess, pathlib
                 tmp = pathlib.Path(tempfile.mkdtemp())
@@ -3021,10 +3036,8 @@ if has_display:
                 gcode_path = tmp / f"{job_id}.gcode"
                 try:
                     import urllib.request
-                    url = (self._queue_url_edit.text().rstrip("/") +
-                           f"/jobs/{job_id}/svg")
+                    url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
                     headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
-                    key = self._queue_key_edit.text().strip()
                     if key:
                         headers["X-API-Key"] = key
                     req = urllib.request.Request(url, headers=headers)
@@ -3041,7 +3054,7 @@ if has_display:
                     _svg_txt = self._queue_svg_physical_page(_svg_txt, job)
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     self._queue_http(f"/jobs/{job_id}/status",
-                                     "PATCH", {"status": "plotting"})
+                                     "PATCH", {"status": "plotting"}, base_url=base_url, key=key)
                     vpype = str(pathlib.Path.home() / ".local/bin/vpype")
                     cfg   = self.config.vpype_config.strip()
                     prof  = self.config.vpype_profile.strip()
@@ -3063,16 +3076,16 @@ if has_display:
                         self.signals.show_info.emit(
                             "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
                     self._queue_http(f"/jobs/{job_id}/status",
-                                     "PATCH", {"status": "done"})
+                                     "PATCH", {"status": "done"}, base_url=base_url, key=key)
                 except Exception as e:
                     try:
                         self._queue_http(f"/jobs/{job_id}/status",
-                                         "PATCH", {"status": "error"})
+                                         "PATCH", {"status": "error"}, base_url=base_url, key=key)
                     except Exception:
                         pass
                     self.signals.show_error.emit("Queue Error", str(e))
                 finally:
-                    self._queue_refresh()
+                    self.signals.update_status.emit("__q_refresh__")
             threading.Thread(target=_run, daemon=True).start()
 
         def run_vpype(self):
