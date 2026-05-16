@@ -41,9 +41,9 @@ if has_display:
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
     )
-    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent
+    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
-    from PyQt6.QtSvgWidgets import QSvgWidget
+    from PyQt6.QtSvg import QSvgRenderer
 
 
 # ---------------------------------------------------------------------------
@@ -268,11 +268,53 @@ if has_display:
         grbl_log       = pyqtSignal(str)
         queue_jobs_ready = pyqtSignal(list)
 
+    class AspectSvgPreviewWidget(QWidget):
+        """SVG preview that letterboxes instead of stretching to the pane."""
+        def __init__(self):
+            super().__init__()
+            self._renderer = None
+            self.setStyleSheet("background:white;border:1px solid #eee;border-radius:4px;")
+
+        def load(self, data):
+            renderer = QSvgRenderer()
+            ok = renderer.load(QByteArray(data))
+            self._renderer = renderer if ok else None
+            self.update()
+            return ok
+
+        def clear(self):
+            self._renderer = None
+            self.update()
+
+        def paintEvent(self, event):
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor("white"))
+            if not self._renderer or not self._renderer.isValid():
+                return
+            size = self._renderer.defaultSize()
+            if size.width() <= 0 or size.height() <= 0:
+                view_box = self._renderer.viewBoxF()
+                svg_w = max(view_box.width(), 1.0)
+                svg_h = max(view_box.height(), 1.0)
+            else:
+                svg_w = size.width()
+                svg_h = size.height()
+            pad = 4
+            avail_w = max(self.width() - 2 * pad, 1)
+            avail_h = max(self.height() - 2 * pad, 1)
+            scale = min(avail_w / svg_w, avail_h / svg_h)
+            draw_w = svg_w * scale
+            draw_h = svg_h * scale
+            x = (self.width() - draw_w) / 2
+            y = (self.height() - draw_h) / 2
+            self._renderer.render(painter, QRectF(x, y, draw_w, draw_h))
+
     class GcodePreviewWidget(QWidget):
         def __init__(self):
             super().__init__()
             self.segments = []      # (x0,y0,x1,y1, mode, color_hex)
             self.bounds = None
+            self.artboard = None     # (width_mm, height_mm), work origin at lower-left
             self.visible_colors = None   # None = all visible
             self._zoom = 1.0
             self._pan = [0.0, 0.0]
@@ -281,9 +323,10 @@ if has_display:
             self.setMinimumHeight(150)
             self.setStyleSheet("background: white;")
 
-        def set_data(self, segments, bounds):
+        def set_data(self, segments, bounds, artboard=None):
             self.segments = segments
             self.bounds = bounds
+            self.artboard = artboard
             self._zoom = 1.0
             self._pan = [0.0, 0.0]
             self.update()
@@ -294,14 +337,23 @@ if has_display:
 
         def paintEvent(self, event):
             painter = QPainter(self)
-            painter.fillRect(self.rect(), QColor("white"))
-            if not self.segments or not self.bounds:
+            painter.fillRect(self.rect(), QColor("#f8f8f8" if self.artboard else "white"))
+            if (not self.segments or not self.bounds) and not self.artboard:
                 painter.setPen(QColor("#aaaaaa"))
                 painter.drawText(10, 20, "No preview available")
                 return
             w, h = self.width(), self.height()
             pad = 10
-            min_x, min_y, max_x, max_y = self.bounds
+            if self.bounds:
+                min_x, min_y, max_x, max_y = self.bounds
+            else:
+                min_x = min_y = max_x = max_y = 0.0
+            if self.artboard:
+                page_w, page_h = self.artboard
+                min_x = min(min_x, 0.0)
+                min_y = min(min_y, 0.0)
+                max_x = max(max_x, page_w)
+                max_y = max(max_y, page_h)
             span_x = max(max_x - min_x, 1e-6)
             span_y = max(max_y - min_y, 1e-6)
             scale = min((w - 2 * pad) / span_x, (h - 2 * pad) / span_y)
@@ -311,6 +363,16 @@ if has_display:
                 cx = pad + (px - min_x) * scale
                 cy = h - pad - (py - min_y) * scale
                 return cx * zoom + pan_x, cy * zoom + pan_y
+
+            if self.artboard:
+                page_w, page_h = self.artboard
+                x0, y0 = mp(0.0, 0.0)
+                x1, y1 = mp(page_w, page_h)
+                painter.setBrush(QColor("white"))
+                painter.setPen(QPen(QColor("#999999"), 1))
+                painter.drawRect(
+                    int(min(x0, x1)), int(min(y0, y1)),
+                    int(abs(x1 - x0)), int(abs(y1 - y0)))
 
             rapid_color = QColor("#dddddd")
             for x0, y0, x1, y1, mode, color in self.segments:
@@ -2613,7 +2675,7 @@ if has_display:
                     f.write("\n".join(final_lines) + "\n")
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            self.load_gcode_file(output_path)
+            self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
             QMessageBox.information(self, "Success",
                 f"G-code with tool changes saved to {output_path}")
 
@@ -2649,9 +2711,7 @@ if has_display:
             prev_lay.setContentsMargins(6, 6, 6, 6)
             prev_lay.setSpacing(4)
 
-            self._queue_svg_widget = QSvgWidget()
-            self._queue_svg_widget.setStyleSheet(
-                "background:white;border:1px solid #eee;border-radius:4px;")
+            self._queue_svg_widget = AspectSvgPreviewWidget()
             self._queue_svg_widget.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             prev_lay.addWidget(self._queue_svg_widget, 1)
@@ -2872,7 +2932,7 @@ if has_display:
             if job_id in self._queue_preview_cache:
                 self._queue_apply_preview(job_id)
                 return
-            self._queue_svg_widget.load(b"")   # clear while loading
+            self._queue_svg_widget.clear()   # clear while loading
             self._queue_preview_lbl.setText("Loading\u2026")
             import threading
             base_url, key = self._queue_server_params()
@@ -3180,12 +3240,50 @@ if has_display:
 
             if not self._run_vpype_cmd(svg_path, config_path, profile, output_path):
                 return
-            self.load_gcode_file(output_path)
+            self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
             QMessageBox.information(self, "Success", f"G-code saved to {output_path}")
 
         # ------------------------------------------------------------------
         # G-code
         # ------------------------------------------------------------------
+
+        def _svg_page_mm(self, svg_path: str):
+            """Return SVG root page size in mm for visual preview context."""
+            def _length_mm(raw):
+                if raw is None:
+                    return None
+                m = re.match(r"^\s*([-+]?\d*\.?\d+)\s*([a-zA-Z%]*)\s*$", str(raw))
+                if not m:
+                    return None
+                value = float(m.group(1))
+                unit = (m.group(2) or "").lower()
+                if unit == "mm":
+                    return value
+                if unit == "cm":
+                    return value * 10.0
+                if unit == "in":
+                    return value * 25.4
+                if unit == "pt":
+                    return value * 25.4 / 72.0
+                # Website sketches use 100 SVG units per inch.
+                if unit in ("", "px"):
+                    return value * 25.4 / 100.0
+                return None
+
+            try:
+                root = ET.parse(svg_path).getroot()
+                width = _length_mm(root.attrib.get("width"))
+                height = _length_mm(root.attrib.get("height"))
+                if width and height:
+                    return (width, height)
+                view_box = root.attrib.get("viewBox") or root.attrib.get("viewbox")
+                if view_box:
+                    parts = [float(p) for p in re.split(r"[\s,]+", view_box.strip()) if p]
+                    if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
+                        return (parts[2] * 25.4 / 100.0, parts[3] * 25.4 / 100.0)
+            except Exception:
+                pass
+            return None
 
         def _clean_gcode_line(self, line: str) -> str:
             line = line.strip()
@@ -3205,11 +3303,11 @@ if has_display:
             if path:
                 self.load_gcode_file(path)
 
-        def load_gcode_file(self, file_path: str):
+        def load_gcode_file(self, file_path: str, artboard_mm=None):
             self.gcode_path = file_path
             self.gcode_entry.setText(file_path)
             self._load_gcode_lines(file_path)
-            self.parse_gcode_for_preview(file_path)
+            self.parse_gcode_for_preview(file_path, artboard_mm=artboard_mm)
             self.refresh_gcode_viewer()
 
         def _load_gcode_lines(self, file_path: str):
@@ -3300,7 +3398,7 @@ if has_display:
             except Exception as e:
                 QMessageBox.critical(self, "G-code Error", str(e))
 
-        def parse_gcode_for_preview(self, file_path: str):
+        def parse_gcode_for_preview(self, file_path: str, artboard_mm=None):
             segments, bounds = [], None
             truncated = False
             max_seg = 250000
@@ -3374,22 +3472,25 @@ if has_display:
                 self.gcode_preview_truncated = truncated
                 self.gcode_total_lines = total_lines
                 self._layer_colors = layer_colors
-                self.preview_widget.set_data(segments, bounds)
+                self.preview_widget.set_data(segments, bounds, artboard=artboard_mm)
                 self._rebuild_layer_toggles()
 
                 if bounds:
                     w = bounds[2] - bounds[0]
                     h = bounds[3] - bounds[1]
                     extra = " (preview truncated)" if truncated else ""
+                    page = ""
+                    if artboard_mm:
+                        page = f"  |  Artboard {artboard_mm[0]:.2f} x {artboard_mm[1]:.2f} mm"
                     self.gcode_status_label.setText(
-                        f"Loaded: {Path(file_path).name}  |  Bounds {w:.2f} x {h:.2f} mm{extra}")
+                        f"Loaded: {Path(file_path).name}  |  Artwork {w:.2f} x {h:.2f} mm{page}{extra}")
                 else:
                     self.gcode_status_label.setText(
                         f"Loaded: {Path(file_path).name}  |  No XY moves found")
             except Exception as e:
                 self.gcode_segments = []
                 self.gcode_bounds = None
-                self.preview_widget.set_data([], None)
+                self.preview_widget.set_data([], None, artboard=None)
                 self.gcode_status_label.setText(f"Failed to load: {e}")
 
         def run_gcode(self):
