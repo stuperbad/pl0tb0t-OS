@@ -2806,17 +2806,7 @@ if has_display:
                 layers = self._parse_svg_layers(svg_path)
                 self._svg_layers = layers
                 self._update_svg_layer_display(layers)
-                # Scale browser SVG coordinates to the physical paper.
-                # Do not crop here: crop 0 0 9in 12in clips 900x1200 SVGs.
-                job = self._queue_jobs_cache.get(self._queue_selected_id, {})
-                paper  = job.get("paper_size", "9x12")
-                orient = job.get("orientation", "portrait")
-                parts  = paper.replace("x", " ").split()
-                pw, ph = (parts + ["12"])[:2]
-                if orient == "landscape": pw, ph = ph, pw
-                self._vpype_pre_steps = ["scaleto", f"{pw}in", f"{ph}in"]
                 self.run_vpype()
-                self._vpype_pre_steps = []          # clear after use
                 self._queue_status_lbl.setText("Gcode ready \u2713")
                 self._queue_plot_btn.setEnabled(
                     self._queue_selected_id is not None)
@@ -2931,6 +2921,34 @@ if has_display:
                     self.signals.show_error.emit("Queue", f"Add local SVG failed: {e}")
             threading.Thread(target=_post, daemon=True).start()
 
+        def _queue_svg_physical_page(self, svg_text: str, job: dict) -> str:
+            paper = (job or {}).get("paper_size", "9x12")
+            orient = (job or {}).get("orientation", "portrait")
+            try:
+                parts = [float(p) for p in str(paper).lower().replace("x", " ").split()[:2]]
+            except Exception:
+                parts = []
+            if len(parts) < 2:
+                parts = [9.0, 12.0]
+            pw, ph = parts[0], parts[1]
+            if orient == "landscape":
+                pw, ph = ph, pw
+
+            import re as _re
+            def _set_attr(tag: str, name: str, value: str) -> str:
+                pattern = r'\s' + name + r'\s*=\s*["\'][^"\']*["\']'
+                if _re.search(pattern, tag, flags=_re.I):
+                    return _re.sub(pattern, f' {name}="{value}"', tag, count=1, flags=_re.I)
+                return tag[:-1] + f' {name}="{value}">'
+
+            def _replace(match):
+                tag = match.group(0)
+                tag = _set_attr(tag, "width", f"{pw:g}in")
+                tag = _set_attr(tag, "height", f"{ph:g}in")
+                return tag
+
+            return _re.sub(r'<svg\b[^>]*>', _replace, svg_text, count=1, flags=_re.I)
+
         def _queue_load_into_vpype(self):
             """Download the selected queue job's SVG and load it into the vpype panel."""
             job_id = self._queue_selected_id
@@ -2958,6 +2976,7 @@ if has_display:
                     svg_text = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", svg_text)
+                    svg_text = self._queue_svg_physical_page(svg_text, job)
                     # Write to a named temp file the vpype panel can read
                     tmp = pathlib.Path(tempfile.mkdtemp())
                     sketch = job.get("sketch_name", job_id) or job_id
@@ -3004,22 +3023,14 @@ if has_display:
                     _svg_txt = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", _svg_txt)
+                    _svg_txt = self._queue_svg_physical_page(_svg_txt, job)
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     self._queue_http(f"/jobs/{job_id}/status",
                                      "PATCH", {"status": "plotting"})
-                    paper  = job.get("paper_size", "8.5x11")
-                    orient = job.get("orientation", "portrait")
-                    parts  = paper.replace("x", " ").split()
-                    pw, ph = (parts + ["11"])[:2]
-                    ls     = (f"{ph}x{pw}in" if orient == "landscape"
-                               else f"{pw}x{ph}in")
                     vpype = str(pathlib.Path.home() / ".local/bin/vpype")
                     cfg   = self.config.vpype_config.strip()
                     prof  = self.config.vpype_profile.strip()
-                    # Scale browser SVG coordinates to physical paper size.
-                    # Do not crop here: crop 0 0 9in 12in clips 900x1200 SVGs.
                     cmd = (f"{vpype} read \"{svg_path}\""
-                           f" scaleto {pw}in {ph}in"
                            f" linesimplify -t 0.05mm linemerge linesort --two-opt")
                     if cfg and prof:
                         cmd += f" gwrite -p {prof} \"{gcode_path}\""
