@@ -573,7 +573,9 @@ if has_display:
             orient  = job.get('orientation', '')
             job_id  = job.get('id', '')
             size    = self._format_bytes(job.get('file_size') or job.get('file_size_bytes'))
-            meta_parts = [p for p in [paper, orient, size] if p]
+            recipe_size = self._format_bytes(job.get('recipe_size') or job.get('recipe_size_bytes'))
+            recipe_meta = f"recipe {recipe_size}" if recipe_size else ("recipe" if job.get("has_recipe") else "")
+            meta_parts = [p for p in [paper, orient, size, recipe_meta] if p]
             meta = '  ·  '.join(meta_parts)
             if job_id:
                 meta = f'{meta}  ·  #{job_id}' if meta else f'#{job_id}'
@@ -2982,6 +2984,12 @@ if has_display:
             path.mkdir(parents=True, exist_ok=True)
             return path
 
+        def _queue_recipe_archive_dir(self):
+            import pathlib
+            path = pathlib.Path(__file__).parent / "Recipe Archive"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
         def _queue_safe_filename(self, value: str) -> str:
             import re as _re
             safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "Untitled")).strip("-._")
@@ -2997,33 +3005,77 @@ if has_display:
             sketch = self._queue_safe_filename(job.get("sketch_name") or "Untitled")
             return archive_dir / f"{created}_{job_id}_{sketch}.svg"
 
+        def _queue_recipe_archive_path_for_job(self, job: dict):
+            archive_dir = self._queue_recipe_archive_dir()
+            job_id = str(job.get("id", "unknown"))
+            existing = list(archive_dir.glob(f"*_{job_id}_*.json"))
+            if existing:
+                return existing[0]
+            created = int(job.get("created_at") or __import__("time").time())
+            sketch = self._queue_safe_filename(job.get("sketch_name") or "Untitled")
+            return archive_dir / f"{created}_{job_id}_{sketch}.json"
+
         def _queue_archive_svg(self, job: dict, svg_text: str):
             path = self._queue_archive_path_for_job(job)
             if not path.exists():
                 path.write_text(svg_text, encoding="utf-8")
             return path
 
+        def _queue_archive_recipe(self, job: dict, recipe_text: str):
+            path = self._queue_recipe_archive_path_for_job(job)
+            if not path.exists():
+                path.write_text(recipe_text, encoding="utf-8")
+            return path
+
+        def _queue_archive_recipe_if_available(self, job: dict, base_url=None, key=None):
+            if not job or not job.get("has_recipe"):
+                return None
+            path = self._queue_recipe_archive_path_for_job(job)
+            if path.exists():
+                return path
+            job_id = str(job.get("id", ""))
+            if not job_id:
+                return None
+            recipe_text = self._queue_fetch_text(
+                f"/jobs/{job_id}/recipe", base_url=base_url, key=key, timeout=30)
+            return self._queue_archive_recipe(job, recipe_text)
+
+        def _queue_fetch_text(self, path: str, base_url=None, key=None, timeout=30) -> str:
+            import urllib.request
+            if base_url is None or key is None:
+                base_url, key = self._queue_server_params()
+            url = base_url.rstrip("/") + path
+            headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
+            if key:
+                headers["X-API-Key"] = key
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", errors="replace")
+
         def _queue_archive_missing_jobs(self, jobs):
             import threading
             base_url, key = self._queue_server_params()
             pending = [job for job in jobs if not self._queue_archive_path_for_job(job).exists()]
-            if not pending:
+            recipe_pending = [
+                job for job in jobs
+                if job.get("has_recipe") and not self._queue_recipe_archive_path_for_job(job).exists()
+            ]
+            if not pending and not recipe_pending:
                 return
             def _run():
-                import urllib.request
                 for job in pending:
                     job_id = str(job.get("id", ""))
                     if not job_id:
                         continue
                     try:
-                        url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
-                        headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
-                        if key:
-                            headers["X-API-Key"] = key
-                        req = urllib.request.Request(url, headers=headers)
-                        with urllib.request.urlopen(req, timeout=30) as r:
-                            svg_text = r.read().decode("utf-8", errors="replace")
+                        svg_text = self._queue_fetch_text(
+                            f"/jobs/{job_id}/svg", base_url=base_url, key=key, timeout=30)
                         self._queue_archive_svg(job, svg_text)
+                    except Exception:
+                        pass
+                for job in recipe_pending:
+                    try:
+                        self._queue_archive_recipe_if_available(job, base_url=base_url, key=key)
                     except Exception:
                         pass
             threading.Thread(target=_run, daemon=True).start()
@@ -3155,6 +3207,10 @@ if has_display:
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", svg_text)
                     self._queue_archive_svg(job, svg_text)
+                    try:
+                        self._queue_archive_recipe_if_available(job, base_url=base_url, key=key)
+                    except Exception:
+                        pass
                     svg_text = self._queue_svg_physical_page(svg_text, job)
                     # Write to a named temp file the vpype panel can read
                     tmp = pathlib.Path(tempfile.mkdtemp())
@@ -3202,6 +3258,10 @@ if has_display:
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
                         "", _svg_txt)
                     self._queue_archive_svg(job, _svg_txt)
+                    try:
+                        self._queue_archive_recipe_if_available(job, base_url=base_url, key=key)
+                    except Exception:
+                        pass
                     _svg_txt = self._queue_svg_physical_page(_svg_txt, job)
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     self._queue_http(f"/jobs/{job_id}/status",
