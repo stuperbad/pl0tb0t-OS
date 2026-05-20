@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.01"
+__version__ = "0.4.02"
 import os
 import sys
 import time
@@ -2290,7 +2290,7 @@ if has_display:
             def layer_dominant_color(group):
                 for child in group.iter():
                     tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-                    if tag in ("path", "line", "polyline", "circle", "ellipse"):
+                    if tag in ("path", "line", "polyline", "polygon", "circle", "ellipse"):
                         c = elem_color(child)
                         if c:
                             return c
@@ -2310,7 +2310,7 @@ if has_display:
                     seen = []
                     for el in root.iter():
                         tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
-                        if tag in ("path", "line", "polyline", "circle", "ellipse"):
+                        if tag in ("path", "line", "polyline", "polygon", "circle", "ellipse"):
                             c = elem_color(el)
                             if c and c not in seen:
                                 seen.append(c)
@@ -2384,7 +2384,7 @@ if has_display:
                 ("rdf",      "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
             ]:
                 ET.register_namespace(prefix, uri)
-            DRAW_TAGS = {"path", "line", "polyline", "circle", "ellipse"}
+            DRAW_TAGS = {"path", "line", "polyline", "polygon", "circle", "ellipse"}
             target = target_color.lower()
 
             def stroke_of(el):
@@ -2394,25 +2394,33 @@ if has_display:
                 return el.get("stroke", "").lower()
 
             try:
+                import copy
                 tree = ET.parse(svg_path)
                 root = tree.getroot()
                 new_root = ET.Element(root.tag, root.attrib)
                 found = False
-                for child in root:
-                    raw_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+
+                def filtered_copy(el):
+                    nonlocal found
+                    raw_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
                     if raw_tag in DRAW_TAGS:
-                        if stroke_of(child) == target:
-                            new_root.append(child)
+                        if stroke_of(el) == target:
                             found = True
-                    elif raw_tag == "g":
-                        new_g = ET.Element(child.tag, child.attrib)
-                        for gc in child:
-                            gtag = gc.tag.split("}")[-1] if "}" in gc.tag else gc.tag
-                            if gtag in DRAW_TAGS and stroke_of(gc) == target:
-                                new_g.append(gc)
-                                found = True
-                        if len(new_g):
-                            new_root.append(new_g)
+                            return copy.deepcopy(el)
+                        return None
+                    if raw_tag == "g":
+                        new_g = ET.Element(el.tag, el.attrib)
+                        for child in el:
+                            copied = filtered_copy(child)
+                            if copied is not None:
+                                new_g.append(copied)
+                        return new_g if len(new_g) else None
+                    return None
+
+                for child in root:
+                    copied = filtered_copy(child)
+                    if copied is not None:
+                        new_root.append(copied)
                 if not found:
                     return False
                 ET.ElementTree(new_root).write(tmp_path, encoding="unicode", xml_declaration=True)
