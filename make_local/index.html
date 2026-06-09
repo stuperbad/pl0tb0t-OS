@@ -290,15 +290,19 @@
         btn.disabled = true;
         queueStatus('Checking machine…', '#888');
         fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
+            btn.disabled = false;
+            queueStatus('', '');
             if (s.busy) {
-                btn.disabled = false;
-                queueStatus('', '');
                 if (!confirm('Machine is plotting. Save to queue for later?')) return;
                 addToQueue({ requestPlot: false, btn: btn });
             } else {
+                var paper = (document.getElementById('paperSize') || {}).value || '9x12';
+                if (!confirm('Ready to plot?\n\nPaper: ' + paper + '\nPens loaded left → right in correct order?')) return;
                 addToQueue({ requestPlot: true, btn: btn });
             }
         }).catch(function() {
+            btn.disabled = false;
+            queueStatus('', '');
             addToQueue({ requestPlot: false, btn: btn });
         });
     });

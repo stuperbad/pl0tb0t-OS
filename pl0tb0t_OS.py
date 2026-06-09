@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.08"
+__version__ = "0.4.09"
 import os
 import sys
 import time
@@ -3199,6 +3199,11 @@ if has_display:
             self._queue_selected_id = None
             self._queue_jobs_cache  = {}
             self._plot_request_dialog_open = False
+            # Auto-fix if old Cloudflare Worker URL was saved in config
+            if "workers.dev" in self._queue_url_edit.text():
+                self._queue_url_edit.setText("http://localhost:5001")
+                self._queue_key_edit.setText("pl0tb0t-secret")
+                self._queue_save_cfg()
             self._queue_auto_timer = QTimer()
             self._queue_auto_timer.timeout.connect(self._queue_refresh)
             self._queue_auto_timer.timeout.connect(self._queue_check_plot_request)
@@ -3327,23 +3332,19 @@ if has_display:
                 req_id = msg.split("__q_plot_req__", 1)[1]
                 job = self._queue_jobs_cache.get(req_id, {})
                 sketch = job.get("sketch_name", req_id) or req_id
-                self._plot_request_dialog_open = True
-                reply = QMessageBox.question(
-                    self, "Remote Plot Request",
-                    f"Phone requested: plot \"{sketch}\"\n\nMake sure pens are loaded and paper is in place.",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                self._plot_request_dialog_open = False
                 def _clear_req():
                     try:
                         self._queue_http("/status", "POST", {"plot_requested": None})
                     except Exception:
                         pass
                 threading.Thread(target=_clear_req, daemon=True).start()
-                if reply == QMessageBox.StandardButton.Yes:
-                    self._queue_selected_id = req_id
-                    self._queue_plot_selected()
+                self._queue_status_lbl.setText(f"Auto-plotting: {sketch}…")
+                self._queue_selected_id = req_id
+                self._queue_plot_selected()
+            elif msg == "__q_autorun__":
+                self.feed_override_slider.setValue(100)
+                self.tc_override_slider.setValue(100)
+                self.run_gcode()
             elif msg.startswith("__q_prev__") and not msg.startswith("__q_prev_err__"):
                 job_id = msg.split("__q_prev__", 1)[1]
                 if job_id == self._queue_selected_id:
@@ -3731,8 +3732,7 @@ if has_display:
                         raise RuntimeError("vpype returned non-zero exit code")
                     if self.port and gcode_path.suffix == ".gcode" and gcode_path.exists():
                         self.gcode_path = str(gcode_path)
-                        self.signals.show_info.emit(
-                            "Queue", f"Job {job_id} ready — press Send in G-code Runner.")
+                        self.signals.update_status.emit("__q_autorun__")
                     else:
                         self.signals.show_info.emit(
                             "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
