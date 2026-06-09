@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.07"
+__version__ = "0.4.08"
 import os
 import sys
 import time
@@ -3202,7 +3202,7 @@ if has_display:
             self._queue_auto_timer = QTimer()
             self._queue_auto_timer.timeout.connect(self._queue_refresh)
             self._queue_auto_timer.timeout.connect(self._queue_check_plot_request)
-            self._queue_auto_timer.start(8000)
+            self._queue_auto_timer.start(3000)
             self._queue_refresh()
             return outer
 

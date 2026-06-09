@@ -9,6 +9,8 @@ Usage:
     QUEUE_API_KEY=mysecret python3 queue_server.py
 """
 
+__version__ = "0.1.02"
+
 import os, sqlite3, uuid, time, json, threading
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, abort
@@ -126,7 +128,7 @@ function render(jobs){
   var show=recent.length?recent:jobs;
   show.forEach(function(j){l.appendChild(mkCard(j));});
   if(old.length&&recent.length){
-    var det=document.createElement('details');
+    var det=document.createElement('details');det.open=true;
     var sum=document.createElement('summary');
     sum.className='old-sum';sum.textContent='Old ('+old.length+')';
     det.appendChild(sum);

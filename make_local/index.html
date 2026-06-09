@@ -68,6 +68,9 @@
         /* Action buttons */
         #ctrl-actions { padding: 10px 14px; border-top: 1px solid #e0e0e0; display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
         #ctrl-actions .btn { flex: 1 1 auto; min-width: 70px; font-size: 13px; padding: 8px 10px; min-height: 40px; }
+        #saveToQueue { background: #f8f9fb; color: #444; border-color: #ccc; font-weight: 600; }
+        #saveToQueue:hover { background: #eee; }
+        #saveToQueue:disabled { color: #aaa; }
         #sendToQueue { background: #111; color: #fff; border-color: #111; font-weight: 700; font-size: 14px; }
         #sendToQueue:hover { background: #333; border-color: #333; }
         #sendToQueue:disabled { background: #888; border-color: #888; }
@@ -133,6 +136,7 @@
                 <button id="reseed"     class="btn btn-outline-secondary" type="button">Reseed</button>
                 <button id="randomize"  class="btn btn-outline-secondary" type="button">Random</button>
                 <button id="pause"      class="btn btn-outline-secondary" type="button">Pause</button>
+                <button id="saveToQueue" class="btn" type="button">Save</button>
                 <button id="sendToQueue" class="btn" type="button">→ Plot</button>
             </div>
             <div id="queueStatus"></div>
@@ -235,8 +239,8 @@
         } catch(e) { return svgStr; }
     }
 
-    document.getElementById('sendToQueue').addEventListener('click', function() {
-        var btn = this;
+    function addToQueue(options) {
+        var btn = options.btn;
         btn.disabled = true;
         queueStatus('Generating SVG…', '#888');
         var sketchId  = document.getElementById('sketchSelector').value || 'sketch';
@@ -256,12 +260,47 @@
             if (!r.ok) return r.json().catch(function(){ return {}; }).then(function(d){ throw new Error((d && d.error) ? d.error : 'Server ' + r.status); });
             return r.json();
         }).then(function(data) {
-            queueStatus('✓ Sent to queue! Job #' + (data.job_id || data.id), '#2a7');
-            setTimeout(function(){ queueStatus(''); }, 4000);
-            fetchQueue();
+            var jobId = data.job_id || data.id;
+            if (!options.requestPlot) {
+                queueStatus('✓ Saved! Job #' + jobId, '#2a7');
+                setTimeout(function(){ queueStatus(''); }, 4000);
+                fetchQueue();
+                return;
+            }
+            queueStatus('Requesting plot…', '#888');
+            return fetch(QUEUE_URL + '/jobs/' + jobId + '/plot-request', {
+                method: 'POST',
+                headers: queueHeaders()
+            }).then(function() {
+                queueStatus('✓ Plot requested! Confirm on machine.', '#2a7');
+                setTimeout(function(){ queueStatus(''); }, 6000);
+                fetchQueue();
+            });
         }).catch(function(err) {
             queueStatus('Error: ' + err.message, '#c00');
         }).finally(function() { btn.disabled = false; });
+    }
+
+    document.getElementById('saveToQueue').addEventListener('click', function() {
+        addToQueue({ requestPlot: false, btn: this });
+    });
+
+    document.getElementById('sendToQueue').addEventListener('click', function() {
+        var btn = this;
+        btn.disabled = true;
+        queueStatus('Checking machine…', '#888');
+        fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
+            if (s.busy) {
+                btn.disabled = false;
+                queueStatus('', '');
+                if (!confirm('Machine is plotting. Save to queue for later?')) return;
+                addToQueue({ requestPlot: false, btn: btn });
+            } else {
+                addToQueue({ requestPlot: true, btn: btn });
+            }
+        }).catch(function() {
+            addToQueue({ requestPlot: false, btn: btn });
+        });
     });
 
     // ── Queue strip ───────────────────────────────────────────────────────────
