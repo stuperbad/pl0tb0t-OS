@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <title>Make</title>
+    <link rel="stylesheet" href="lib/bootstrap.min.css">
+    <script src="lib/jquery.min.js"></script>
+    <script src="lib/p5.min.js"></script>
+    <script src="lib/p5.svg.js"></script>
+    <script src="scripts/interactiveSVG.js"></script>
+    <script src="scripts/sketches/sharedPaperControls.js"></script>
+    <script src="scripts/sketches/cmykFlowCircles.js"></script>
+    <script src="scripts/sketches/circlesFromLines.js"></script>
+    <script src="scripts/sketches/lineArrays.js"></script>
+    <script src="scripts/sketches/zigzag.js"></script>
+    <script src="scripts/sketches/whirls.js"></script>
+    <script src="scripts/sketches/artproofs.js"></script>
+    <script src="scripts/sketches/patternTest.js"></script>
+    <script src="scripts/sketches/unbuiltSculptures.js"></script>
+    <style>
+        html, body { height: 100%; margin: 0; padding: 0; background: #fff; overflow: hidden; }
+        #app { display: flex; height: 100vh; overflow: hidden; }
+
+        /* Left: sketch canvas */
+        #sketch-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; padding: 10px 6px 10px 10px; }
+        #sketch-frame { flex: 1 1 0; background: #fdfdfd; border: 1px solid #e0e0e0; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+        #sketch-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eee; flex-shrink: 0; }
+        /* Machine busy banner */
+        #busy-banner { display: none; background: #ff9800; color: #000; font-weight: 700; font-size: 13px; text-align: center; padding: 6px; flex-shrink: 0; }
+        #busy-banner.visible { display: block; }
+
+        #sketch-header label { font-weight: 600; font-size: 14px; margin: 0; white-space: nowrap; }
+        #sketchSelector { flex: 1; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; height: 38px; }
+        #make-sketch { flex: 1 1 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #make-sketch canvas, #make-sketch svg { max-width: 100%; max-height: 100%; border-radius: 8px; display: block; }
+
+        /* Right: controls panel */
+        #ctrl-col { flex: 0 0 280px; display: flex; flex-direction: column; padding: 10px 10px 10px 6px; }
+        #ctrl-card { flex: 1 1 0; background: #f8f9fb; border: 1px solid #e0e0e0; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+        #ctrl-scroll { flex: 1 1 0; overflow-y: auto; padding: 14px; }
+
+        /* Touch-friendly controls */
+        .control-label { display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+        .control-label span.value { font-weight: 700; font-variant-numeric: tabular-nums; }
+        input[type=range] { width: 100%; height: 28px; cursor: pointer; }
+        .mb-ctrl { margin-bottom: 14px; }
+        .param-group { border-top: 1px solid #e0e0e0; padding-top: 12px; margin-top: 12px; }
+        .param-group:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+        .param-group summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; font-weight: 700; font-size: 13px; color: #111; padding: 4px 0; }
+        .param-group summary::-webkit-details-marker { display: none; }
+        .param-group summary::after { content: '+'; font-size: 18px; line-height: 1; color: #888; }
+        .param-group[open] summary::after { content: '−'; }
+        .param-group-body { padding-top: 10px; }
+        .palette-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .palette-item { display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; user-select: none; }
+        .palette-swatch { width: 32px; height: 32px; border-radius: 5px; border: 2px solid #e0e0e0; transition: border-color 0.1s; }
+        .palette-item.selected .palette-swatch { border-color: #111; box-shadow: 0 0 0 1px #111; }
+        .palette-item.at-max { opacity: 0.35; cursor: not-allowed; }
+        .palette-label { font-size: 9px; color: #666; }
+        input[type=color] { width: 100%; height: 38px; padding: 2px 3px; cursor: pointer; border-radius: 6px; }
+
+        /* Action buttons */
+        #ctrl-actions { padding: 10px 14px; border-top: 1px solid #e0e0e0; display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+        #ctrl-actions .btn { flex: 1 1 auto; min-width: 70px; font-size: 13px; padding: 8px 10px; min-height: 40px; }
+        #sendToQueue { background: #111; color: #fff; border-color: #111; font-weight: 700; font-size: 14px; }
+        #sendToQueue:hover { background: #333; border-color: #333; }
+        #sendToQueue:disabled { background: #888; border-color: #888; }
+
+        /* Status */
+        #queueStatus { font-size: 12px; color: #555; padding: 4px 14px 8px; min-height: 20px; flex-shrink: 0; }
+
+        /* Queue strip */
+        #queue-strip { padding: 8px 14px 10px; border-top: 1px solid #e0e0e0; flex-shrink: 0; max-height: 160px; overflow: hidden; display: flex; flex-direction: column; }
+        #queue-strip-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        #queue-strip-header span { font-size: 12px; font-weight: 700; color: #555; }
+        #mobile-link { display: block; font-size: 10px; color: #aaa; text-decoration: none; margin-top: 1px; }
+        #mobile-link:hover { color: #64b5f6; }
+        #queueRefreshBtn { background: none; border: none; color: #aaa; cursor: pointer; font-size: 16px; padding: 0 4px; }
+        #queueCards { display: flex; gap: 8px; overflow-x: auto; flex: 1 1 0; }
+        #queueCards::-webkit-scrollbar { height: 4px; }
+        #queueCards::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+        .q-card { flex: 0 0 120px; background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 6px 8px; font-size: 11px; }
+        .q-card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .q-card-meta { color: #aaa; margin-top: 2px; }
+        .q-card-status { margin-top: 2px; }
+        .qs-queued { color: #aaa; }
+        .qs-plotting { color: #c07000; font-weight: 700; }
+        .qs-done { color: #2a7; }
+        .qs-error { color: #c00; }
+        #queueEmpty { color: #bbb; font-size: 11px; font-style: italic; align-self: center; }
+        .q-old-pill { opacity: 0.45; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; cursor: default; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="busy-banner">&#9679; Machine is currently plotting — your job will be queued</div>
+
+    <!-- Sketch column -->
+    <div id="sketch-col">
+        <div id="sketch-frame">
+            <div id="sketch-header">
+                <label for="sketchSelector">Sketch</label>
+                <select id="sketchSelector">
+                    <option value="cmyk"               data-script="scripts/sketches/cmykFlowCircles.js" selected>CMYK Flow</option>
+                    <option value="circlesFromLines"   data-script="scripts/sketches/circlesFromLines.js">Circles From Lines</option>
+                    <option value="lineArrays"         data-script="scripts/sketches/lineArrays.js">Line Arrays</option>
+                    <option value="zigzag"             data-script="scripts/sketches/zigzag.js">Zigzag</option>
+                    <option value="whirls"             data-script="scripts/sketches/whirls.js">Whirls</option>
+                    <option value="artproofs"          data-script="scripts/sketches/artproofs.js">Artproofs</option>
+                    <option value="patternTest"        data-script="scripts/sketches/patternTest.js">Pattern Test</option>
+                    <option value="unbuiltSculptures"  data-script="scripts/sketches/unbuiltSculptures.js">Unbuilt Sculptures</option>
+                </select>
+            </div>
+            <div id="make-sketch"></div>
+        </div>
+    </div>
+
+    <!-- Controls column -->
+    <div id="ctrl-col">
+        <div id="ctrl-card">
+            <div id="ctrl-scroll">
+                <div id="dynamicParams"></div>
+            </div>
+            <div id="ctrl-actions">
+                <button id="reseed"     class="btn btn-outline-secondary" type="button">Reseed</button>
+                <button id="randomize"  class="btn btn-outline-secondary" type="button">Random</button>
+                <button id="pause"      class="btn btn-outline-secondary" type="button">Pause</button>
+                <button id="sendToQueue" class="btn" type="button">→ Plot</button>
+            </div>
+            <div id="queueStatus"></div>
+            <div id="queue-strip">
+                <div id="queue-strip-header">
+                    <div>
+                        <span style="font-size:12px;font-weight:700;color:#555;">Queue <span id="queueCount"></span></span>
+                        <a href="http://pl0tb0tpi5:5001/mobile" id="mobile-link" target="_blank">&#128241; pl0tb0tpi5:5001/mobile</a>
+                    </div>
+                    <button id="queueRefreshBtn" title="Refresh">&#8635;</button>
+                </div>
+                <div id="queueCards"><span id="queueEmpty">No jobs queued.</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.IS_LOCAL_MODE = true;
+    var QUEUE_URL = 'http://localhost:5001';
+    var QUEUE_API_KEY = window.QUEUE_API_KEY || 'pl0tb0t-secret';
+    function queueHeaders() { return { 'Content-Type': 'application/json', 'X-API-Key': QUEUE_API_KEY }; }
+
+    // placeholder API until sketch loads
+    window.sketchAPI = { regenerate: function(){}, togglePause: function(){ return false; } };
+
+    window.controls = { shapeCount: 90, orbitSize: 180, speed: 0.012, hueShift: 200, trail: 16 };
+
+    // ── Button wiring ─────────────────────────────────────────────────────────
+    document.getElementById('reseed').addEventListener('click', function() {
+        if (window.sketchAPI && typeof window.sketchAPI.reseed === 'function') window.sketchAPI.reseed();
+    });
+    document.getElementById('randomize').addEventListener('click', function() {
+        if (window.sketchAPI && typeof window.sketchAPI.randomize === 'function') {
+            window.sketchAPI.randomize(); return;
+        }
+        if (typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
+    });
+    document.getElementById('pause').addEventListener('click', function(e) {
+        var paused = window.sketchAPI.togglePause();
+        e.target.textContent = paused ? 'Resume' : 'Pause';
+    });
+
+    // ── Queue helpers ─────────────────────────────────────────────────────────
+    function queueStatus(msg, color) {
+        var el = document.getElementById('queueStatus');
+        el.style.color = color || '#555';
+        el.textContent = msg;
+    }
+
+    function captureSvgFromSaveSVG() {
+        return new Promise(function(resolve, reject) {
+            if (!window.sketchAPI || typeof window.sketchAPI.saveSVG !== 'function')
+                return reject(new Error('saveSVG not available'));
+            var origCOU = URL.createObjectURL;
+            var origClick = HTMLAnchorElement.prototype.click;
+            var capturedText = null;
+            var done = false;
+            var timer = setTimeout(function() {
+                if (!done) { cleanup(); reject(new Error('SVG capture timed out')); }
+            }, 8000);
+            function cleanup() {
+                URL.createObjectURL = origCOU;
+                HTMLAnchorElement.prototype.click = origClick;
+            }
+            URL.createObjectURL = function(blob) {
+                URL.createObjectURL = origCOU;
+                var realUrl = origCOU(blob);
+                blob.text().then(function(t){ capturedText = t; });
+                return realUrl;
+            };
+            HTMLAnchorElement.prototype.click = function() {
+                if (this.download) {
+                    HTMLAnchorElement.prototype.click = origClick;
+                    done = true; clearTimeout(timer);
+                    setTimeout(function() {
+                        cleanup();
+                        if (capturedText && capturedText.length > 50) resolve(capturedText);
+                        else reject(new Error('SVG blob was empty'));
+                    }, 200);
+                    return;
+                }
+                return origClick.call(this);
+            };
+            try { window.sketchAPI.saveSVG(); }
+            catch(e) { cleanup(); done = true; clearTimeout(timer); reject(e); }
+        });
+    }
+
+    function getSvgString() {
+        var svgEl = document.querySelector('#make-sketch svg');
+        if (svgEl) return Promise.resolve(new XMLSerializer().serializeToString(svgEl));
+        return captureSvgFromSaveSVG();
+    }
+
+    function embedSnapshot(svgStr, sketchId, params) {
+        try {
+            var payload = btoa(unescape(encodeURIComponent(JSON.stringify({sketch: sketchId, params: params}))));
+            return svgStr.replace(/<\/svg>/, '\n<!-- pl0tb0t-snapshot ' + payload + ' -->\n</svg>');
+        } catch(e) { return svgStr; }
+    }
+
+    document.getElementById('sendToQueue').addEventListener('click', function() {
+        var btn = this;
+        btn.disabled = true;
+        queueStatus('Generating SVG…', '#888');
+        var sketchId  = document.getElementById('sketchSelector').value || 'sketch';
+        var paperSize = (document.getElementById('paperSize') || {}).value || '9x12';
+        var snapshot  = window.sketchAPI && window.sketchAPI.getParamsSnapshot ? window.sketchAPI.getParamsSnapshot() : [];
+        var recipe    = window.sketchAPI && typeof window.sketchAPI.getRecipe === 'function'
+            ? window.sketchAPI.getRecipe() : { sketch: sketchId, params: snapshot };
+        getSvgString().then(function(svgStr) {
+            svgStr = embedSnapshot(svgStr, sketchId, recipe && Array.isArray(recipe.params) ? recipe.params : snapshot);
+            queueStatus('Sending to queue…', '#888');
+            return fetch(QUEUE_URL + '/jobs', {
+                method: 'POST',
+                headers: queueHeaders(),
+                body: JSON.stringify({ svg: svgStr, recipe: recipe, sketch_name: sketchId, paper_size: paperSize, orientation: 'portrait' })
+            });
+        }).then(function(r) {
+            if (!r.ok) return r.json().catch(function(){ return {}; }).then(function(d){ throw new Error((d && d.error) ? d.error : 'Server ' + r.status); });
+            return r.json();
+        }).then(function(data) {
+            queueStatus('✓ Sent to queue! Job #' + (data.job_id || data.id), '#2a7');
+            setTimeout(function(){ queueStatus(''); }, 4000);
+            fetchQueue();
+        }).catch(function(err) {
+            queueStatus('Error: ' + err.message, '#c00');
+        }).finally(function() { btn.disabled = false; });
+    });
+
+    // ── Queue strip ───────────────────────────────────────────────────────────
+    function fetchQueue() {
+        fetch(QUEUE_URL + '/jobs', { headers: queueHeaders() }).then(function(r){ return r.json(); }).then(function(jobs) {
+            var cards = document.getElementById('queueCards');
+            var empty = document.getElementById('queueEmpty');
+            var count = document.getElementById('queueCount');
+            if (!jobs || !jobs.length) {
+                cards.innerHTML = '';
+                cards.appendChild(empty);
+                count.textContent = '';
+                return;
+            }
+            var now = Date.now() / 1000;
+            var recent = jobs.filter(function(j){ return now - (j.created_at || 0) < 86400; });
+            var old    = jobs.filter(function(j){ return now - (j.created_at || 0) >= 86400; });
+            var show   = recent.length ? recent : jobs;
+            count.textContent = '(' + jobs.length + ')';
+            cards.innerHTML = '';
+            show.slice(0, 12).forEach(function(j) {
+                var card = document.createElement('div');
+                card.className = 'q-card';
+                var age = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+                card.innerHTML = '<div class="q-card-name">' + (j.sketch_name || j.id) + '</div>'
+                    + '<div class="q-card-meta">' + (j.paper_size || '') + (age ? ' · ' + age : '') + '</div>'
+                    + '<div class="q-card-status qs-' + (j.status || 'queued') + '">' + (j.status || 'queued') + '</div>';
+                cards.appendChild(card);
+            });
+            if (old.length && recent.length) {
+                var pill = document.createElement('div');
+                pill.className = 'q-card q-old-pill';
+                pill.textContent = '+' + old.length + ' older';
+                cards.appendChild(pill);
+            }
+        }).catch(function(){ /* queue server may not be running yet */ });
+    }
+    document.getElementById('queueRefreshBtn').addEventListener('click', fetchQueue);
+    setInterval(fetchQueue, 10000);
+    fetchQueue();
+
+    // ── Machine status polling ────────────────────────────────────────────────
+    function fetchMachineStatus() {
+        fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
+            var banner = document.getElementById('busy-banner');
+            banner.classList.toggle('visible', !!s.busy);
+        }).catch(function(){});
+    }
+    setInterval(fetchMachineStatus, 6000);
+    fetchMachineStatus();
+</script>
+<script src="scripts/makeSketch.js"></script>
+</body>
+</html>
