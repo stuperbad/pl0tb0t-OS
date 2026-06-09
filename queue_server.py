@@ -9,7 +9,7 @@ Usage:
     QUEUE_API_KEY=mysecret python3 queue_server.py
 """
 
-__version__ = "0.1.02"
+__version__ = "0.1.03"
 
 import os, sqlite3, uuid, time, json, threading
 from pathlib import Path
@@ -92,7 +92,13 @@ var KEY='__API_KEY__', reqId=null;
 function hdr(){return{'X-API-Key':KEY,'Content-Type':'application/json'};}
 function load(){
   fetch('/status').then(function(r){return r.json();}).then(upSt).catch(function(){});
-  fetch('/jobs?api_key='+KEY).then(function(r){return r.json();}).then(render).catch(function(){});
+  fetch('/jobs?api_key='+KEY).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(render).catch(function(e){
+    var l=document.getElementById('list');
+    l.innerHTML='<div id=empty style="color:#f66;font-size:13px;padding:30px">Could not load jobs: '+e.message+'<br><small>Server: '+window.location.host+'</small></div>';
+  });
 }
 function upSt(s){
   reqId=s.plot_requested;
@@ -163,6 +169,7 @@ def add_cors(resp):
     resp.headers["Access-Control-Allow-Origin"]  = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
 
 @app.route("/", defaults={"path": ""}, methods=["OPTIONS"])
@@ -328,7 +335,7 @@ def mobile():
 
 if __name__ == "__main__":
     init_db()
-    print(f"Pl0tb0t Queue Server v1.0")
+    print(f"Pl0tb0t Queue Server v{__version__}")
     print(f"  Listening on  http://0.0.0.0:{PORT}")
     print(f"  Queue dir:    {QUEUE_DIR}")
     print(f"  API key:      {API_KEY}")
