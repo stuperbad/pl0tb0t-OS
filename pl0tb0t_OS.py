@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.09"
+__version__ = "0.4.10"
 import os
 import sys
 import time
@@ -3208,7 +3208,11 @@ if has_display:
             self._queue_auto_timer.timeout.connect(self._queue_refresh)
             self._queue_auto_timer.timeout.connect(self._queue_check_plot_request)
             self._queue_auto_timer.start(3000)
+            self._cloud_sync_timer = QTimer()
+            self._cloud_sync_timer.timeout.connect(self._cloud_sync)
+            self._cloud_sync_timer.start(30000)
             self._queue_refresh()
+            self._cloud_sync()
             return outer
 
         def _queue_load_cfg(self):
@@ -3219,7 +3223,9 @@ if has_display:
 
         def _queue_save_cfg(self):
             import pathlib, json as _j
-            cfg = {"url": self._queue_url_edit.text().rstrip("/"),
+            existing = self._queue_load_cfg()
+            cfg = {**existing,
+                   "url": self._queue_url_edit.text().rstrip("/"),
                    "key": self._queue_key_edit.text()}
             (pathlib.Path(__file__).parent / "queue_config.json").write_text(
                 _j.dumps(cfg, indent=2))
@@ -3247,6 +3253,96 @@ if has_display:
                 self._queue_url_edit.text().rstrip("/"),
                 _resolve_key(self._queue_key_edit.text()),
             )
+
+        def _cloud_server_params(self):
+            cfg = self._queue_load_cfg()
+            cloud_url = cfg.get("cloud_url", "").rstrip("/")
+            if not cloud_url:
+                return None, None
+            raw = cfg.get("cloud_key", "").strip()
+            key = raw
+            if raw:
+                import pathlib
+                key_path = raw[1:] if raw.startswith("@") else raw
+                p = pathlib.Path(key_path)
+                if not p.is_absolute():
+                    p = pathlib.Path(__file__).parent / key_path
+                if p.exists() and p.is_file():
+                    try:
+                        key = p.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        pass
+            return cloud_url, key
+
+        def _cloud_sync(self):
+            cloud_url, cloud_key = self._cloud_server_params()
+            if not cloud_url:
+                return
+            local_url, local_key = self._queue_server_params()
+            import json as _j
+            def _run():
+                try:
+                    cloud_jobs = self._queue_http("/jobs?status=queued",
+                                                  base_url=cloud_url, key=cloud_key)
+                    if not cloud_jobs:
+                        return
+                    local_jobs = self._queue_http("/jobs",
+                                                  base_url=local_url, key=local_key)
+                    existing = {j.get("cloud_id") for j in local_jobs if j.get("cloud_id")}
+                    ingested = 0
+                    for cj in cloud_jobs:
+                        cid = cj.get("id")
+                        if not cid or cid in existing:
+                            continue
+                        try:
+                            svg = self._queue_fetch_text(
+                                f"/jobs/{cid}/svg", base_url=cloud_url, key=cloud_key)
+                            recipe = None
+                            if cj.get("has_recipe"):
+                                try:
+                                    recipe = _j.loads(self._queue_fetch_text(
+                                        f"/jobs/{cid}/recipe",
+                                        base_url=cloud_url, key=cloud_key))
+                                except Exception:
+                                    pass
+                            self._queue_http("/jobs", "POST", {
+                                "svg":         svg,
+                                "recipe":      recipe,
+                                "sketch_name": cj.get("sketch_name", "Untitled"),
+                                "paper_size":  cj.get("paper_size",  "8.5x11"),
+                                "orientation": cj.get("orientation", "portrait"),
+                                "notes":       cj.get("notes", ""),
+                                "cloud_id":    cid,
+                            }, base_url=local_url, key=local_key)
+                            self._queue_http(f"/jobs/{cid}/status", "PATCH",
+                                             {"status": "plotting"},
+                                             base_url=cloud_url, key=cloud_key)
+                            existing.add(cid)
+                            ingested += 1
+                        except Exception:
+                            pass
+                    if ingested:
+                        self.signals.update_status.emit(f"__q_cloud__{ingested}")
+                except Exception:
+                    pass
+            threading.Thread(target=_run, daemon=True).start()
+
+        def _cloud_push_status(self, local_job_id, status):
+            cloud_url, cloud_key = self._cloud_server_params()
+            if not cloud_url:
+                return
+            job = self._queue_jobs_cache.get(local_job_id, {})
+            cloud_id = job.get("cloud_id")
+            if not cloud_id:
+                return
+            def _push():
+                try:
+                    self._queue_http(f"/jobs/{cloud_id}/status", "PATCH",
+                                     {"status": status},
+                                     base_url=cloud_url, key=cloud_key)
+                except Exception:
+                    pass
+            threading.Thread(target=_push, daemon=True).start()
 
         def _queue_post_machine_status(self, busy: bool, job_id=None):
             """Fire-and-forget: push machine busy state to the queue server."""
@@ -3345,6 +3441,10 @@ if has_display:
                 self.feed_override_slider.setValue(100)
                 self.tc_override_slider.setValue(100)
                 self.run_gcode()
+            elif msg.startswith("__q_cloud__"):
+                n = msg.split("__q_cloud__", 1)[1]
+                self._queue_status_lbl.setText(f"Ingested {n} job(s) from cloud ↓")
+                self._queue_refresh()
             elif msg.startswith("__q_prev__") and not msg.startswith("__q_prev_err__"):
                 job_id = msg.split("__q_prev__", 1)[1]
                 if job_id == self._queue_selected_id:
@@ -3717,6 +3817,7 @@ if has_display:
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     self._queue_http(f"/jobs/{job_id}/status",
                                      "PATCH", {"status": "plotting"}, base_url=base_url, key=key)
+                    self._cloud_push_status(job_id, "plotting")
                     vpype = str(pathlib.Path.home() / ".local/bin/vpype")
                     cfg   = self.config.vpype_config.strip()
                     prof  = self.config.vpype_profile.strip()
@@ -3738,10 +3839,12 @@ if has_display:
                             "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
                     self._queue_http(f"/jobs/{job_id}/status",
                                      "PATCH", {"status": "done"}, base_url=base_url, key=key)
+                    self._cloud_push_status(job_id, "done")
                 except Exception as e:
                     try:
                         self._queue_http(f"/jobs/{job_id}/status",
                                          "PATCH", {"status": "error"}, base_url=base_url, key=key)
+                        self._cloud_push_status(job_id, "error")
                     except Exception:
                         pass
                     self.signals.show_error.emit("Queue Error", str(e))

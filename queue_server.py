@@ -9,7 +9,7 @@ Usage:
     QUEUE_API_KEY=mysecret python3 queue_server.py
 """
 
-__version__ = "0.1.03"
+__version__ = "0.1.04"
 
 import os, sqlite3, uuid, time, json, threading
 from pathlib import Path
@@ -194,9 +194,15 @@ def init_db():
                 orientation TEXT DEFAULT 'portrait',
                 status      TEXT DEFAULT 'queued',
                 created_at  REAL,
-                notes       TEXT DEFAULT ''
+                notes       TEXT DEFAULT '',
+                cloud_id    TEXT DEFAULT NULL
             )
         """)
+        # migration for existing DBs without cloud_id
+        try:
+            db.execute("ALTER TABLE jobs ADD COLUMN cloud_id TEXT DEFAULT NULL")
+        except Exception:
+            pass
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -221,19 +227,21 @@ def create_job():
 
     job_id = str(uuid.uuid4())[:8]
     (QUEUE_DIR / f"{job_id}.svg").write_text(svg, encoding="utf-8")
+    cloud_id = data.get("cloud_id") or request.form.get("cloud_id") or None
 
     with get_db() as db:
         db.execute(
-            "INSERT INTO jobs(id,sketch_name,paper_size,orientation,status,created_at,notes) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO jobs(id,sketch_name,paper_size,orientation,status,created_at,notes,cloud_id) VALUES(?,?,?,?,?,?,?,?)",
             (job_id,
              data.get("sketch_name") or request.form.get("sketch_name", "Untitled"),
              data.get("paper_size")  or request.form.get("paper_size",  "8.5x11"),
              data.get("orientation") or request.form.get("orientation", "portrait"),
              "queued",
              time.time(),
-             data.get("notes") or request.form.get("notes", ""))
+             data.get("notes") or request.form.get("notes", ""),
+             cloud_id)
         )
-    return jsonify({"job_id": job_id, "status": "queued"}), 201
+    return jsonify({"job_id": job_id, "status": "queued", "cloud_id": cloud_id}), 201
 
 
 @app.route("/jobs", methods=["GET"])
