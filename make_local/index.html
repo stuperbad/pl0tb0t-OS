@@ -314,37 +314,5 @@
     fetchMachineStatus();
 </script>
 <script src="scripts/makeSketch.js"></script>
-<script>
-/* make-ui r5 */
-(function() {
-    var handle     = document.getElementById('resize-handle');
-    var ctrlCol    = document.getElementById('ctrl-col');
-    var sketchCol  = document.getElementById('sketch-col');
-    var resizing   = false;
-
-    handle.addEventListener('mousedown', function(e) {
-        resizing = true;
-        sketchCol.style.pointerEvents = 'none';
-        document.body.style.userSelect = 'none';
-        document.body.style.cursor = 'col-resize';
-        e.preventDefault();
-    });
-    document.addEventListener('mousemove', function(e) {
-        if (!resizing) return;
-        var w = Math.max(160, Math.min(520, window.innerWidth - e.clientX));
-        ctrlCol.style.flex = '0 0 ' + w + 'px';
-    });
-    document.addEventListener('mouseup', function() {
-        if (!resizing) return;
-        resizing = false;
-        sketchCol.style.pointerEvents = '';
-        document.body.style.userSelect = '';
-        document.body.style.cursor = '';
-    });
-
-    /* confirm which revision is loaded */
-    console.log('make-ui r5 loaded, ctrl-col default:', getComputedStyle(ctrlCol).width);
-})();
-</script>
 </body>
 </html>
