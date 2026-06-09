@@ -336,7 +336,7 @@
         if (!handle.hasPointerCapture(e.pointerId)) return;
         var dx = e.clientX - dragStartX;
         if (Math.abs(dx) > 4) didDrag = true;
-        if (didDrag) setW(Math.max(150, Math.min(720, dragStartW - dx)));
+        if (didDrag) setW(Math.max(240, Math.min(720, dragStartW - dx)));
     });
     handle.addEventListener('pointerup', function(e) {
         handle.releasePointerCapture(e.pointerId);

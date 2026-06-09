@@ -1184,7 +1184,7 @@ if has_display:
             width_inject.setSourceCode(
                 "(function(){"
                 "var c=document.getElementById('ctrl-col');"
-                "if(c){c.style.flex='0 0 150px';c.style.minWidth='0';c.style.overflow='hidden';}"
+                "if(c){c.style.flex='0 0 320px';c.style.minWidth='0';c.style.overflow='hidden';}"
                 "})();"
             )
             view.page().scripts().insert(width_inject)
