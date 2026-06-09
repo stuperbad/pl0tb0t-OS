@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.11"
+__version__ = "0.4.12"
 import os
 import sys
 import time
@@ -687,6 +687,7 @@ if has_display:
             self.job = job
             self.job_id = job['id']
             self.locked = locked
+            self._del_armed = False
             self._setup_ui()
 
         def _setup_ui(self):
@@ -716,10 +717,10 @@ if has_display:
             name_lbl.setStyleSheet('font-weight: 600; font-size: 13px;')
             header.addWidget(name_lbl, 1)
 
-            del_btn = QPushButton('✕')
-            del_btn.setFixedSize(22, 22)
-            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            del_btn.setStyleSheet("""
+            self._del_btn = QPushButton('✕')
+            self._del_btn.setFixedSize(22, 22)
+            self._del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._del_btn.setStyleSheet("""
                 QPushButton {
                     border: none; border-radius: 11px;
                     background: transparent;
@@ -727,8 +728,8 @@ if has_display:
                 }
                 QPushButton:hover { background: #ffdddd; color: #c00; }
             """)
-            del_btn.clicked.connect(self._confirm_delete)
-            header.addWidget(del_btn)
+            self._del_btn.clicked.connect(self._confirm_delete)
+            header.addWidget(self._del_btn)
             root.addLayout(header)
 
             # ── meta row: paper + orientation + file size ───────────────────
@@ -782,18 +783,33 @@ if has_display:
 
         def _confirm_delete(self):
             status = self.job.get('status', 'queued')
-            if status in ('error', 'done'):
+            if status in ('error', 'done') or self._del_armed:
                 self.deleted.emit(self.job_id)
                 return
-            name = self.job.get('sketch_name') or 'this job'
-            reply = QMessageBox.question(
-                None, 'Delete Job',
-                f"Remove '{name}' from the print queue? This cannot be undone.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.deleted.emit(self.job_id)
+            self._del_armed = True
+            self._del_btn.setText('✕?')
+            self._del_btn.setStyleSheet("""
+                QPushButton {
+                    border: none; border-radius: 11px;
+                    background: #ffdddd; color: #c00;
+                    font-size: 11px; font-weight: bold;
+                }
+                QPushButton:hover { background: #ffbbbb; }
+            """)
+            QTimer.singleShot(3000, self._disarm_delete)
+
+        def _disarm_delete(self):
+            if self._del_armed:
+                self._del_armed = False
+                self._del_btn.setText('✕')
+                self._del_btn.setStyleSheet("""
+                    QPushButton {
+                        border: none; border-radius: 11px;
+                        background: transparent;
+                        color: #bbb; font-size: 14px; font-weight: bold;
+                    }
+                    QPushButton:hover { background: #ffdddd; color: #c00; }
+                """)
 
         def mousePressEvent(self, ev):
             self.selected.emit(self.job_id)
