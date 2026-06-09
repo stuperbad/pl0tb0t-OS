@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.04"
+__version__ = "0.4.05"
 import os
 import sys
 import time
@@ -810,8 +810,10 @@ if has_display:
         def reposition(self):
             p = self.parent()
             if not p: return
-            x = p.width() - self._ctrl_w - 7
-            self.setGeometry(x, 0, 14, p.height())
+            w = p.width() or self._webview.width()
+            h = p.height() or self._webview.height()
+            if w <= 0: return
+            self.setGeometry(w - self._ctrl_w - 7, 0, 14, h)
             self.raise_()
 
         def mousePressEvent(self, e):
@@ -1192,6 +1194,8 @@ if has_display:
         def _toggle_make_mode(self, checked: bool):
             self._central_stack.setCurrentIndex(1 if checked else 0)
             self._make_mode_btn.setText("← Machine" if checked else "Make →")
+            if checked and hasattr(self, '_make_resize'):
+                QTimer.singleShot(50, self._make_resize.reposition)
 
         def _build_make_widget(self):
             w = QWidget()
