@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.05"
+__version__ = "0.4.06"
 import os
 import sys
 import time
@@ -793,50 +793,6 @@ if has_display:
             self.selected.emit(self.job_id)
             super().mousePressEvent(ev)
 
-    class _MakeResizeHandle(QWidget):
-        """Transparent Qt widget overlaid on the make webview to handle col resize."""
-        def __init__(self, webview, initial_width=220, parent=None):
-            super().__init__(parent)
-            self._webview = webview
-            self._ctrl_w  = initial_width
-            self._dragging = False
-            self._drag_x0  = 0
-            self._ctrl_w0  = 0
-            self.setFixedWidth(14)
-            self.setCursor(Qt.CursorShape.SplitHCursor)
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setMouseTracking(True)
-
-        def reposition(self):
-            p = self.parent()
-            if not p: return
-            w = p.width() or self._webview.width()
-            h = p.height() or self._webview.height()
-            if w <= 0: return
-            self.setGeometry(w - self._ctrl_w - 7, 0, 14, h)
-            self.raise_()
-
-        def mousePressEvent(self, e):
-            if e.button() == Qt.MouseButton.LeftButton:
-                self._dragging = True
-                self._drag_x0  = e.globalPosition().toPoint().x()
-                self._ctrl_w0  = self._ctrl_w
-            e.accept()
-
-        def mouseMoveEvent(self, e):
-            if not self._dragging: return
-            delta = e.globalPosition().toPoint().x() - self._drag_x0
-            self._ctrl_w = max(160, min(520, self._ctrl_w0 - delta))
-            self.reposition()
-            self._webview.page().runJavaScript(
-                f"document.getElementById('ctrl-col').style.flex='0 0 {self._ctrl_w}px';"
-            )
-            e.accept()
-
-        def mouseReleaseEvent(self, e):
-            self._dragging = False
-            e.accept()
-
     class PlotterApp(QMainWindow):
         def __init__(self):
             super().__init__()
@@ -1194,8 +1150,6 @@ if has_display:
         def _toggle_make_mode(self, checked: bool):
             self._central_stack.setCurrentIndex(1 if checked else 0)
             self._make_mode_btn.setText("← Machine" if checked else "Make →")
-            if checked and hasattr(self, '_make_resize'):
-                QTimer.singleShot(50, self._make_resize.reposition)
 
         def _build_make_widget(self):
             w = QWidget()
@@ -1213,30 +1167,29 @@ if has_display:
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            # Inject API key at document creation so all fetch calls can use it
             api_key = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
+            # DocumentCreation: globals available before page scripts run
             inject = QWebEngineScript()
             inject.setName("pl0tb0t_inject")
             inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
             inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
             inject.setSourceCode(f"window.QUEUE_API_KEY = '{api_key}';")
             view.page().scripts().insert(inject)
+            # DocumentReady: force ctrl-col width via inline style so it wins
+            # regardless of whatever CSS the webview ends up serving.
+            width_inject = QWebEngineScript()
+            width_inject.setName("pl0tb0t_ctrl_width")
+            width_inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+            width_inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            width_inject.setSourceCode(
+                "(function(){"
+                "var c=document.getElementById('ctrl-col');"
+                "if(c)c.style.flex='0 0 150px';"
+                "})();"
+            )
+            view.page().scripts().insert(width_inject)
             self._make_webview = view
             lay.addWidget(view)
-
-            # Qt-level resize handle — overlaid on the webview so Qt handles the drag
-            # natively instead of relying on JS events inside QWebEngineView.
-            self._make_resize = _MakeResizeHandle(view, 220, w)
-            self._make_resize.show()
-            view.loadFinished.connect(lambda _ok: self._make_resize.reposition())
-
-            class _RF(QObject):
-                def eventFilter(self_, _obj, e):
-                    if e.type() == QEvent.Type.Resize:
-                        self._make_resize.reposition()
-                    return False
-            self._make_rf = _RF(w)
-            w.installEventFilter(self._make_rf)
 
             # Watch make_local/ for file changes and hard-reload (bypass cache).
             make_local_dir = os.path.dirname(make_html)
