@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.02"
+__version__ = "0.4.03"
 import os
 import sys
 import time
@@ -49,7 +49,7 @@ if has_display:
     from PyQt6.QtSvg import QSvgRenderer
     try:
         from PyQt6.QtWebEngineWidgets import QWebEngineView
-        from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineScript
+        from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineScript, QWebEngineProfile, QWebEnginePage
         _HAS_WEBENGINE = True
     except ImportError:
         _HAS_WEBENGINE = False
@@ -1157,12 +1157,16 @@ if has_display:
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(0)
             view = QWebEngineView()
+            # Off-the-record profile: no persistent disk cache, so file edits
+            # always land on the next reload instead of being served stale.
+            profile = QWebEngineProfile(view)
+            page = QWebEnginePage(profile, view)
+            view.setPage(page)
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
-            # TouchEventsEnabled removed in Qt6 — touch works by default
             # Inject API key at document creation so all fetch calls can use it
             api_key = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
             inject = QWebEngineScript()
@@ -1173,24 +1177,24 @@ if has_display:
             view.page().scripts().insert(inject)
             self._make_webview = view
             lay.addWidget(view)
-            # Watch make_local/ for file changes and reload the view automatically.
-            # SCP-replacing a file triggers fileChanged; re-add it because inode replacement
-            # causes the watcher to drop the path after the first event.
+            # Watch make_local/ for file changes and hard-reload (bypass cache).
             make_local_dir = os.path.dirname(make_html)
             self._make_watcher = QFileSystemWatcher()
             self._make_watcher.addPath(make_local_dir)
             for root, _dirs, files in os.walk(make_local_dir):
                 for fn in files:
                     self._make_watcher.addPath(os.path.join(root, fn))
+            def _hard_reload():
+                self._make_webview.page().triggerAction(
+                    QWebEnginePage.WebAction.ReloadAndBypassCache)
             def _on_file_changed(path):
                 self._make_watcher.addPath(path)   # re-watch after inode replace
-                QTimer.singleShot(150, self._make_webview.reload)
+                QTimer.singleShot(150, _hard_reload)
             def _on_dir_changed(path):
-                # pick up newly-created files (e.g. a sketch added via SCP)
                 for root, _dirs, files in os.walk(path):
                     for fn in files:
                         self._make_watcher.addPath(os.path.join(root, fn))
-                QTimer.singleShot(150, self._make_webview.reload)
+                QTimer.singleShot(150, _hard_reload)
             self._make_watcher.fileChanged.connect(_on_file_changed)
             self._make_watcher.directoryChanged.connect(_on_dir_changed)
             return w
