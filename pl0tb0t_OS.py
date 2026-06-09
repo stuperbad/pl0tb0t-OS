@@ -3833,7 +3833,8 @@ if has_display:
                     vpype = str(pathlib.Path.home() / ".local/bin/vpype")
                     cfg   = self.config.vpype_config.strip()
                     prof  = self.config.vpype_profile.strip()
-                    cmd = (f"{vpype} read \"{svg_path}\""
+                    cfg_flag = f"-c \"{cfg}\" " if cfg else ""
+                    cmd = (f"{vpype} {cfg_flag}read \"{svg_path}\""
                            f" linesimplify -t 0.05mm linemerge linesort --two-opt")
                     if cfg and prof:
                         cmd += f" gwrite -p {prof} \"{gcode_path}\""
