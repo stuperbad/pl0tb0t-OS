@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.06"
+__version__ = "0.4.07"
 import os
 import sys
 import time
@@ -1184,7 +1184,7 @@ if has_display:
             width_inject.setSourceCode(
                 "(function(){"
                 "var c=document.getElementById('ctrl-col');"
-                "if(c)c.style.flex='0 0 150px';"
+                "if(c){c.style.flex='0 0 150px';c.style.minWidth='0';c.style.overflow='hidden';}"
                 "})();"
             )
             view.page().scripts().insert(width_inject)
