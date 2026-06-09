@@ -318,11 +318,33 @@
 (function() {
     var handle  = document.getElementById('resize-handle');
     var ctrlCol = document.getElementById('ctrl-col');
-    var wide = false;
-    handle.addEventListener('click', function() {
-        wide = !wide;
-        ctrlCol.style.flex = wide ? '0 0 320px' : '0 0 150px';
+    var dragStartX = 0, dragStartW = 320, didDrag = false;
+
+    function setW(w) {
+        ctrlCol.style.flex = '0 0 ' + w + 'px';
         ctrlCol.style.minWidth = '0';
+    }
+
+    handle.addEventListener('pointerdown', function(e) {
+        handle.setPointerCapture(e.pointerId);
+        dragStartX = e.clientX;
+        dragStartW = ctrlCol.offsetWidth || 320;
+        didDrag = false;
+        e.preventDefault();
+    });
+    handle.addEventListener('pointermove', function(e) {
+        if (!handle.hasPointerCapture(e.pointerId)) return;
+        var dx = e.clientX - dragStartX;
+        if (Math.abs(dx) > 4) didDrag = true;
+        if (didDrag) setW(Math.max(150, Math.min(720, dragStartW - dx)));
+    });
+    handle.addEventListener('pointerup', function(e) {
+        handle.releasePointerCapture(e.pointerId);
+        if (!didDrag) {
+            var cur = ctrlCol.offsetWidth || 320;
+            setW(cur < 500 ? 720 : 320);
+        }
+        didDrag = false;
     });
 })();
 </script>
