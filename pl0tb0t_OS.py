@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.12"
+__version__ = "0.4.13"
 import os
 import sys
 import time
@@ -687,7 +687,6 @@ if has_display:
             self.job = job
             self.job_id = job['id']
             self.locked = locked
-            self._del_armed = False
             self._setup_ui()
 
         def _setup_ui(self):
@@ -783,33 +782,24 @@ if has_display:
 
         def _confirm_delete(self):
             status = self.job.get('status', 'queued')
-            if status in ('error', 'done') or self._del_armed:
+            if status in ('error', 'done'):
                 self.deleted.emit(self.job_id)
                 return
-            self._del_armed = True
-            self._del_btn.setText('✕?')
-            self._del_btn.setStyleSheet("""
-                QPushButton {
-                    border: none; border-radius: 11px;
-                    background: #ffdddd; color: #c00;
-                    font-size: 11px; font-weight: bold;
-                }
-                QPushButton:hover { background: #ffbbbb; }
-            """)
-            QTimer.singleShot(3000, self._disarm_delete)
-
-        def _disarm_delete(self):
-            if self._del_armed:
-                self._del_armed = False
-                self._del_btn.setText('✕')
-                self._del_btn.setStyleSheet("""
-                    QPushButton {
-                        border: none; border-radius: 11px;
-                        background: transparent;
-                        color: #bbb; font-size: 14px; font-weight: bold;
-                    }
-                    QPushButton:hover { background: #ffdddd; color: #c00; }
-                """)
+            # Capture everything needed BEFORE the modal dialog opens.
+            # The 3s refresh fires inside QMessageBox's nested event loop
+            # and calls deleteLater() on this card, destroying the C++ object
+            # before QMessageBox returns. Never touch `self` after this point.
+            job_id   = self.job_id
+            name     = self.job.get('sketch_name') or 'this job'
+            do_delete = getattr(self.window(), '_queue_delete', None)
+            reply = QMessageBox.question(
+                None, 'Delete Job',
+                f"Remove '{name}' from the queue? This cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes and do_delete:
+                do_delete(job_id)
 
         def mousePressEvent(self, ev):
             self.selected.emit(self.job_id)
