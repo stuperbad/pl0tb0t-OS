@@ -15,6 +15,8 @@ import subprocess
 import shutil
 import tempfile
 import json
+import socket
+import queue as _queue
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -40,10 +42,17 @@ if has_display:
         QSlider, QCheckBox, QProgressBar, QListWidget,
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
+        QDialog, QDialogButtonBox, QStackedWidget,
     )
-    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF
+    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
     from PyQt6.QtSvg import QSvgRenderer
+    try:
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEngineScript
+        _HAS_WEBENGINE = True
+    except ImportError:
+        _HAS_WEBENGINE = False
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +144,159 @@ def save_tools(path: str = CONFIG_PATH, tools: List[Tool] = None) -> None:
     data = _load_json(path, {})
     data["tools"] = [asdict(t) for t in (tools or [])]
     _save_json(path, data)
+
+
+DAEMON_PORT = 5002
+
+
+class DaemonClient:
+    """Socket client for pl0tb0t_daemon. Thread-safe; one command at a time."""
+
+    def __init__(self):
+        self._sock      = None
+        self._connected = False          # daemon socket connected
+        self._send_lock = threading.Lock()
+        self._resp_lock = threading.Lock()
+        self._resp_evt  = threading.Event()
+        self._pending   = None
+        self._state     = {}
+
+        # Callbacks — set by PlotterApp
+        self.on_status      = None  # (dict) → None
+        self.on_progress    = None  # (sent, total) → None
+        self.on_gcode_done  = None  # () → None
+        self.on_gcode_error = None  # (line_num, line, msg) → None
+        self.on_grbl_line   = None  # (sent, response) → None
+        self.on_daemon_gone = None  # () → None
+
+    # ── Connect / disconnect to daemon socket ─────────────────────────────
+
+    def connect_to_daemon(self, timeout: float = 3.0) -> bool:
+        if self._connected and self._sock:
+            return True   # already have a live socket — don't open a second one
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect(("127.0.0.1", DAEMON_PORT))
+            sock.settimeout(None)
+            self._sock = sock
+            self._connected = True
+            threading.Thread(target=self._recv_loop, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def disconnect_from_daemon(self):
+        self._connected = False
+        if self._sock:
+            try: self._sock.close()
+            except: pass
+            self._sock = None
+
+    def _recv_loop(self):
+        buf = b""
+        while self._connected:
+            try:
+                chunk = self._sock.recv(4096)
+            except Exception:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if "event" in data:
+                    self._handle_event(data)
+                else:
+                    with self._resp_lock:
+                        self._pending = data
+                    self._resp_evt.set()
+        self._connected = False
+        # Unblock any cmd() that is still waiting for a response
+        with self._resp_lock:
+            if self._pending is None:
+                self._pending = {"ok": False, "error": "daemon disconnected"}
+        self._resp_evt.set()
+        if self.on_daemon_gone:
+            try: self.on_daemon_gone()
+            except: pass
+
+    def _handle_event(self, data: dict):
+        ev = data.get("event")
+        if ev == "status":
+            self._state = data
+            if self.on_status:
+                try: self.on_status(data)
+                except: pass
+        elif ev == "progress":
+            if self.on_progress:
+                try: self.on_progress(data.get("sent", 0), data.get("total", 0))
+                except: pass
+        elif ev == "gcode_done":
+            if self.on_gcode_done:
+                try: self.on_gcode_done()
+                except: pass
+        elif ev == "gcode_error":
+            if self.on_gcode_error:
+                try: self.on_gcode_error(
+                    data.get("line_num", 0), data.get("line", ""), data.get("message", ""))
+                except: pass
+        elif ev == "grbl_line":
+            if self.on_grbl_line:
+                try: self.on_grbl_line(data.get("sent", ""), data.get("response", ""))
+                except: pass
+
+    # ── Send a command, wait for response ─────────────────────────────────
+
+    def cmd(self, obj: dict, timeout: float = 30.0) -> dict:
+        if not self._connected:
+            return {"ok": False, "error": "daemon not connected"}
+        with self._send_lock:
+            with self._resp_lock:
+                self._pending = None
+            self._resp_evt.clear()
+            try:
+                self._sock.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+            if not self._resp_evt.wait(timeout=timeout):
+                return {"ok": False, "error": "timeout"}
+            with self._resp_lock:
+                return self._pending or {"ok": False, "error": "no response"}
+
+    # ── Convenience wrappers ──────────────────────────────────────────────
+
+    def ping(self)                  -> dict: return self.cmd({"cmd": "ping"}, timeout=2.0)
+    def ports(self)                 -> list: return self.cmd({"cmd": "ports"}).get("ports", [])
+    def status(self)                -> dict: return self.cmd({"cmd": "status"})
+    def connect_port(self, port, baud=115200) -> dict:
+        return self.cmd({"cmd": "connect", "port": port, "baud": baud}, timeout=10.0)
+    def disconnect_port(self)       -> dict: return self.cmd({"cmd": "disconnect"})
+    def send(self, line, wait=True) -> dict:
+        return self.cmd({"cmd": "send", "line": line, "wait": wait}, timeout=30.0)
+    def realtime(self, byte_val: int):       self.cmd({"cmd": "realtime", "byte": byte_val}, timeout=2.0)
+    def home(self)                  -> dict: return self.cmd({"cmd": "home"}, timeout=120.0)
+    def stream(self, path: str)     -> dict: return self.cmd({"cmd": "stream", "path": path}, timeout=5.0)
+    def pause(self)                 -> dict: return self.cmd({"cmd": "pause"})
+    def resume(self)                -> dict: return self.cmd({"cmd": "resume"})
+    def stop(self)                  -> dict: return self.cmd({"cmd": "stop"})
+    def shutdown_daemon(self)       -> dict: return self.cmd({"cmd": "shutdown"}, timeout=3.0)
+
+    @property
+    def daemon_alive(self) -> bool:
+        return self._connected
+
+    @property
+    def machine_connected(self) -> bool:
+        return self._connected and bool(self._state.get("connected"))
+
+    @property
+    def last_state(self) -> dict:
+        return self._state
 
 
 def list_serial_ports() -> List[Tuple[str, str]]:
@@ -267,6 +429,7 @@ if has_display:
         gcode_highlight = pyqtSignal(int)
         grbl_log       = pyqtSignal(str)
         queue_jobs_ready = pyqtSignal(list)
+        daemon_indicator = pyqtSignal()   # refresh daemon status dot (thread-safe)
 
     class AspectSvgPreviewWidget(QWidget):
         """SVG preview that letterboxes instead of stretching to the pane."""
@@ -658,8 +821,20 @@ if has_display:
             self._svg_layers = []
             self._layer_colors = []       # [(hex, label), ...]
             self._visible_colors = set()
-            self._serial_lock = threading.Lock()
+            self._serial_lock = threading.Lock()  # kept for any legacy paths
             self._poll_running = False
+
+            # Daemon client — replaces direct serial access
+            self._daemon = DaemonClient()
+            self._daemon.on_status      = self._on_daemon_status
+            self._daemon.on_progress    = self._on_daemon_progress
+            self._daemon.on_gcode_done  = self._on_daemon_gcode_done
+            self._daemon.on_gcode_error = self._on_daemon_gcode_error
+            self._daemon.on_grbl_line   = self._on_daemon_grbl_line
+            self._daemon.on_daemon_gone = self._on_daemon_gone
+            self._daemon_proc   = None   # subprocess handle
+            self._daemon_status_label = None  # set in _build_connection_panel
+            self._gcode_tmp_path = None  # temp file for feed-override-processed gcode
 
             self.jog_keys_held = set()
             self._continuous_jog_active = False
@@ -680,6 +855,7 @@ if has_display:
             self.signals.gcode_highlight.connect(self._highlight_gcode_line_at)
             self.signals.grbl_log.connect(self._append_grbl_log)
             self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
+            self.signals.daemon_indicator.connect(self._update_daemon_indicator)
 
             self._build_ui()
             self._restore_layout()
@@ -860,7 +1036,6 @@ if has_display:
             main_splitter.setChildrenCollapsible(False)
             main_splitter.setHandleWidth(7)
             main_splitter.setMinimumWidth(0)
-            self.setCentralWidget(main_splitter)
 
             left_col = self._panel_column([
                 ("Connection",       self._scrolled(self._build_connection_panel()), False, 0),
@@ -885,6 +1060,12 @@ if has_display:
             main_splitter.setStretchFactor(1, 1)
             main_splitter.setStretchFactor(2, 1)
             main_splitter.setSizes([300, 520, 520])
+
+            self._central_stack = QStackedWidget()
+            self._central_stack.addWidget(main_splitter)   # index 0: machine
+            if _HAS_WEBENGINE:
+                self._central_stack.addWidget(self._build_make_widget())  # index 1: make
+            self.setCentralWidget(self._central_stack)
 
         def _make_status_bar(self):
             layout = QHBoxLayout()
@@ -928,16 +1109,111 @@ if has_display:
             layout.addWidget(wcs_grp)
 
             layout.addStretch()
+
+            if _HAS_WEBENGINE:
+                self._make_mode_btn = QPushButton("Make →")
+                self._make_mode_btn.setCheckable(True)
+                self._make_mode_btn.setFont(QFont("Arial", 11))
+                self._make_mode_btn.setFixedHeight(30)
+                self._make_mode_btn.setStyleSheet(
+                    "QPushButton { padding: 0 12px; border: 1px solid #aaa; border-radius: 4px; }"
+                    "QPushButton:checked { background: #111; color: #fff; border-color: #111; }"
+                )
+                self._make_mode_btn.clicked.connect(self._toggle_make_mode)
+                layout.addWidget(self._make_mode_btn)
+
+            self._fullscreen_btn = QPushButton("⛶")
+            self._fullscreen_btn.setFixedSize(30, 30)
+            self._fullscreen_btn.setFont(QFont("Arial", 13))
+            self._fullscreen_btn.setToolTip("Toggle fullscreen (F11)")
+            self._fullscreen_btn.setStyleSheet("QPushButton { border: 1px solid #aaa; border-radius: 4px; }")
+            self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+            layout.addWidget(self._fullscreen_btn)
+
             ver = QLabel(f"v{__version__}")
             ver.setFont(QFont("Arial", 9))
             layout.addWidget(ver)
             return layout
+
+        def _toggle_fullscreen(self):
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.showFullScreen()
+
+        def keyPressEvent(self, event):
+            if event.key() == Qt.Key.Key_F11:
+                self._toggle_fullscreen()
+            else:
+                super().keyPressEvent(event)
+
+        def _toggle_make_mode(self, checked: bool):
+            self._central_stack.setCurrentIndex(1 if checked else 0)
+            self._make_mode_btn.setText("← Machine" if checked else "Make →")
+
+        def _build_make_widget(self):
+            w = QWidget()
+            lay = QVBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            view = QWebEngineView()
+            make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
+            view.setUrl(QUrl.fromLocalFile(make_html))
+            settings = view.page().settings()
+            settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            # TouchEventsEnabled removed in Qt6 — touch works by default
+            # Inject API key at document creation so all fetch calls can use it
+            api_key = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
+            inject = QWebEngineScript()
+            inject.setName("pl0tb0t_inject")
+            inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+            inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            inject.setSourceCode(f"window.QUEUE_API_KEY = '{api_key}';")
+            view.page().scripts().insert(inject)
+            self._make_webview = view
+            lay.addWidget(view)
+            # Watch make_local/ for file changes and reload the view automatically.
+            # SCP-replacing a file triggers fileChanged; re-add it because inode replacement
+            # causes the watcher to drop the path after the first event.
+            make_local_dir = os.path.dirname(make_html)
+            self._make_watcher = QFileSystemWatcher()
+            self._make_watcher.addPath(make_local_dir)
+            for root, _dirs, files in os.walk(make_local_dir):
+                for fn in files:
+                    self._make_watcher.addPath(os.path.join(root, fn))
+            def _on_file_changed(path):
+                self._make_watcher.addPath(path)   # re-watch after inode replace
+                QTimer.singleShot(150, self._make_webview.reload)
+            def _on_dir_changed(path):
+                # pick up newly-created files (e.g. a sketch added via SCP)
+                for root, _dirs, files in os.walk(path):
+                    for fn in files:
+                        self._make_watcher.addPath(os.path.join(root, fn))
+                QTimer.singleShot(150, self._make_webview.reload)
+            self._make_watcher.fileChanged.connect(_on_file_changed)
+            self._make_watcher.directoryChanged.connect(_on_dir_changed)
+            return w
 
         def _build_connection_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
             layout.setContentsMargins(6, 6, 6, 6)
             layout.setSpacing(6)
+
+            # Daemon status indicator
+            daemon_row = QHBoxLayout()
+            self._daemon_status_label = QLabel("⬤ Daemon: not running")
+            self._daemon_status_label.setStyleSheet("color: #888; font-size: 11px;")
+            daemon_row.addWidget(self._daemon_status_label)
+            daemon_row.addStretch()
+            self._daemon_stop_btn = QPushButton("Stop Daemon")
+            self._daemon_stop_btn.setFixedHeight(22)
+            self._daemon_stop_btn.setStyleSheet("font-size: 10px; color: #c44;")
+            self._daemon_stop_btn.setVisible(False)
+            self._daemon_stop_btn.clicked.connect(self._stop_daemon)
+            daemon_row.addWidget(self._daemon_stop_btn)
+            layout.addLayout(daemon_row)
 
             port_row = QHBoxLayout()
             port_row.addWidget(QLabel("Port:"))
@@ -968,6 +1244,9 @@ if has_display:
             row2.addStretch()
             layout.addLayout(row2)
             layout.addStretch()
+
+            # Try connecting to an already-running daemon on startup
+            QTimer.singleShot(500, self._try_reconnect_daemon)
             return w
 
         def _build_jog_panel(self):
@@ -1529,54 +1808,81 @@ if has_display:
             self.wcs_offset_label.setText(f"Offset  X:{x:.3f}  Y:{y:.3f}  Z:{z:.3f}")
 
         # ------------------------------------------------------------------
+        # Daemon event callbacks (called from DaemonClient recv thread)
+        # ------------------------------------------------------------------
+
+        def _on_daemon_status(self, data: dict):
+            """Daemon pushed a status update — refresh UI from the main thread."""
+            self.machine_pos = {"x": data.get("mx", 0.0), "y": data.get("my", 0.0), "z": data.get("mz", 0.0)}
+            self.work_pos    = {"x": data.get("wx", 0.0), "y": data.get("wy", 0.0), "z": data.get("wz", 0.0)}
+            wco = data.get("wco", [0.0, 0.0, 0.0])
+            self.work_offset = {"x": wco[0], "y": wco[1], "z": wco[2]}
+            state = data.get("state", "Connected")
+            # Keep self.port in sync — this is how the UI learns the daemon (re)connected
+            self.port = True if data.get("connected") else None
+            self.signals.update_status.emit(state)
+            self.signals.update_dro.emit(self.machine_pos, self.work_pos)
+            self.signals.daemon_indicator.emit()
+
+        def _on_daemon_progress(self, sent: int, total: int):
+            self.gcode_sent_lines = sent
+            self.signals.gcode_highlight.emit(max(0, sent - 1))
+            if total > 0:
+                self.signals.update_progress.emit((sent / total) * 100.0)
+
+        def _on_daemon_gcode_done(self):
+            tmp = getattr(self, "_gcode_tmp_path", None)
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+                self._gcode_tmp_path = None
+            self.gcode_running = False
+            self.gcode_paused = False
+            self.gcode_stop = False
+            self._queue_post_machine_status(False)
+            self.signals.gcode_done.emit()
+
+        def _on_daemon_gcode_error(self, line_num: int, line: str, msg: str):
+            self.signals.show_error.emit(
+                "GRBL Error",
+                f"GRBL stopped at line {line_num}:\n{msg}\n\nSent:\n{line}")
+
+        def _on_daemon_grbl_line(self, sent: str, response: str):
+            self.signals.grbl_log.emit(f"→ {sent}")
+            if response:
+                self.signals.grbl_log.emit(f"← {response}")
+
+        def _on_daemon_gone(self):
+            """Daemon connection dropped unexpectedly."""
+            self.port = None
+            self.signals.update_status.emit("Disconnected")
+            self.signals.daemon_indicator.emit()
+
+        # ------------------------------------------------------------------
         # Serial / GRBL
         # ------------------------------------------------------------------
 
-        def _grbl_status_safe(self) -> str:
-            try:
-                self.port.reset_input_buffer()
-                self.port.write(b"?\n")
-                for _ in range(10):
-                    line = self.port.readline().decode("utf-8", errors="ignore").strip()
-                    if line.startswith("<"):
-                        return line
-                return ""
-            except Exception:
-                return ""
-
         def _poll_status(self):
-            if self.port and not self._poll_running:
-                threading.Thread(target=self._update_position_internal, daemon=True).start()
+            # Daemon pushes status automatically; this timer is kept for compat
+            # but is a no-op unless daemon is unavailable.
+            pass
 
         def _update_position_internal(self):
+            """Read current position from daemon's last known state and refresh UI."""
             self._poll_running = True
             try:
-                if not self.port or self._continuous_jog_active or self.gcode_running:
+                if not self._daemon.daemon_alive:
                     return
-                with self._serial_lock:
-                    status = self._grbl_status_safe()
-                if not status:
+                st = self._daemon.last_state
+                if not st:
                     return
-                state = status[1:].split("|")[0] if "|" in status else "Connected"
-                # WCO arrives periodically and after any WCS change — always update when present
-                if "|WCO:" in status:
-                    s = status.split("|WCO:")[1].split("|")[0].rstrip(">")
-                    cx, cy, cz = map(float, s.split(","))
-                    self.work_offset = {"x": cx, "y": cy, "z": cz}
-                if "|MPos:" in status:
-                    s = status.split("|MPos:")[1].split("|")[0].rstrip(">")
-                    x, y, z = map(float, s.split(","))
-                    self.machine_pos = {"x": x, "y": y, "z": z}
-                    self.work_pos = {
-                        "x": x - self.work_offset["x"],
-                        "y": y - self.work_offset["y"],
-                        "z": z - self.work_offset["z"],
-                    }
-                elif "|WPos:" in status:
-                    s = status.split("|WPos:")[1].split("|")[0].rstrip(">")
-                    wx, wy, wz = map(float, s.split(","))
-                    self.work_pos = {"x": wx, "y": wy, "z": wz}
-                self.signals.update_status.emit(state)
+                self.machine_pos = {"x": st.get("mx", 0.0), "y": st.get("my", 0.0), "z": st.get("mz", 0.0)}
+                self.work_pos    = {"x": st.get("wx", 0.0), "y": st.get("wy", 0.0), "z": st.get("wz", 0.0)}
+                wco = st.get("wco", [0.0, 0.0, 0.0])
+                self.work_offset = {"x": wco[0], "y": wco[1], "z": wco[2]}
+                self.signals.update_status.emit(st.get("state", "Connected"))
                 self.signals.update_dro.emit(self.machine_pos, self.work_pos)
             except Exception:
                 pass
@@ -1587,14 +1893,8 @@ if has_display:
             if not self.port:
                 return
             try:
-                with self._serial_lock:
-                    self.port.write(b"$$\n")
-                    time.sleep(0.3)
-                    lines = []
-                    while self.port.in_waiting:
-                        line = self.port.readline().decode("utf-8", errors="ignore").strip()
-                        if line:
-                            lines.append(line)
+                result = self._daemon.send("$$")
+                lines = result.get("lines", [])
                 rates = {}
                 for line in lines:
                     m = re.match(r"\$(\d+)=([\d.]+)", line)
@@ -1602,16 +1902,10 @@ if has_display:
                         rates[int(m.group(1))] = float(m.group(2))
                 if 110 in rates and 111 in rates:
                     self.rapid_jog_speed = int(min(rates[110], rates[111]))
-                # Store all max rates for display
-                self._grbl_max_rates = {
-                    k: int(v) for k, v in rates.items()
-                    if k in (110, 111, 112)
-                }
-                self.signals.gcode_status.connect  # ensure signal exists
+                self._grbl_max_rates = {k: int(v) for k, v in rates.items() if k in (110, 111, 112)}
                 x = rates.get(110, '?')
                 y = rates.get(111, '?')
                 z = rates.get(112, '?')
-                # Show in status label briefly
                 QTimer.singleShot(0, lambda: self.gcode_status_label.setText(
                     f"GRBL max rates — X:{int(x) if isinstance(x,float) else x}  "
                     f"Y:{int(y) if isinstance(y,float) else y}  "
@@ -1623,14 +1917,8 @@ if has_display:
             if not self.port:
                 return
             try:
-                with self._serial_lock:
-                    self.port.write(b"$#\n")
-                    time.sleep(0.25)
-                    lines = []
-                    while self.port.in_waiting:
-                        line = self.port.readline().decode("utf-8", errors="ignore").strip()
-                        if line:
-                            lines.append(line)
+                result = self._daemon.send("$#")
+                lines = result.get("lines", [])
                 wcs = self.wcs_combo.currentText()
                 for line in lines:
                     if line.startswith(f"[{wcs}:"):
@@ -1663,6 +1951,72 @@ if has_display:
                 self.port_combo.setCurrentIndex(0)
             self.port_combo.blockSignals(False)
 
+        # ── Daemon lifecycle ───────────────────────────────────────────────
+
+        def _ensure_daemon(self) -> bool:
+            """Connect to running daemon, or spawn one and connect."""
+            if self._daemon.connect_to_daemon(timeout=0.5):
+                return True
+            daemon_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "pl0tb0t_daemon.py")
+            if not os.path.exists(daemon_script):
+                return False
+            self._daemon_proc = subprocess.Popen(
+                [sys.executable, daemon_script],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            for _ in range(25):
+                time.sleep(0.2)
+                if self._daemon.connect_to_daemon(timeout=0.3):
+                    return True
+            return False
+
+        def _try_reconnect_daemon(self):
+            """Called at startup — silently attach to a running daemon.
+            self.port is set automatically when the first status event arrives."""
+            if self._daemon.connect_to_daemon(timeout=0.5):
+                self._update_daemon_indicator()
+
+        def _update_daemon_indicator(self):
+            if not hasattr(self, "_daemon_status_label") or self._daemon_status_label is None:
+                return
+            alive = self._daemon.daemon_alive
+            mc    = self._daemon.machine_connected
+            st    = self._daemon.last_state
+            homed = st.get("homed", False)
+            if alive and mc:
+                txt = f"⬤ Daemon · Connected{' · Homed ✓' if homed else ''}"
+                col = "#2a7"
+            elif alive:
+                txt = "⬤ Daemon: running (no serial)"
+                col = "#fa0"
+            else:
+                txt = "⬤ Daemon: not running"
+                col = "#888"
+            self._daemon_status_label.setText(txt)
+            self._daemon_status_label.setStyleSheet(f"color: {col}; font-size: 11px;")
+            self._daemon_stop_btn.setVisible(alive)
+
+        def _stop_daemon(self):
+            if QMessageBox.question(self, "Stop Daemon",
+                    "Stop the daemon? The serial port will close.") == QMessageBox.StandardButton.Yes:
+                self.port = None
+                def _do():
+                    try:
+                        self._daemon.shutdown_daemon()   # 3s timeout
+                    except Exception:
+                        pass
+                    # Close our socket — triggers _recv_loop → on_daemon_gone → UI update
+                    self._daemon.disconnect_from_daemon()
+                    proc = self._daemon_proc
+                    if proc and proc.poll() is None:
+                        try: proc.terminate()
+                        except Exception: pass
+                    self._daemon_proc = None
+                threading.Thread(target=_do, daemon=True).start()
+
+        # ── Connect / disconnect ───────────────────────────────────────────
+
         def connect_port(self):
             port_name = self.port_combo.currentText()
             if not port_name:
@@ -1670,16 +2024,27 @@ if has_display:
                 return
             def _do():
                 try:
-                    if self.port:
-                        self.port.close()
-                    self.port = open_port(port_name, self.config.baud)
+                    if not self._ensure_daemon():
+                        self.signals.show_error.emit("Error", "Could not start GRBL daemon")
+                        return
+                    # If daemon already has this exact port open, don't close/reopen it
+                    # (that would reset GRBL and unhome the machine)
+                    st = self._daemon.last_state
+                    already_open = st.get("connected") and st.get("port") == port_name
+                    if not already_open:
+                        result = self._daemon.connect_port(port_name, self.config.baud)
+                        if not result.get("ok"):
+                            self.signals.show_error.emit("Error", f"Connect failed: {result.get('error','?')}")
+                            return
+                    self.port = True
                     self.config.port = port_name
                     save_config(self.config)
-                    self.apply_wcs_selection(silent=True)
-                    self._update_position_internal()
+                    self._daemon.send("G90", wait=True)   # absolute mode
                     self._query_grbl_max_rates()
                     self._refresh_wcs_offsets()
-                    self.signals.show_info.emit("Success", f"Connected to {port_name}")
+                    self.apply_wcs_selection(silent=True)
+                    msg = f"Reconnected to {port_name}" if already_open else f"Connected to {port_name}"
+                    self.signals.show_info.emit("Success", msg)
                 except Exception as e:
                     self.signals.show_error.emit("Error", f"Failed to connect: {e}")
             threading.Thread(target=_do, daemon=True).start()
@@ -1688,14 +2053,14 @@ if has_display:
             if not self.port:
                 QMessageBox.information(self, "Info", "Not connected")
                 return
-            try:
-                self.port.close()
-            except Exception:
-                pass
             self.port = None
             self.status_label.setText("🔴 DISCONNECTED")
             self.port_label.setText("Port: None")
-            QMessageBox.information(self, "Disconnected", "Port closed")
+            self._update_daemon_indicator()
+            def _do():
+                self._daemon.disconnect_port()
+                self.signals.show_info.emit("Disconnected", "Serial port closed (daemon still running)")
+            threading.Thread(target=_do, daemon=True).start()
 
         def query_grbl_settings(self):
             if not self.port:
@@ -1703,16 +2068,8 @@ if has_display:
                 return
             def _do():
                 try:
-                    with self._serial_lock:
-                        self.port.reset_input_buffer()
-                        self.port.write(b"$$\n")
-                        time.sleep(0.5)
-                        lines = []
-                        while self.port.in_waiting:
-                            line = self.port.readline().decode("utf-8", errors="ignore").strip()
-                            if line:
-                                lines.append(line)
-                    text = "\n".join(lines) if lines else "(no response)"
+                    result = self._daemon.send("$$")
+                    text = result.get("response", "(no response)")
                     self.signals.show_info.emit("GRBL $$ Settings", text)
                 except Exception as e:
                     self.signals.show_error.emit("Error", str(e))
@@ -1722,25 +2079,26 @@ if has_display:
             if not self.port:
                 QMessageBox.critical(self, "Error", "Not connected!")
                 return
-            try:
-                with self._serial_lock:
-                    grbl_send(self.port, "$X")
-                QMessageBox.information(self, "Unlocked", "Machine unlocked")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Unlock failed: {e}")
+            def _do():
+                result = self._daemon.send("$X")
+                if result.get("ok"):
+                    self.signals.show_info.emit("Unlocked", "Machine unlocked")
+                else:
+                    self.signals.show_error.emit("Error", f"Unlock failed: {result.get('error','?')}")
+            threading.Thread(target=_do, daemon=True).start()
 
         def home_machine(self):
             if not self.port:
                 QMessageBox.critical(self, "Error", "Not connected!")
                 return
             if QMessageBox.question(self, "Confirm", "Home the machine?") == QMessageBox.StandardButton.Yes:
-                try:
-                    with self._serial_lock:
-                        grbl_home(self.port, verbose=False)
-                    QTimer.singleShot(1000, self._update_position_internal)
-                    QMessageBox.information(self, "Success", "Homing complete")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Home failed: {e}")
+                def _do():
+                    result = self._daemon.home()
+                    if result.get("ok"):
+                        self.signals.show_info.emit("Success", "Homing complete")
+                    else:
+                        self.signals.show_error.emit("Error", f"Home failed: {result.get('error','?')}")
+                threading.Thread(target=_do, daemon=True).start()
 
         # ------------------------------------------------------------------
         # WCS
@@ -1758,8 +2116,7 @@ if has_display:
                 return
             try:
                 wcs = self.wcs_combo.currentText()
-                with self._serial_lock:
-                    grbl_send(self.port, wcs)
+                self._daemon.send(wcs)
                 QTimer.singleShot(200, self._update_position_internal)
                 if not silent:
                     QMessageBox.information(self, "WCS", f"Active work coordinate system: {wcs}")
@@ -1773,8 +2130,7 @@ if has_display:
                 return
             try:
                 wcs = self.wcs_combo.currentText()
-                with self._serial_lock:
-                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} {axis}0")
+                self._daemon.send(f"G10 L20 P{self.wcs_to_p(wcs)} {axis}0")
                 QTimer.singleShot(200, self._update_position_internal)
                 threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start()
                 QMessageBox.information(self, "Work Zero", f"{wcs} {axis} set to 0")
@@ -1787,8 +2143,7 @@ if has_display:
                 return
             try:
                 wcs = self.wcs_combo.currentText()
-                with self._serial_lock:
-                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
+                self._daemon.send(f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
                 QTimer.singleShot(200, self._update_position_internal)
                 threading.Thread(target=self._refresh_wcs_offsets, daemon=True).start()
                 QMessageBox.information(self, "Work Zero", f"{wcs} X/Y/Z set to 0")
@@ -1802,8 +2157,7 @@ if has_display:
             try:
                 val = float(self.touchoff_z_edit.text())
                 wcs = self.wcs_combo.currentText()
-                with self._serial_lock:
-                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} Z{val:.3f}")
+                self._daemon.send(f"G10 L20 P{self.wcs_to_p(wcs)} Z{val:.3f}")
                 QTimer.singleShot(200, self._update_position_internal)
                 QTimer.singleShot(350, lambda: threading.Thread(
                     target=self._refresh_wcs_offsets, daemon=True).start())
@@ -1821,8 +2175,8 @@ if has_display:
                 QMessageBox.critical(self, "Error", "Not connected!")
                 return
             try:
-                with self._serial_lock:
-                    grbl_jog(self.port, axis, distance, self._jog_speed())
+                speed = self._jog_speed()
+                self._daemon.send(f"$J=G91 G21 {axis}{distance:.3f} F{speed:.1f}", wait=False)
                 self._update_position_internal()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Jog failed: {e}")
@@ -1833,8 +2187,7 @@ if has_display:
                 return
             try:
                 wcs = self.wcs_combo.currentText()
-                with self._serial_lock:
-                    grbl_send(self.port, f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
+                self._daemon.send(f"G10 L20 P{self.wcs_to_p(wcs)} X0 Y0 Z0")
                 QTimer.singleShot(200, self._update_position_internal)
                 QMessageBox.information(self, "Info", f"{wcs} zero set to current position")
             except Exception as e:
@@ -1871,11 +2224,7 @@ if has_display:
             """Real-time jog cancel — invalidates pending send threads, no lock needed."""
             self._jog_seq += 1
             if self.port:
-                try:
-                    self.port.write(b"\x85")
-                    self.port.flush()
-                except Exception:
-                    pass
+                self._daemon.realtime(0x85)
 
         def _start_continuous_jog(self):
             """Send a single combined jog command for all currently held axes."""
@@ -1889,22 +2238,15 @@ if has_display:
             for key in list(self.jog_keys_held):
                 axis, sign = self._JOG_KEY_MAP[key]
                 parts.append(f"{axis}{sign * 10000:.1f}")
-            cmd = f"$J=G91 G21 {' '.join(parts)} F{speed:.1f}\n".encode()
+            cmd = f"$J=G91 G21 {' '.join(parts)} F{speed:.1f}"
             def _send():
                 if self._jog_seq != seq:
                     return   # superseded by a newer cancel or jog command
-                try:
-                    with self._serial_lock:
-                        if self._jog_seq == seq:   # re-check after acquiring lock
-                            self.port.write(cmd)
-                except Exception:
-                    pass
+                self._daemon.send(cmd, wait=False)
             threading.Thread(target=_send, daemon=True).start()
 
         def _restart_status_poll(self):
             self._update_position_internal()
-            if not self._status_timer.isActive():
-                self._status_timer.start(500)
 
         _JOG_RELEASE_DEBOUNCE_MS = 15   # absorbs X11 fake auto-repeat release+press pairs (< 5ms)
 
@@ -2053,17 +2395,18 @@ if has_display:
                 QMessageBox.critical(self, "Error", "Not connected!")
                 return
             t = self.tools[idx]
-            try:
-                if t.safe_z != t.z:
-                    with self._serial_lock:
-                        grbl_move_abs(self.port, t.x, t.y, t.safe_z, use_machine_coords=True)
-                    time.sleep(0.5)
-                with self._serial_lock:
-                    grbl_move_abs(self.port, t.x, t.y, t.z, use_machine_coords=True)
-                QTimer.singleShot(1000, self._update_position_internal)
-                QMessageBox.information(self, "Success", f"Moved to {t.name}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Move failed: {e}")
+            def _do():
+                try:
+                    if t.safe_z != t.z:
+                        coord_prefix = "G53 G0" if True else "G90 G0"
+                        self._daemon.send(f"{coord_prefix} X{t.x:.3f} Y{t.y:.3f} Z{t.safe_z:.3f}")
+                        time.sleep(0.5)
+                    self._daemon.send(f"G53 G0 X{t.x:.3f} Y{t.y:.3f} Z{t.z:.3f}")
+                    QTimer.singleShot(1000, self._update_position_internal)
+                    self.signals.show_info.emit("Success", f"Moved to {t.name}")
+                except Exception as e:
+                    self.signals.show_error.emit("Error", f"Move failed: {e}")
+            threading.Thread(target=_do, daemon=True).start()
 
         def delete_tool(self):
             idx = self.tools_list.currentRow()
@@ -2137,8 +2480,7 @@ if has_display:
             for cmd in cmds:
                 if not self.port:
                     return
-                with self._serial_lock:
-                    grbl_send(self.port, cmd, wait_ok=True)
+                self._daemon.send(cmd, wait=True)
                 time.sleep(0.1)
             time.sleep(0.2)
             self._update_position_internal()
@@ -2196,8 +2538,7 @@ if has_display:
                 return
             def _do():
                 try:
-                    with self._serial_lock:
-                        grbl_send(self.port, f"G90 G0 {' '.join(parts)}")
+                    self._daemon.send(f"G90 G0 {' '.join(parts)}")
                     self._update_position_internal()
                 except Exception as e:
                     self.signals.show_error.emit("Error", f"Travel failed: {e}")
@@ -2210,10 +2551,9 @@ if has_display:
             safe_z = self.tools[0].safe_z if self.tools else None
             def _do():
                 try:
-                    with self._serial_lock:
-                        if safe_z is not None:
-                            grbl_send(self.port, f"G53 G0 Z{safe_z:.3f}")
-                        grbl_send(self.port, "G90 G0 X0 Y0")
+                    if safe_z is not None:
+                        self._daemon.send(f"G53 G0 Z{safe_z:.3f}")
+                    self._daemon.send("G90 G0 X0 Y0")
                     self._update_position_internal()
                 except Exception as e:
                     self.signals.show_error.emit("Error", f"Travel failed: {e}")
@@ -2348,20 +2688,6 @@ if has_display:
             drawable = [l for l in layers if l.get("color")]
             if not self.vpype_toolchanges_cb.isChecked():
                 return drawable
-
-            cmyk_order = ["#00ffff", "#ff00ff", "#ffff00", "#000000"]
-            colors = {(l.get("color") or "").lower() for l in drawable}
-            if all(c in colors for c in cmyk_order):
-                ordered = []
-                used = set()
-                for c in cmyk_order:
-                    for idx, layer in enumerate(drawable):
-                        if idx not in used and (layer.get("color") or "").lower() == c:
-                            ordered.append(layer)
-                            used.add(idx)
-                rest = [layer for idx, layer in enumerate(drawable) if idx not in used]
-                return ordered + self._sort_layers_light_to_dark(rest)
-
             return self._sort_layers_light_to_dark(drawable)
 
         def _assign_layers_to_holder_slots(self, layers: list) -> list:
@@ -2372,6 +2698,38 @@ if has_display:
                     break
                 assignments.append((layer, self.tools[idx]))
             return assignments
+
+        def _confirm_pen_assignments(self, assignments: list) -> bool:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Confirm Pen Assignments")
+            layout = QVBoxLayout(dlg)
+            layout.addWidget(QLabel(
+                "SVG colors will be plotted in this order.\n"
+                "Make sure each slot has the correct pen loaded before continuing."
+            ))
+            for i, (layer, tool) in enumerate(assignments):
+                color = (layer.get("color") or "").lower()
+                slot_label = tool.name if tool else f"Slot {i + 1}"
+                row = QWidget()
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 2, 0, 2)
+                rl.setSpacing(8)
+                swatch = QLabel()
+                swatch.setFixedSize(16, 16)
+                fill = color if (color.startswith("#") and len(color) in (4, 7)) else "#888888"
+                swatch.setStyleSheet(f"background:{fill}; border:1px solid #555;")
+                rl.addWidget(swatch)
+                rl.addWidget(QLabel(f"{color}   →   Slot {i + 1}: {slot_label}"))
+                rl.addStretch()
+                layout.addWidget(row)
+            btns = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            btns.button(QDialogButtonBox.StandardButton.Ok).setText("Plot")
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            layout.addWidget(btns)
+            return dlg.exec() == QDialog.DialogCode.Accepted
 
         def _split_svg_by_color(self, svg_path: str, target_color: str, tmp_path: str) -> bool:
             for prefix, uri in [
@@ -2492,26 +2850,32 @@ if has_display:
                 pass
             return None
 
-        def _tool_pickup_gcode(self, tool) -> list:
+        def _tool_pickup_gcode(self, tool, from_drop: bool = False) -> list:
             rapid    = self.config.tc_rapid
             approach = self.config.tc_approach
             ay = tool.y + self.config.tc_unplug_mm
-            return [
-                f"; === PICK UP: {tool.name} ===",
-                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z (fast)
-                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y to unplug (fast)
+            lines = [f"; === PICK UP: {tool.name} ==="]
+            if not from_drop:
+                # First pickup: coming from drawing position, need full approach
+                lines += [
+                    f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z (fast)
+                    f"G53 G1 Y{ay:.3f} F{rapid}",             # Y to unplug (fast)
+                ]
+            # from_drop=True: previous drop left us at unplug Y, Z already clear — just X
+            lines += [
                 f"G53 G1 X{tool.x:.3f} F{rapid}",         # X to dock column (fast)
                 f"G53 G1 Z{tool.z:.3f} F{rapid}",         # lower Z at unplug (fast)
                 f"G53 G1 Y{tool.y:.3f} F{approach}",      # Y to dock while down (slow)
                 f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z with pen (fast)
                 f"G53 G1 Y{ay:.3f} F{rapid}",             # Y back to unplug — clearance before X rapid (fast)
             ]
+            return lines
 
-        def _tool_drop_gcode(self, tool) -> list:
+        def _tool_drop_gcode(self, tool, chain_next: bool = False) -> list:
             rapid    = self.config.tc_rapid
             approach = self.config.tc_approach
             ay = tool.y + self.config.tc_unplug_mm
-            return [
+            lines = [
                 f"; === DROP: {tool.name} ===",
                 f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z with pen (fast)
                 f"G53 G1 Y{ay:.3f} F{rapid}",             # Y to unplug position (fast)
@@ -2519,8 +2883,12 @@ if has_display:
                 f"G53 G1 Y{tool.y:.3f} F{rapid}",         # Y to dock while up (fast)
                 f"G53 G1 Z{tool.z:.3f} F{approach}",      # Z down to seat pen (slow)
                 f"G53 G1 Y{ay:.3f} F{rapid}",             # Y retract to unplug — undock carriage (fast)
-                f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z empty (fast)
             ]
+            if not chain_next:
+                # Last drop before end: raise Z so final park move is safe
+                lines.append(f"G53 G1 Z{tool.safe_z:.3f} F{rapid}")
+            # chain_next=True: next pickup starts with X travel — Z raise skipped (3 lines → 1)
+            return lines
 
         # ------------------------------------------------------------------
         # SVG layer display
@@ -2650,6 +3018,7 @@ if has_display:
                     f"G53 G0 Z{safe_z:.3f}",
                     f"G1 F{self.config.draw_speed}",
                 ]
+                n_layers = len(matched)
                 for i, (layer, tool) in enumerate(matched):
                     color = layer.get("color", "")
                     label = layer.get("label", color)
@@ -2663,7 +3032,8 @@ if has_display:
                                                tmp_gcode, silent=True):
                         QMessageBox.critical(self, "Error", f"vpype failed for layer: {label}")
                         return
-                    final_lines.extend(self._tool_pickup_gcode(tool))
+                    is_last = (i == n_layers - 1)
+                    final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
                     # Pre-position XY over the drawing start (work coords) while still
                     # at safe_z, so the first descent happens over the paper not over
                     # the tool holder.
@@ -2679,8 +3049,13 @@ if has_display:
                             ln = ln.strip()
                             if ln:
                                 final_lines.append(ln)
-                    final_lines.extend(self._tool_drop_gcode(tool))
-                final_lines += [f"; === END ===", f"G53 G0 Z{safe_z:.3f}", "M2"]
+                    final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
+                final_lines += [
+                    f"; === END ===",
+                    f"G53 G0 Z{safe_z:.3f}",
+                    f"G53 G0 X-300.000 Y-200.000",  # park: clear of bed for paper change
+                    "M2",
+                ]
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(final_lines) + "\n")
             finally:
@@ -2805,8 +3180,10 @@ if has_display:
 
             self._queue_selected_id = None
             self._queue_jobs_cache  = {}
-            self._queue_auto_timer  = QTimer()
+            self._plot_request_dialog_open = False
+            self._queue_auto_timer = QTimer()
             self._queue_auto_timer.timeout.connect(self._queue_refresh)
+            self._queue_auto_timer.timeout.connect(self._queue_check_plot_request)
             self._queue_auto_timer.start(8000)
             self._queue_refresh()
             return outer
@@ -2847,6 +3224,32 @@ if has_display:
                 self._queue_url_edit.text().rstrip("/"),
                 _resolve_key(self._queue_key_edit.text()),
             )
+
+        def _queue_post_machine_status(self, busy: bool, job_id=None):
+            """Fire-and-forget: push machine busy state to the queue server."""
+            def _post():
+                try:
+                    self._queue_http("/status", "POST",
+                                     {"busy": busy, "current_job_id": job_id})
+                except Exception:
+                    pass
+            threading.Thread(target=_post, daemon=True).start()
+
+        def _queue_check_plot_request(self):
+            """Check for a remote plot request and show a confirmation dialog."""
+            if self.gcode_running:
+                return
+            if getattr(self, "_plot_request_dialog_open", False):
+                return
+            def _check():
+                try:
+                    state = self._queue_http("/status")
+                    req_id = state.get("plot_requested")
+                    if req_id and req_id in getattr(self, "_queue_jobs_cache", {}):
+                        self.signals.update_status.emit(f"__q_plot_req__{req_id}")
+                except Exception:
+                    pass
+            threading.Thread(target=_check, daemon=True).start()
 
         def _queue_http(self, path, method="GET", body=None, base_url=None, key=None, timeout=20):
             import urllib.request, json as _j
@@ -2902,6 +3305,27 @@ if has_display:
             elif msg.startswith("__q_err__"):
                 err = msg.split("__q_err__", 1)[1]
                 self._queue_status_lbl.setText(f"Error: {err}")
+            elif msg.startswith("__q_plot_req__"):
+                req_id = msg.split("__q_plot_req__", 1)[1]
+                job = self._queue_jobs_cache.get(req_id, {})
+                sketch = job.get("sketch_name", req_id) or req_id
+                self._plot_request_dialog_open = True
+                reply = QMessageBox.question(
+                    self, "Remote Plot Request",
+                    f"Phone requested: plot \"{sketch}\"\n\nMake sure pens are loaded and paper is in place.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                self._plot_request_dialog_open = False
+                def _clear_req():
+                    try:
+                        self._queue_http("/status", "POST", {"plot_requested": None})
+                    except Exception:
+                        pass
+                threading.Thread(target=_clear_req, daemon=True).start()
+                if reply == QMessageBox.StandardButton.Yes:
+                    self._queue_selected_id = req_id
+                    self._queue_plot_selected()
             elif msg.startswith("__q_prev__") and not msg.startswith("__q_prev_err__"):
                 job_id = msg.split("__q_prev__", 1)[1]
                 if job_id == self._queue_selected_id:
@@ -3334,6 +3758,8 @@ if has_display:
                         QMessageBox.warning(self, "Not enough holder slots",
                             "More SVG colors/layers were detected than configured holder slots. "
                             "Only assigned slots will be generated.")
+                    if not self._confirm_pen_assignments(assignments):
+                        return
                     self._run_vpype_with_toolchanges(
                         svg_path, config_path, profile, output_path, assignments)
                     return
@@ -3474,8 +3900,9 @@ if has_display:
                 QMessageBox.warning(self, "Warning", "Select a line first")
                 return
             try:
-                with self._serial_lock:
-                    grbl_send(self.port, self.gcode_lines[idx], wait_ok=True)
+                result = self._daemon.send(self.gcode_lines[idx])
+                if not result.get("ok"):
+                    raise Exception(result.get("error", "Unknown error"))
                 self.gcode_line_index = min(idx + 1, len(self.gcode_lines) - 1)
                 self._highlight_gcode_line()
                 self.gcode_status_label.setText(f"Sent line {idx+1}")
@@ -3494,8 +3921,9 @@ if has_display:
                 return
             idx = min(self.gcode_line_index, len(self.gcode_lines) - 1)
             try:
-                with self._serial_lock:
-                    grbl_send(self.port, self.gcode_lines[idx], wait_ok=True)
+                result = self._daemon.send(self.gcode_lines[idx])
+                if not result.get("ok"):
+                    raise Exception(result.get("error", "Unknown error"))
                 self.gcode_line_index = min(idx + 1, len(self.gcode_lines) - 1)
                 self._highlight_gcode_line()
                 self.gcode_status_label.setText(f"Sent line {idx+1}")
@@ -3621,8 +4049,8 @@ if has_display:
             self.gcode_running = True
             self.gcode_paused = False
             self.gcode_stop = False
+            self._queue_post_machine_status(True)
             self.gcode_sent_lines = 0
-            self._status_timer.stop()   # no status queries during gcode run
             self.gcode_progress.setValue(0)
             self.gcode_run_btn.setEnabled(False)
             self.gcode_pause_btn.setEnabled(True)
@@ -3633,49 +4061,42 @@ if has_display:
             def runner():
                 try:
                     if self.gcode_home_first_cb.isChecked():
-                        grbl_home(self.port, verbose=False)
+                        result = self._daemon.home()
+                        if not result.get("ok"):
+                            self.signals.show_error.emit("Home Error", result.get("error", "?"))
+                            self.gcode_running = False
+                            self.signals.gcode_done.emit()
+                            return
                         time.sleep(0.5)
-                    total = self.gcode_total_lines
-                    if total <= 0:
-                        with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f:
-                            total = sum(1 for ln in f if self._clean_gcode_line(ln))
-                        self.gcode_total_lines = total
-                    with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f:
-                        for raw in f:
-                            if self.gcode_stop:
-                                break
-                            while self.gcode_paused and not self.gcode_stop:
-                                time.sleep(0.1)
+                    # Apply feed overrides into a temp file for the daemon to stream
+                    import tempfile
+                    with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f_in:
+                        raw_lines = f_in.readlines()
+                    with tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".gcode", delete=False, encoding="utf-8") as f_tmp:
+                        self._gcode_tmp_path = f_tmp.name
+                        for raw in raw_lines:
                             line = self._clean_gcode_line(raw)
                             if not line:
                                 continue
                             line = self._apply_feed_override(line)
-                            self.signals.grbl_log.emit(f"→ {line}")
-                            with self._serial_lock:
-                                responses = grbl_send(self.port, line, wait_ok=True)
-                            for resp in responses:
-                                self.signals.grbl_log.emit(f"← {resp}")
-                                rl = resp.lower()
-                                if rl.startswith("error") or rl.startswith("alarm"):
-                                    self.gcode_stop = True
-                                    self.signals.show_error.emit(
-                                        "GRBL Error",
-                                        f"GRBL stopped the run:\n{resp}\n\nLine sent:\n{line}")
-                                    break
-                            if self.gcode_stop:
-                                break
-                            self.gcode_sent_lines += 1
-                            self.signals.gcode_highlight.emit(self.gcode_sent_lines - 1)
-                            if total > 0:
-                                self.signals.update_progress.emit(
-                                    (self.gcode_sent_lines / total) * 100.0)
+                            f_tmp.write(line + "\n")
+                    result = self._daemon.stream(self._gcode_tmp_path)
+                    if not result.get("ok"):
+                        self.signals.show_error.emit("Stream Error", result.get("error", "?"))
+                        self.gcode_running = False
+                        self.gcode_paused = False
+                        self.gcode_stop = False
+                        self._queue_post_machine_status(False)
+                        self.signals.gcode_done.emit()
                 except Exception as e:
                     self.signals.show_error.emit("G-code Error", str(e))
-                finally:
                     self.gcode_running = False
                     self.gcode_paused = False
                     self.gcode_stop = False
+                    self._queue_post_machine_status(False)
                     self.signals.gcode_done.emit()
+                # If stream started OK, gcode_done fires from _on_daemon_gcode_done
 
             threading.Thread(target=runner, daemon=True).start()
 
@@ -3684,8 +4105,6 @@ if has_display:
             self.gcode_pause_btn.setEnabled(False)
             self.gcode_pause_btn.setText("⏸ Pause")
             self.gcode_stop_btn.setEnabled(False)
-            if not self._status_timer.isActive():
-                self._status_timer.start(500)
             if hasattr(self, "_queue_cards_vlay"):
                 self._queue_rebuild_cards(list(getattr(self, "_queue_jobs_cache", {}).values()))
 
@@ -3693,35 +4112,20 @@ if has_display:
             if not self.gcode_running:
                 return
             self.gcode_paused = not self.gcode_paused
-            if self.port:
-                try:
-                    with self._serial_lock:
-                        self.port.write(b"!" if self.gcode_paused else b"~")
-                    self.gcode_pause_btn.setText(
-                        "▶ Resume" if self.gcode_paused else "⏸ Pause")
-                except Exception:
-                    pass
+            if self.gcode_paused:
+                self._daemon.pause()
+                self.gcode_pause_btn.setText("▶ Resume")
+            else:
+                self._daemon.resume()
+                self.gcode_pause_btn.setText("⏸ Pause")
 
         def stop_gcode(self):
             self.gcode_stop = True
             self.gcode_paused = False
-            if self.port:
-                try:
-                    self.port.write(b"!")    # feed hold — machine decelerates immediately
-                    self.port.flush()
-                except Exception:
-                    pass
-                # Soft reset after short delay: clears GRBL buffer and unblocks
-                # any grbl_send() call waiting for 'ok' so the runner thread can exit
-                QTimer.singleShot(300, self._grbl_soft_reset)
+            self._daemon.stop()  # daemon sends feed-hold then soft-reset, fires gcode_done
 
         def _grbl_soft_reset(self):
-            if self.port:
-                try:
-                    self.port.write(b"\x18")  # Ctrl-X soft reset
-                    self.port.flush()
-                except Exception:
-                    pass
+            self._daemon.realtime(0x18)
 
         def _rebuild_layer_toggles(self):
             while self.layer_toggles_layout.count():
@@ -3874,11 +4278,6 @@ if has_display:
         def closeEvent(self, event):
             self._save_layout()
             self._status_timer.stop()
-            if self.port:
-                try:
-                    self.port.close()
-                except Exception:
-                    pass
             event.accept()
 
 
