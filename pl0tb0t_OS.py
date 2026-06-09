@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.10"
+__version__ = "0.4.11"
 import os
 import sys
 import time
@@ -738,10 +738,12 @@ if has_display:
             size    = self._format_bytes(job.get('file_size') or job.get('file_size_bytes'))
             recipe_size = self._format_bytes(job.get('recipe_size') or job.get('recipe_size_bytes'))
             recipe_meta = f"recipe {recipe_size}" if recipe_size else ("recipe" if job.get("has_recipe") else "")
+            provenance  = "☁ web" if job.get("cloud_id") else "⌘ local"
             meta_parts = [p for p in [paper, orient, size, recipe_meta] if p]
             meta = '  ·  '.join(meta_parts)
             if job_id:
-                meta = f'{meta}  ·  #{job_id}' if meta else f'#{job_id}'
+                meta = f'{meta}  ·  {job_id}' if meta else job_id
+            meta = f'{meta}  ·  {provenance}' if meta else provenance
             meta_lbl = QLabel(meta)
             meta_lbl.setStyleSheet('color: #666; font-size: 11px;')
             root.addWidget(meta_lbl)
@@ -779,9 +781,13 @@ if has_display:
             return f'{n / (1024 * 1024):.1f} MB' if n < 10 * 1024 * 1024 else f'{n / (1024 * 1024):.0f} MB'
 
         def _confirm_delete(self):
+            status = self.job.get('status', 'queued')
+            if status in ('error', 'done'):
+                self.deleted.emit(self.job_id)
+                return
             name = self.job.get('sketch_name') or 'this job'
             reply = QMessageBox.question(
-                self, 'Delete Job',
+                None, 'Delete Job',
                 f"Remove '{name}' from the print queue? This cannot be undone.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,

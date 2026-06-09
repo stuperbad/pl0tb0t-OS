@@ -9,10 +9,35 @@ Usage:
     QUEUE_API_KEY=mysecret python3 queue_server.py
 """
 
-__version__ = "0.1.05"
+__version__ = "0.1.06"
 
-import os, sqlite3, uuid, time, json, threading
+import os, sqlite3, uuid, time, json, threading, random
 from pathlib import Path
+
+# ── Word-pair job IDs ─────────────────────────────────────────────────────────
+_ADJ = [
+    "amber","ashen","azure","blaze","briar","bronze","cedar","chalk","cobalt",
+    "coral","crimson","dusk","ember","fern","flint","frost","gilt","hazy",
+    "hollow","indigo","ivory","jade","lunar","mossy","murky","ochre","onyx",
+    "opal","pallid","pewter","prism","rose","ruddy","rust","sage","scarlet",
+    "shadow","silver","slate","smoky","solar","stark","stormy","swept","tawny",
+    "umber","verdant","violet",
+]
+_NOUN = [
+    "arc","ash","atlas","bloom","bone","chord","cloud","coil","crest","curve",
+    "delta","dune","echo","field","fold","forge","glyph","grain","grid","grove",
+    "helix","ink","iris","knot","lace","leaf","loop","mist","node","orbit",
+    "peak","pine","pulse","quill","reed","ring","root","rune","shard","shore",
+    "silk","smoke","spark","spire","stone","tide","trace","veil","vine","void",
+    "wave","web","wind",
+]
+
+def _gen_job_id(db):
+    for _ in range(30):
+        candidate = random.choice(_ADJ) + "-" + random.choice(_NOUN)
+        if not db.execute("SELECT 1 FROM jobs WHERE id=?", (candidate,)).fetchone():
+            return candidate
+    return str(uuid.uuid4())[:8]  # fallback
 from flask import Flask, request, jsonify, send_file, abort
 
 BASE_DIR  = Path(__file__).parent
@@ -229,13 +254,13 @@ def create_job():
     if not svg:
         return jsonify({"error": "svg field required"}), 400
 
-    job_id = str(uuid.uuid4())[:8]
-    (QUEUE_DIR / f"{job_id}.svg").write_text(svg, encoding="utf-8")
     cloud_id = data.get("cloud_id") or request.form.get("cloud_id") or None
     recipe_raw = data.get("recipe") or None
     recipe_str = json.dumps(recipe_raw) if recipe_raw is not None else None
 
     with get_db() as db:
+        job_id = _gen_job_id(db)
+        (QUEUE_DIR / f"{job_id}.svg").write_text(svg, encoding="utf-8")
         db.execute(
             "INSERT INTO jobs(id,sketch_name,paper_size,orientation,status,created_at,notes,cloud_id,recipe)"
             " VALUES(?,?,?,?,?,?,?,?,?)",
