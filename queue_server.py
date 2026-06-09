@@ -9,7 +9,7 @@ Usage:
     QUEUE_API_KEY=mysecret python3 queue_server.py
 """
 
-__version__ = "0.1.04"
+__version__ = "0.1.05"
 
 import os, sqlite3, uuid, time, json, threading
 from pathlib import Path
@@ -195,14 +195,18 @@ def init_db():
                 status      TEXT DEFAULT 'queued',
                 created_at  REAL,
                 notes       TEXT DEFAULT '',
-                cloud_id    TEXT DEFAULT NULL
+                cloud_id    TEXT DEFAULT NULL,
+                recipe      TEXT DEFAULT NULL
             )
         """)
-        # migration for existing DBs without cloud_id
-        try:
-            db.execute("ALTER TABLE jobs ADD COLUMN cloud_id TEXT DEFAULT NULL")
-        except Exception:
-            pass
+        for col, typedef in [
+            ("cloud_id", "TEXT DEFAULT NULL"),
+            ("recipe",   "TEXT DEFAULT NULL"),
+        ]:
+            try:
+                db.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -228,10 +232,13 @@ def create_job():
     job_id = str(uuid.uuid4())[:8]
     (QUEUE_DIR / f"{job_id}.svg").write_text(svg, encoding="utf-8")
     cloud_id = data.get("cloud_id") or request.form.get("cloud_id") or None
+    recipe_raw = data.get("recipe") or None
+    recipe_str = json.dumps(recipe_raw) if recipe_raw is not None else None
 
     with get_db() as db:
         db.execute(
-            "INSERT INTO jobs(id,sketch_name,paper_size,orientation,status,created_at,notes,cloud_id) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO jobs(id,sketch_name,paper_size,orientation,status,created_at,notes,cloud_id,recipe)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (job_id,
              data.get("sketch_name") or request.form.get("sketch_name", "Untitled"),
              data.get("paper_size")  or request.form.get("paper_size",  "8.5x11"),
@@ -239,9 +246,11 @@ def create_job():
              "queued",
              time.time(),
              data.get("notes") or request.form.get("notes", ""),
-             cloud_id)
+             cloud_id,
+             recipe_str)
         )
-    return jsonify({"job_id": job_id, "status": "queued", "cloud_id": cloud_id}), 201
+    return jsonify({"job_id": job_id, "status": "queued", "cloud_id": cloud_id,
+                    "has_recipe": recipe_str is not None}), 201
 
 
 @app.route("/jobs", methods=["GET"])
@@ -257,7 +266,11 @@ def list_jobs():
             rows = db.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC"
             ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    def _job_dict(r):
+        d = dict(r)
+        d["has_recipe"] = d.pop("recipe", None) is not None
+        return d
+    return jsonify([_job_dict(r) for r in rows])
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])
@@ -267,7 +280,9 @@ def get_job(job_id):
         row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if not row:
         return jsonify({"error": "not found"}), 404
-    return jsonify(dict(row))
+    d = dict(row)
+    d["has_recipe"] = d.pop("recipe", None) is not None
+    return jsonify(d)
 
 
 @app.route("/jobs/<job_id>/svg", methods=["GET"])
@@ -277,6 +292,16 @@ def get_svg(job_id):
     if not svg_path.exists():
         abort(404)
     return send_file(svg_path, mimetype="image/svg+xml")
+
+
+@app.route("/jobs/<job_id>/recipe", methods=["GET"])
+def get_recipe(job_id):
+    check_auth()
+    with get_db() as db:
+        row = db.execute("SELECT recipe FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row or not row["recipe"]:
+        abort(404)
+    return row["recipe"], 200, {"Content-Type": "application/json"}
 
 
 @app.route("/jobs/<job_id>/status", methods=["PATCH"])
