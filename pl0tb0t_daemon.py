@@ -310,6 +310,7 @@ class GrblDaemon:
         def _run():
             try:
                 sent = 0
+                _last_progress = time.time()
                 for line in lines:
                     if self._stream_stop.is_set():
                         break
@@ -317,15 +318,18 @@ class GrblDaemon:
                     if self._stream_stop.is_set():
                         break
                     resp_lines, err = self._grbl_send(line, wait_ok=True)
-                    self._broadcast({"event": "grbl_line", "sent": line,
-                                     "response": "\n".join(resp_lines)})
+                    # Do NOT broadcast grbl_line per move — sendall() blocks when the
+                    # UI socket buffer fills, stalling the GRBL planner between lines.
                     if err:
                         _log(f"Stream error at line {sent}: {err}")
                         self._broadcast({"event": "gcode_error",
                                          "line_num": sent, "line": line, "message": err})
                         break
                     sent += 1
-                    self._broadcast({"event": "progress", "sent": sent, "total": total})
+                    now = time.time()
+                    if now - _last_progress >= 0.25:   # throttle progress to ~4 Hz
+                        self._broadcast({"event": "progress", "sent": sent, "total": total})
+                        _last_progress = now
             except Exception as e:
                 _log(f"Stream exception: {e}")
                 self._broadcast({"event": "gcode_error",
@@ -335,6 +339,7 @@ class GrblDaemon:
                 self._stream_stop.clear()
                 self._stream_pause.set()
                 _log("Stream done")
+                self._broadcast({"event": "progress", "sent": sent, "total": total})
                 self._broadcast({"event": "gcode_done"})
 
         threading.Thread(target=_run, daemon=True).start()
