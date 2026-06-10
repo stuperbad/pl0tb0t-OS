@@ -272,7 +272,7 @@
                 method: 'POST',
                 headers: queueHeaders()
             }).then(function() {
-                queueStatus('✓ Plot requested! Confirm on machine.', '#2a7');
+                queueStatus('✓ Plot requested! Confirm in window.', '#2a7');
                 setTimeout(function(){ queueStatus(''); }, 6000);
                 fetchQueue();
             });
