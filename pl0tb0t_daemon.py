@@ -136,7 +136,12 @@ class GrblDaemon:
                     if rl.startswith("[msg:"):
                         # Informational message, ignore
                         continue
-                    if rl.startswith("error") or rl.startswith("alarm"):
+                    if rl.startswith("error"):
+                        # Record error but keep waiting for ok (homing may have errors en route)
+                        if not err:
+                            err = resp
+                        continue
+                    if rl.startswith("alarm"):
                         err = resp
                         break
                 return lines, err
