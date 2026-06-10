@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.17"
+__version__ = "0.4.18"
 import os
 import sys
 import time
@@ -429,6 +429,7 @@ if has_display:
         gcode_highlight = pyqtSignal(int)
         grbl_log       = pyqtSignal(str)
         queue_jobs_ready = pyqtSignal(list)
+        queue_pen_assign = pyqtSignal(object)  # carries ctx dict from _queue_plot_selected
         daemon_indicator = pyqtSignal()   # refresh daemon status dot (thread-safe)
 
     class AspectSvgPreviewWidget(QWidget):
@@ -867,6 +868,7 @@ if has_display:
             self.signals.gcode_highlight.connect(self._highlight_gcode_line_at)
             self.signals.grbl_log.connect(self._append_grbl_log)
             self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
+            self.signals.queue_pen_assign.connect(self._queue_on_pen_assign)
             self.signals.daemon_indicator.connect(self._update_daemon_indicator)
 
             self._build_ui()
@@ -3909,15 +3911,12 @@ if has_display:
                 return
             import threading
             self._queue_plot_btn.setEnabled(False)
-            self._queue_status_lbl.setText(f"Processing {job_id}\u2026")
+            self._queue_status_lbl.setText(f"Fetching {job_id}\u2026")
             base_url, key = self._queue_server_params()
-            def _run():
-                import tempfile, subprocess, pathlib
-                tmp = pathlib.Path(tempfile.mkdtemp())
-                svg_path   = tmp / f"{job_id}.svg"
-                gcode_path = tmp / f"{job_id}.gcode"
+
+            def _fetch():
+                import tempfile, pathlib, urllib.request, re as _re
                 try:
-                    import urllib.request
                     url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
                     headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
                     if key:
@@ -3925,10 +3924,6 @@ if has_display:
                     req = urllib.request.Request(url, headers=headers)
                     with urllib.request.urlopen(req, timeout=30) as r:
                         _svg_raw = r.read()
-                    # Strip visual-only gray border rect before vpype.
-                    # SVG exports include <rect stroke="#b4b4b4"> for web display
-                    # only; vpype would plot it as a rectangle around the paper.
-                    import re as _re
                     _svg_txt = _svg_raw.decode("utf-8", errors="replace")
                     _svg_txt = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
@@ -3939,44 +3934,223 @@ if has_display:
                     except Exception:
                         pass
                     _svg_txt = self._queue_svg_physical_page(_svg_txt, job)
+                    tmp = pathlib.Path(tempfile.mkdtemp())
+                    svg_path = tmp / f"{job_id}.svg"
                     svg_path.write_text(_svg_txt, encoding="utf-8")
+                    layers   = self._parse_svg_layers(str(svg_path))
+                    drawable = [l for l in layers if l.get("color")]
+                    ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
+                    self.signals.queue_pen_assign.emit({
+                        "job_id":   job_id,
+                        "job":      job,
+                        "svg_path": str(svg_path),
+                        "tmp":      str(tmp),
+                        "layers":   ordered,
+                        "base_url": base_url,
+                        "key":      key,
+                    })
+                except Exception as e:
+                    self.signals.show_error.emit("Queue Error", str(e))
+                    self.signals.update_status.emit("__q_refresh__")
+
+            threading.Thread(target=_fetch, daemon=True).start()
+
+        def _queue_on_pen_assign(self, ctx):
+            import threading, tempfile, pathlib, shutil
+            job_id   = ctx["job_id"]
+            job      = ctx["job"]
+            svg_path = ctx["svg_path"]
+            tmp      = pathlib.Path(ctx["tmp"])
+            ordered  = ctx["layers"]
+            base_url = ctx["base_url"]
+            key      = ctx["key"]
+            gcode_path = tmp / f"{job_id}.gcode"
+
+            # Map each color layer to a tool slot in order
+            assignments = []
+            tool_idx = 0
+            color_to_tool = {}
+            for layer in ordered:
+                color = (layer.get("color") or "").lower()
+                if color in color_to_tool:
+                    assignments.append((layer, color_to_tool[color]))
+                elif tool_idx < len(self.tools):
+                    tool = self.tools[tool_idx]
+                    color_to_tool[color] = tool
+                    assignments.append((layer, tool))
+                    tool_idx += 1
+
+            if assignments:
+                if len(assignments) < len(ordered):
+                    QMessageBox.warning(self, "Not enough holder slots",
+                        "More SVG colors found than configured holder slots \u2014 "
+                        "only assigned slots will be plotted.")
+                if not self._confirm_pen_assignments(assignments):
+                    self._queue_plot_btn.setEnabled(True)
+                    return
+
+            def _mark_plotting():
+                try:
                     self._queue_http(f"/jobs/{job_id}/status",
-                                     "PATCH", {"status": "plotting"}, base_url=base_url, key=key)
+                                     "PATCH", {"status": "plotting"},
+                                     base_url=base_url, key=key)
                     self._cloud_push_status(job_id, "plotting")
-                    vpype = str(pathlib.Path.home() / ".local/bin/vpype")
-                    cfg   = self.config.vpype_config.strip()
-                    prof  = self.config.vpype_profile.strip()
-                    cfg_flag = f"-c \"{cfg}\" " if cfg else ""
-                    cmd = (f"{vpype} {cfg_flag}read \"{svg_path}\""
-                           f" linesimplify -t 0.5mm linemerge -t 0.5mm linesort --two-opt")
-                    if cfg and prof:
-                        cmd += f" gwrite -p {prof} \"{gcode_path}\""
+                except Exception:
+                    pass
+            threading.Thread(target=_mark_plotting, daemon=True).start()
+            self._queue_status_lbl.setText(f"Processing {job_id}\u2026")
+
+            # \u2500\u2500 Multi-color: per-layer vpype + tool changes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+            if assignments:
+                prog = QProgressDialog("Generating G-code\u2026", None, 0, 0, self)
+                prog.setWindowTitle("pl0tb0t")
+                prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+                prog.setMinimumDuration(0)
+                prog.show()
+                QApplication.processEvents()
+                result = [None]
+
+                def _generate():
+                    gen_tmp = pathlib.Path(tempfile.mkdtemp(prefix="pl0tb0t_"))
+                    try:
+                        layer_cfg = str(gen_tmp / "layer.cfg")
+                        safe_z = assignments[0][1].safe_z
+                        self._write_layer_vpype_config(layer_cfg, safe_z=safe_z)
+                        final_lines = [
+                            "; Pl0tb0t multi-color plot \u2014 auto-generated tool changes",
+                            "; Assumes: machine is homed, all pens are in holders, carriage is empty",
+                            "G21 G90",
+                            f"G53 G0 Z{safe_z:.3f}",
+                            f"G1 F{self.config.draw_speed}",
+                        ]
+                        n_layers = len(assignments)
+                        err_out = []
+                        for i, (layer, tool) in enumerate(assignments):
+                            color  = layer.get("color", "")
+                            label  = layer.get("label", color)
+                            l_svg   = str(gen_tmp / f"layer_{i}.svg")
+                            l_gcode = str(gen_tmp / f"layer_{i}.gcode")
+                            if not self._split_svg_by_color(svg_path, color, l_svg):
+                                result[0] = ("err", f"No elements for color {color} ({label})")
+                                return
+                            err_out.clear()
+                            if not self._run_vpype_cmd(l_svg, layer_cfg, "pl0tb0t_layer",
+                                                       l_gcode, silent=True, _err_out=err_out):
+                                msg = err_out[0] if err_out else "vpype failed"
+                                result[0] = ("err", f"vpype failed for {label}: {msg}")
+                                return
+                            is_last = (i == n_layers - 1)
+                            final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
+                            first_xy = self._first_draw_xy(l_gcode)
+                            if first_xy:
+                                final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
+                            final_lines.append(
+                                f"; --- Layer {i+1}: {tool.name} - {label} ({color}) ---")
+                            with open(l_gcode, "r", encoding="utf-8", errors="ignore") as f:
+                                for ln in f:
+                                    ln = ln.strip()
+                                    if ln:
+                                        final_lines.append(ln)
+                            final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
+                        final_lines += [
+                            "; === END ===",
+                            f"G53 G0 Z{safe_z:.3f}",
+                            "G53 G0 X-300.000 Y-200.000",
+                            "M2",
+                        ]
+                        with open(str(gcode_path), "w", encoding="utf-8") as f:
+                            f.write("\n".join(final_lines) + "\n")
+                        result[0] = ("ok",)
+                    except Exception as e:
+                        result[0] = ("err", str(e))
+                    finally:
+                        shutil.rmtree(str(gen_tmp), ignore_errors=True)
+
+                t = threading.Thread(target=_generate, daemon=True)
+                t.start()
+                poll = QTimer(self)
+
+                def _check():
+                    if t.is_alive():
+                        return
+                    poll.stop()
+                    prog.close()
+                    if result[0] is None or result[0][0] == "err":
+                        msg = result[0][1] if result[0] else "G-code generation failed"
+                        QMessageBox.critical(self, "Error", msg)
+                        def _mark_err():
+                            try:
+                                self._queue_http(f"/jobs/{job_id}/status",
+                                                 "PATCH", {"status": "error"},
+                                                 base_url=base_url, key=key)
+                                self._cloud_push_status(job_id, "error")
+                            except Exception:
+                                pass
+                            self.signals.update_status.emit("__q_refresh__")
+                        threading.Thread(target=_mark_err, daemon=True).start()
+                        return
+                    self.load_gcode_file(str(gcode_path),
+                                         artboard_mm=self._svg_page_mm(svg_path))
+                    if self.port and gcode_path.exists():
+                        self.signals.update_status.emit("__q_autorun__")
                     else:
-                        out = gcode_path.with_suffix(".out.svg")
-                        cmd += f" write \"{out}\""
-                        gcode_path = out
-                    if subprocess.call(cmd, shell=True) != 0:
+                        self.signals.show_info.emit(
+                            "Queue", "G-code ready \u2014 press Run to plot.")
+                    def _mark_done():
+                        try:
+                            self._queue_http(f"/jobs/{job_id}/status",
+                                             "PATCH", {"status": "done"},
+                                             base_url=base_url, key=key)
+                            self._cloud_push_status(job_id, "done")
+                        except Exception:
+                            pass
+                        self.signals.update_status.emit("__q_refresh__")
+                    threading.Thread(target=_mark_done, daemon=True).start()
+
+                poll.timeout.connect(_check)
+                poll.start(100)
+                return
+
+            # \u2500\u2500 Single-pass: use auto-generated config that includes F feedrate \u2500
+            def _single():
+                try:
+                    import subprocess as _sp
+                    layer_cfg = tmp / "layer.cfg"
+                    self._write_layer_vpype_config(str(layer_cfg))
+                    vpype_exe = str(pathlib.Path.home() / ".local/bin/vpype")
+                    cmd = (
+                        f"{vpype_exe} -c \"{layer_cfg}\" read \"{svg_path}\""
+                        f" linesimplify -t 0.5mm linemerge -t 0.5mm linesort --two-opt"
+                        f" gwrite -p pl0tb0t_layer \"{gcode_path}\""
+                    )
+                    if _sp.call(cmd, shell=True) != 0:
                         raise RuntimeError("vpype returned non-zero exit code")
-                    if self.port and gcode_path.suffix == ".gcode" and gcode_path.exists():
+                    if self.port and gcode_path.exists():
                         self.gcode_path = str(gcode_path)
                         self.signals.update_status.emit("__q_autorun__")
                     else:
                         self.signals.show_info.emit(
                             "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
-                    self._queue_http(f"/jobs/{job_id}/status",
-                                     "PATCH", {"status": "done"}, base_url=base_url, key=key)
-                    self._cloud_push_status(job_id, "done")
+                    try:
+                        self._queue_http(f"/jobs/{job_id}/status",
+                                         "PATCH", {"status": "done"},
+                                         base_url=base_url, key=key)
+                        self._cloud_push_status(job_id, "done")
+                    except Exception:
+                        pass
                 except Exception as e:
                     try:
                         self._queue_http(f"/jobs/{job_id}/status",
-                                         "PATCH", {"status": "error"}, base_url=base_url, key=key)
+                                         "PATCH", {"status": "error"},
+                                         base_url=base_url, key=key)
                         self._cloud_push_status(job_id, "error")
                     except Exception:
                         pass
                     self.signals.show_error.emit("Queue Error", str(e))
                 finally:
                     self.signals.update_status.emit("__q_refresh__")
-            threading.Thread(target=_run, daemon=True).start()
+
+            threading.Thread(target=_single, daemon=True).start()
 
         def run_vpype(self):
             svg_path    = self.vpype_svg_edit.text().strip()
