@@ -18,23 +18,26 @@
 - [ ] `git push`
 - [ ] Verify "To https://github.com/..." output
 
-## 4. Deploy to Pi (Choose One Strategy)
+## 4. Deploy to Pi — SSH Direct (Default)
 
-### Strategy A: SSH Direct (Faster, No Git History)
 ```bash
 ssh pi@<IP>
 cd ~/pl0tb0t-OS
-# Pull latest (if using git) OR just restart daemon
 sudo systemctl restart pl0tb0t-daemon
-# Verify: tail -f ~/.pl0tb0t/debug.log
+tail -f ~/.pl0tb0t/debug.log  # Watch for errors
+# Ctrl+C when confirmed working
 exit
 ```
 
-### Strategy B: Git Pull (Version Control, Slower)
+**Why SSH?** Faster, cleaner git history (only important commits), immediate testing.
+
+**When to use Git Pull instead:** After major feature is complete and you want a version checkpoint (not every small fix).
 ```bash
-# Tell user to run:
-# cd ~/pl0tb0t-OS && git pull && sudo systemctl restart pl0tb0t-daemon
-# Wait for confirmation
+# Major milestone only:
+git add <files>
+git commit -m "v0.4.20: feature complete and verified"
+git push
+ssh pi@IP "cd ~/pl0tb0t-OS && git pull && sudo systemctl restart pl0tb0t-daemon"
 ```
 
 ## 5. Verify Deployment on Pi
