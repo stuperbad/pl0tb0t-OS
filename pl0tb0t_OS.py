@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.39"
+__version__ = "0.4.40"
 import os
 import sys
 import time
@@ -3955,6 +3955,7 @@ if has_display:
             def _fetch():
                 import tempfile, pathlib, urllib.request, re as _re
                 try:
+                    _debug_log("THREAD EXECUTING")
                     url = base_url.rstrip("/") + f"/jobs/{job_id}/svg"
                     headers = {"User-Agent": f"pl0tb0t-OS/{__version__}"}
                     if key:
