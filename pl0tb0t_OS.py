@@ -2723,10 +2723,20 @@ if has_display:
         def _assign_layers_to_holder_slots(self, layers: list) -> list:
             ordered = self._ordered_svg_layers_for_plot(layers)
             assignments = []
-            for idx, layer in enumerate(ordered):
-                if idx >= len(self.tools):
-                    break
-                assignments.append((layer, self.tools[idx]))
+            color_to_tool = {}
+            tool_idx = 0
+            for layer in ordered:
+                color = (layer.get("color") or "").lower()
+                if color and color in color_to_tool:
+                    assignments.append((layer, color_to_tool[color]))
+                else:
+                    if tool_idx >= len(self.tools):
+                        break
+                    tool = self.tools[tool_idx]
+                    if color:
+                        color_to_tool[color] = tool
+                    assignments.append((layer, tool))
+                    tool_idx += 1
             return assignments
 
         def _confirm_pen_assignments(self, assignments: list) -> bool:
@@ -2737,9 +2747,23 @@ if has_display:
                 "SVG colors will be plotted in this order.\n"
                 "Make sure each slot has the correct pen loaded before continuing."
             ))
-            for i, (layer, tool) in enumerate(assignments):
+            # collapse duplicate color→slot rows
+            seen_rows = {}
+            slot_idx = 0
+            for (layer, tool) in assignments:
                 color = (layer.get("color") or "").lower()
-                slot_label = tool.name if tool else f"Slot {i + 1}"
+                tool_id = id(tool)
+                key = (color, tool_id)
+                if key in seen_rows:
+                    seen_rows[key]["count"] += 1
+                    continue
+                slot_idx += 1
+                seen_rows[key] = {"color": color, "tool": tool, "slot": slot_idx, "count": 1}
+            for entry in seen_rows.values():
+                color = entry["color"]
+                tool = entry["tool"]
+                slot_label = tool.name if tool else f"Slot {entry['slot']}"
+                extra = f"  ×{entry['count']} layers" if entry["count"] > 1 else ""
                 row = QWidget()
                 rl = QHBoxLayout(row)
                 rl.setContentsMargins(0, 2, 0, 2)
@@ -2749,7 +2773,7 @@ if has_display:
                 fill = color if (color.startswith("#") and len(color) in (4, 7)) else "#888888"
                 swatch.setStyleSheet(f"background:{fill}; border:1px solid #555;")
                 rl.addWidget(swatch)
-                rl.addWidget(QLabel(f"{color}   →   Slot {i + 1}: {slot_label}"))
+                rl.addWidget(QLabel(f"{color}   →   Slot {entry['slot']}: {slot_label}{extra}"))
                 rl.addStretch()
                 layout.addWidget(row)
             btns = QDialogButtonBox(
