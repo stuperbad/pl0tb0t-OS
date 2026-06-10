@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.41"
+__version__ = "0.4.42"
 import os
 import sys
 import time
@@ -3980,7 +3980,6 @@ if has_display:
                     layers   = self._parse_svg_layers(str(svg_path))
                     drawable = [l for l in layers if l.get("color")]
                     ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
-                    prog.close()
                     self.signals.queue_pen_assign.emit({
                         "job_id":   job_id,
                         "job":      job,
