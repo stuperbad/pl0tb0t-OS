@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.40"
+__version__ = "0.4.41"
 import os
 import sys
 import time
@@ -3963,6 +3963,7 @@ if has_display:
                     req = urllib.request.Request(url, headers=headers)
                     with urllib.request.urlopen(req, timeout=30) as r:
                         _svg_raw = r.read()
+                    _debug_log(f"SVG fetched: {len(_svg_raw)} bytes")
                     _svg_txt = _svg_raw.decode("utf-8", errors="replace")
                     _svg_txt = _re.sub(
                         r'<rect\b[^>]+stroke=["\'][#][bBcCdDeEfF][0-9a-fA-F]{5}["\'][^>]*/>',
