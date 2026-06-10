@@ -286,11 +286,13 @@
     });
 
     document.getElementById('sendToQueue').addEventListener('click', function() {
+        console.log("Plot button clicked");
         var btn = this;
         btn.disabled = true;
         queueStatus('Checking machine…', '#888');
         fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
             btn.disabled = false;
+        console.log("About to fetch /status from", QUEUE_URL);
             queueStatus('', '');
             if (s.busy) {
                 if (!confirm('Machine is plotting. Save to queue for later?')) return;

@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.20"
+__version__ = "0.4.22"
 import os
 import sys
 import time
@@ -3973,8 +3973,6 @@ if has_display:
                     tmp = pathlib.Path(tempfile.mkdtemp())
                     svg_path = tmp / f"{job_id}.svg"
                     svg_path.write_text(_svg_txt, encoding="utf-8")
-                    prog.setLabelText(f"Parsing layers…")
-                    QApplication.processEvents()
                     layers   = self._parse_svg_layers(str(svg_path))
                     drawable = [l for l in layers if l.get("color")]
                     ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
