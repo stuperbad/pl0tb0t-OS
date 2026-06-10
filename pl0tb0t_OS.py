@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.18"
+__version__ = "0.4.19"
 import os
 import sys
 import time
@@ -1666,8 +1666,9 @@ if has_display:
             self.vpype_linesimplify_cb = QCheckBox("linesimplify"); self.vpype_linesimplify_cb.setChecked(True)
             simp_row.addWidget(self.vpype_linesimplify_cb)
             simp_row.addWidget(QLabel("tol (mm):"))
-            self.vpype_simplify_tol_edit = QLineEdit("0.5")
+            self.vpype_simplify_tol_edit = QLineEdit("0.1")
             self.vpype_simplify_tol_edit.setFixedWidth(60)
+            self.vpype_simplify_tol_edit.setToolTip("linesimplify tolerance — lower = more detail, 0.1 recommended for curves")
             simp_row.addWidget(self.vpype_simplify_tol_edit)
             simp_row.addStretch()
             gen_btn = QPushButton("Generate via vpype")
@@ -3940,6 +3941,8 @@ if has_display:
                     tmp = pathlib.Path(tempfile.mkdtemp())
                     svg_path = tmp / f"{job_id}.svg"
                     svg_path.write_text(_svg_txt, encoding="utf-8")
+                    prog.setLabelText(f"Parsing layers…")
+                    QApplication.processEvents()
                     layers   = self._parse_svg_layers(str(svg_path))
                     drawable = [l for l in layers if l.get("color")]
                     ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
@@ -4123,9 +4126,13 @@ if has_display:
                     layer_cfg = tmp / "layer.cfg"
                     self._write_layer_vpype_config(str(layer_cfg))
                     vpype_exe = str(pathlib.Path.home() / ".local/bin/vpype")
+                    try:
+                        simplify_tol = float(self.vpype_simplify_tol_edit.text())
+                    except (ValueError, AttributeError):
+                        simplify_tol = 0.1
                     cmd = (
                         f"{vpype_exe} -c \"{layer_cfg}\" read \"{svg_path}\""
-                        f" linesimplify -t 0.5mm linemerge -t 0.5mm linesort --two-opt"
+                        f" linesimplify -t {simplify_tol}mm linemerge -t 0.5mm linesort --two-opt"
                         f" gwrite -p pl0tb0t_layer \"{gcode_path}\""
                     )
                     if _sp.call(cmd, shell=True) != 0:
