@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.16"
+__version__ = "0.4.17"
 import os
 import sys
 import time
@@ -1643,14 +1643,20 @@ if has_display:
             layout.addLayout(out_row)
 
             opt_row = QHBoxLayout()
-            self.vpype_splitall_cb    = QCheckBox("splitall"); self.vpype_splitall_cb.setToolTip("Split paths into segments before linemerge; useful for dense meshes, slower.")
+            self.vpype_splitall_cb    = QCheckBox("splitall"); self.vpype_splitall_cb.setToolTip("Break paths into individual segments before linemerge — use for Rhino/GH exports with disconnected segments.")
             self.vpype_linemerge_cb   = QCheckBox("linemerge");   self.vpype_linemerge_cb.setChecked(True)
+            self.vpype_linemerge_tol_edit = QLineEdit("0.5"); self.vpype_linemerge_tol_edit.setFixedWidth(46)
+            self.vpype_linemerge_tol_edit.setToolTip("linemerge tolerance (mm) — raise to join near-miss endpoints in Rhino/GH exports")
             self.vpype_linesort_cb    = QCheckBox("linesort");    self.vpype_linesort_cb.setChecked(True)
             self.vpype_twoopt_cb      = QCheckBox("two-opt"); self.vpype_twoopt_cb.setToolTip("Extra linesort optimization; slower, good for final plots.")
             self.vpype_reloop_cb      = QCheckBox("reloop")
             self.vpype_toolchanges_cb = QCheckBox("tool changes"); self.vpype_toolchanges_cb.setChecked(True)
-            for cb in [self.vpype_splitall_cb, self.vpype_linemerge_cb, self.vpype_linesort_cb,
-                       self.vpype_twoopt_cb, self.vpype_reloop_cb, self.vpype_toolchanges_cb]:
+            for cb in [self.vpype_splitall_cb, self.vpype_linemerge_cb]:
+                opt_row.addWidget(cb)
+            opt_row.addWidget(self.vpype_linemerge_tol_edit)
+            opt_row.addWidget(QLabel("mm"))
+            for cb in [self.vpype_linesort_cb, self.vpype_twoopt_cb,
+                       self.vpype_reloop_cb, self.vpype_toolchanges_cb]:
                 opt_row.addWidget(cb)
             layout.addLayout(opt_row)
 
@@ -1728,7 +1734,7 @@ if has_display:
             vl.addLayout(vbr)
             viewer_tabs.addWidget(viewer_grp)
 
-            grbl_grp = QGroupBox("GRBL Log")
+            grbl_grp = QGroupBox("GRBL Log / Terminal")
             gl = QVBoxLayout(grbl_grp)
             self.grbl_log_list = QListWidget()
             self.grbl_log_list.setFont(QFont("Courier", 8))
@@ -1738,6 +1744,17 @@ if has_display:
             clr_btn = QPushButton("Clear")
             clr_btn.clicked.connect(self.grbl_log_list.clear)
             gl.addWidget(clr_btn)
+            cmd_row = QHBoxLayout()
+            self.grbl_cmd_edit = QLineEdit()
+            self.grbl_cmd_edit.setPlaceholderText("GRBL command  e.g. $$  $120=500  $H")
+            self.grbl_cmd_edit.setFont(QFont("Courier", 9))
+            self.grbl_cmd_edit.returnPressed.connect(self._send_grbl_terminal_cmd)
+            grbl_send_btn = QPushButton("Send")
+            grbl_send_btn.setFixedWidth(52)
+            grbl_send_btn.clicked.connect(self._send_grbl_terminal_cmd)
+            cmd_row.addWidget(self.grbl_cmd_edit, 1)
+            cmd_row.addWidget(grbl_send_btn)
+            gl.addLayout(cmd_row)
             viewer_tabs.addWidget(grbl_grp)
             viewer_tabs.setSizes([9999, 9999])
 
@@ -1919,6 +1936,31 @@ if has_display:
             finally:
                 self._poll_running = False
 
+        def _send_grbl_terminal_cmd(self):
+            line = self.grbl_cmd_edit.text().strip()
+            if not line:
+                return
+            if not self._daemon.daemon_alive:
+                self.grbl_log_list.addItem("! not connected")
+                return
+            self.grbl_cmd_edit.clear()
+            self.grbl_log_list.addItem(f">>> {line}")
+            self.grbl_log_list.scrollToBottom()
+
+            def _run():
+                try:
+                    result = self._daemon.send(line)
+                    resp = result.get("lines", [])
+                    if not resp and not result.get("ok"):
+                        resp = [result.get("error", "error")]
+                    QTimer.singleShot(0, lambda r=resp: [
+                        self.grbl_log_list.addItem(f"    {l}") for l in r
+                    ] or self.grbl_log_list.scrollToBottom())
+                except Exception as e:
+                    QTimer.singleShot(0, lambda: self.grbl_log_list.addItem(f"! {e}"))
+
+            threading.Thread(target=_run, daemon=True).start()
+
         def _query_grbl_max_rates(self):
             if not self.port:
                 return
@@ -1933,13 +1975,25 @@ if has_display:
                 if 110 in rates and 111 in rates:
                     self.rapid_jog_speed = int(min(rates[110], rates[111]))
                 self._grbl_max_rates = {k: int(v) for k, v in rates.items() if k in (110, 111, 112)}
-                x = rates.get(110, '?')
-                y = rates.get(111, '?')
-                z = rates.get(112, '?')
-                QTimer.singleShot(0, lambda: self.gcode_status_label.setText(
-                    f"GRBL max rates — X:{int(x) if isinstance(x,float) else x}  "
-                    f"Y:{int(y) if isinstance(y,float) else y}  "
-                    f"Z:{int(z) if isinstance(z,float) else z}  mm/min"))
+                x   = rates.get(110, '?')
+                y   = rates.get(111, '?')
+                z   = rates.get(112, '?')
+                ax  = rates.get(120, '?')
+                ay  = rates.get(121, '?')
+                az  = rates.get(122, '?')
+                def _fmt(v): return int(v) if isinstance(v, float) else v
+                status_txt = (
+                    f"GRBL  rate X:{_fmt(x)} Y:{_fmt(y)} Z:{_fmt(z)} mm/min  "
+                    f"accel X:{_fmt(ax)} Y:{_fmt(ay)} Z:{_fmt(az)} mm/s²"
+                )
+                log_lines = [
+                    f"$110={_fmt(x)}  $111={_fmt(y)}  $112={_fmt(z)}  (max rate mm/min)",
+                    f"$120={_fmt(ax)}  $121={_fmt(ay)}  $122={_fmt(az)}  (accel mm/s²)",
+                ]
+                QTimer.singleShot(0, lambda: self.gcode_status_label.setText(status_txt))
+                QTimer.singleShot(0, lambda: [
+                    self.grbl_log_list.addItem(l) for l in log_lines
+                ] or self.grbl_log_list.scrollToBottom())
             except Exception:
                 pass
 
@@ -3030,7 +3084,12 @@ if has_display:
             steps = ["read", svg_path]
             if getattr(self, "vpype_splitall_cb", None) and self.vpype_splitall_cb.isChecked():
                 steps.append("splitall")
-            if self.vpype_linemerge_cb.isChecked():   steps.append("linemerge")
+            if self.vpype_linemerge_cb.isChecked():
+                try:
+                    lm_tol = float(self.vpype_linemerge_tol_edit.text())
+                except Exception:
+                    lm_tol = 0.5
+                steps.extend(["linemerge", "-t", f"{lm_tol}mm"])
             if self.vpype_linesort_cb.isChecked():
                 steps.append("linesort")
                 if getattr(self, "vpype_twoopt_cb", None) and self.vpype_twoopt_cb.isChecked():
@@ -3894,7 +3953,7 @@ if has_display:
                     prof  = self.config.vpype_profile.strip()
                     cfg_flag = f"-c \"{cfg}\" " if cfg else ""
                     cmd = (f"{vpype} {cfg_flag}read \"{svg_path}\""
-                           f" linesimplify -t 0.5mm linemerge linesort --two-opt")
+                           f" linesimplify -t 0.5mm linemerge -t 0.5mm linesort --two-opt")
                     if cfg and prof:
                         cmd += f" gwrite -p {prof} \"{gcode_path}\""
                     else:
