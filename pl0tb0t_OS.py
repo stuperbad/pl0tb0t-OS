@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.14"
+__version__ = "0.4.15"
 import os
 import sys
 import time
@@ -1658,7 +1658,7 @@ if has_display:
             self.vpype_linesimplify_cb = QCheckBox("linesimplify"); self.vpype_linesimplify_cb.setChecked(True)
             simp_row.addWidget(self.vpype_linesimplify_cb)
             simp_row.addWidget(QLabel("tol (mm):"))
-            self.vpype_simplify_tol_edit = QLineEdit("0.05")
+            self.vpype_simplify_tol_edit = QLineEdit("0.5")
             self.vpype_simplify_tol_edit.setFixedWidth(60)
             simp_row.addWidget(self.vpype_simplify_tol_edit)
             simp_row.addStretch()
@@ -3859,7 +3859,7 @@ if has_display:
                     prof  = self.config.vpype_profile.strip()
                     cfg_flag = f"-c \"{cfg}\" " if cfg else ""
                     cmd = (f"{vpype} {cfg_flag}read \"{svg_path}\""
-                           f" linesimplify -t 0.05mm linemerge linesort --two-opt")
+                           f" linesimplify -t 0.5mm linemerge linesort --two-opt")
                     if cfg and prof:
                         cmd += f" gwrite -p {prof} \"{gcode_path}\""
                     else:
