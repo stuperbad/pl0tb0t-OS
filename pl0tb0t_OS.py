@@ -22,6 +22,18 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
 
+# Debug logging
+_LOG_FILE = os.path.expanduser("~/.pl0tb0t/debug.log")
+os.makedirs(os.path.dirname(_LOG_FILE), exist_ok=True)
+
+def _debug_log(msg: str):
+    ts = time.strftime("%H:%M:%S.%f")[:-3]
+    try:
+        with open(_LOG_FILE, "a") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
 try:
     import serial
     from serial.tools import list_ports
@@ -2066,6 +2078,7 @@ if has_display:
             mc    = self._daemon.machine_connected
             st    = self._daemon.last_state
             homed = st.get("homed", False)
+            _debug_log(f"Daemon state: alive={alive}, machine_connected={mc}, homed={homed}, port={st.get('port','?')}")
             if alive and mc:
                 txt = f"⬤ Daemon · Connected{' · Homed ✓' if homed else ''}"
                 col = "#2a7"
@@ -2101,23 +2114,31 @@ if has_display:
 
         def connect_port(self):
             port_name = self.port_combo.currentText()
+            _debug_log(f"Button: Connect clicked, port={port_name}")
             if not port_name:
                 QMessageBox.critical(self, "Error", "Select a port first")
+                _debug_log("Connect: no port selected")
                 return
             def _do():
                 try:
+                    _debug_log("Connect: ensuring daemon...")
                     if not self._ensure_daemon():
+                        _debug_log("Connect: failed to ensure daemon")
                         self.signals.show_error.emit("Error", "Could not start GRBL daemon")
                         return
-                    # If daemon already has this exact port open, don't close/reopen it
-                    # (that would reset GRBL and unhome the machine)
+                    _debug_log("Connect: daemon ready, checking if port already open...")
                     st = self._daemon.last_state
                     already_open = st.get("connected") and st.get("port") == port_name
                     if not already_open:
+                        _debug_log(f"Connect: connecting to {port_name}...")
                         result = self._daemon.connect_port(port_name, self.config.baud)
                         if not result.get("ok"):
+                            _debug_log(f"Connect: failed - {result.get('error','?')}")
                             self.signals.show_error.emit("Error", f"Connect failed: {result.get('error','?')}")
                             return
+                        _debug_log(f"Connect: success")
+                    else:
+                        _debug_log(f"Connect: port {port_name} already open")
                     self.port = True
                     self.config.port = port_name
                     save_config(self.config)
@@ -2126,21 +2147,27 @@ if has_display:
                     self._refresh_wcs_offsets()
                     self.apply_wcs_selection(silent=True)
                     msg = f"Reconnected to {port_name}" if already_open else f"Connected to {port_name}"
+                    _debug_log(f"Connect: {msg}")
                     self.signals.show_info.emit("Success", msg)
                 except Exception as e:
+                    _debug_log(f"Connect: exception - {e}")
                     self.signals.show_error.emit("Error", f"Failed to connect: {e}")
             threading.Thread(target=_do, daemon=True).start()
 
         def disconnect_port(self):
+            _debug_log(f"Button: Disconnect clicked, port={self.port}")
             if not self.port:
                 QMessageBox.information(self, "Info", "Not connected")
+                _debug_log("Disconnect: not connected")
                 return
             self.port = None
             self.status_label.setText("🔴 DISCONNECTED")
             self.port_label.setText("Port: None")
             self._update_daemon_indicator()
+            _debug_log("Disconnect: port cleared, calling daemon disconnect")
             def _do():
                 self._daemon.disconnect_port()
+                _debug_log("Disconnect: daemon.disconnect_port() completed")
                 self.signals.show_info.emit("Disconnected", "Serial port closed (daemon still running)")
             threading.Thread(target=_do, daemon=True).start()
 
@@ -3908,7 +3935,9 @@ if has_display:
         def _queue_plot_selected(self):
             job_id = self._queue_selected_id
             job    = self._queue_jobs_cache.get(job_id)
+            _debug_log(f"Button: Plot clicked, job_id={job_id}")
             if not job:
+                _debug_log(f"Plot: job not found in cache")
                 return
             import threading
             self._queue_plot_btn.setEnabled(False)
