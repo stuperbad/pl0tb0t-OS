@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.15"
+__version__ = "0.4.16"
 import os
 import sys
 import time
@@ -42,7 +42,7 @@ if has_display:
         QSlider, QCheckBox, QProgressBar, QListWidget,
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
-        QDialog, QDialogButtonBox, QStackedWidget,
+        QDialog, QDialogButtonBox, QStackedWidget, QProgressDialog,
     )
     from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
@@ -3025,7 +3025,8 @@ if has_display:
             if path:
                 self.vpype_output_edit.setText(path)
 
-        def _run_vpype_cmd(self, svg_path, cfg_path, profile, out_path, silent=False) -> bool:
+        def _run_vpype_cmd(self, svg_path, cfg_path, profile, out_path,
+                           silent=False, _err_out=None) -> bool:
             steps = ["read", svg_path]
             if getattr(self, "vpype_splitall_cb", None) and self.vpype_splitall_cb.isChecked():
                 steps.append("splitall")
@@ -3048,75 +3049,109 @@ if has_display:
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
+                msg = "vpype not found — install it and ensure it's on PATH"
+                if _err_out is not None:
+                    _err_out[:] = [msg]
                 if not silent:
-                    QMessageBox.critical(self, "Error",
-                        "vpype not found — install it and ensure it's on PATH")
+                    QMessageBox.critical(self, "Error", msg)
                 return False
             if result.returncode != 0:
+                msg = result.stderr.strip() or "vpype failed"
+                if _err_out is not None:
+                    _err_out[:] = [msg]
                 if not silent:
-                    QMessageBox.critical(self, "vpype Error",
-                        result.stderr.strip() or "vpype failed")
+                    QMessageBox.critical(self, "vpype Error", msg)
                 return False
             return True
 
         def _run_vpype_with_toolchanges(self, svg_path, cfg_path, profile, output_path, matched):
-            tmp_dir = tempfile.mkdtemp(prefix="pl0tb0t_")
-            try:
-                layer_cfg = os.path.join(tmp_dir, "layer.cfg")
-                safe_z = matched[0][1].safe_z
-                self._write_layer_vpype_config(layer_cfg, safe_z=safe_z)
-                final_lines = [
-                    "; Pl0tb0t multi-color plot — auto-generated tool changes",
-                    "; Assumes: machine is homed, all pens are in holders, carriage is empty",
-                    "G21 G90",
-                    f"G53 G0 Z{safe_z:.3f}",
-                    f"G1 F{self.config.draw_speed}",
-                ]
-                n_layers = len(matched)
-                for i, (layer, tool) in enumerate(matched):
-                    color = layer.get("color", "")
-                    label = layer.get("label", color)
-                    tmp_svg   = os.path.join(tmp_dir, f"layer_{i}.svg")
-                    tmp_gcode = os.path.join(tmp_dir, f"layer_{i}.gcode")
-                    if not self._split_svg_by_color(svg_path, color, tmp_svg):
-                        QMessageBox.critical(self, "Error",
-                            f"No elements found for color {color} ({label})")
-                        return
-                    if not self._run_vpype_cmd(tmp_svg, layer_cfg, "pl0tb0t_layer",
-                                               tmp_gcode, silent=True):
-                        QMessageBox.critical(self, "Error", f"vpype failed for layer: {label}")
-                        return
-                    is_last = (i == n_layers - 1)
-                    final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
-                    # Pre-position XY over the drawing start (work coords) while still
-                    # at safe_z, so the first descent happens over the paper not over
-                    # the tool holder.
-                    first_xy = self._first_draw_xy(tmp_gcode)
-                    if first_xy:
+            prog = QProgressDialog("Generating G-code…", None, 0, 0, self)
+            prog.setWindowTitle("pl0tb0t")
+            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            prog.setMinimumDuration(0)
+            prog.show()
+            QApplication.processEvents()
+
+            # result: [None] until done, then ("ok",) or ("err", msg)
+            result = [None]
+
+            def _generate():
+                tmp_dir = tempfile.mkdtemp(prefix="pl0tb0t_")
+                try:
+                    layer_cfg = os.path.join(tmp_dir, "layer.cfg")
+                    safe_z = matched[0][1].safe_z
+                    self._write_layer_vpype_config(layer_cfg, safe_z=safe_z)
+                    final_lines = [
+                        "; Pl0tb0t multi-color plot — auto-generated tool changes",
+                        "; Assumes: machine is homed, all pens are in holders, carriage is empty",
+                        "G21 G90",
+                        f"G53 G0 Z{safe_z:.3f}",
+                        f"G1 F{self.config.draw_speed}",
+                    ]
+                    n_layers = len(matched)
+                    err_out = []
+                    for i, (layer, tool) in enumerate(matched):
+                        color = layer.get("color", "")
+                        label = layer.get("label", color)
+                        tmp_svg   = os.path.join(tmp_dir, f"layer_{i}.svg")
+                        tmp_gcode = os.path.join(tmp_dir, f"layer_{i}.gcode")
+                        if not self._split_svg_by_color(svg_path, color, tmp_svg):
+                            result[0] = ("err", f"No elements found for color {color} ({label})")
+                            return
+                        err_out.clear()
+                        if not self._run_vpype_cmd(tmp_svg, layer_cfg, "pl0tb0t_layer",
+                                                   tmp_gcode, silent=True, _err_out=err_out):
+                            msg = err_out[0] if err_out else "vpype failed"
+                            result[0] = ("err", f"vpype failed for layer {label}: {msg}")
+                            return
+                        is_last = (i == n_layers - 1)
+                        final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
+                        first_xy = self._first_draw_xy(tmp_gcode)
+                        if first_xy:
+                            final_lines.append("; pre-position over drawing start at safe height")
+                            final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
                         final_lines.append(
-                            f"; pre-position over drawing start at safe height")
-                        final_lines.append(
-                            f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
-                    final_lines.append(f"; --- Layer {i+1}: {tool.name} holder - {label} ({color}) ---")
-                    with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
-                        for ln in f:
-                            ln = ln.strip()
-                            if ln:
-                                final_lines.append(ln)
-                    final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
-                final_lines += [
-                    f"; === END ===",
-                    f"G53 G0 Z{safe_z:.3f}",
-                    f"G53 G0 X-300.000 Y-200.000",  # park: clear of bed for paper change
-                    "M2",
-                ]
-                with open(output_path, "w", encoding="utf-8") as f:
-                    f.write("\n".join(final_lines) + "\n")
-            finally:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
-            QMessageBox.information(self, "Success",
-                f"G-code with tool changes saved to {output_path}")
+                            f"; --- Layer {i+1}: {tool.name} holder - {label} ({color}) ---")
+                        with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
+                            for ln in f:
+                                ln = ln.strip()
+                                if ln:
+                                    final_lines.append(ln)
+                        final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
+                    final_lines += [
+                        "; === END ===",
+                        f"G53 G0 Z{safe_z:.3f}",
+                        "G53 G0 X-300.000 Y-200.000",
+                        "M2",
+                    ]
+                    with open(output_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(final_lines) + "\n")
+                    result[0] = ("ok",)
+                except Exception as e:
+                    result[0] = ("err", str(e))
+                finally:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            t = threading.Thread(target=_generate, daemon=True)
+            t.start()
+
+            poll = QTimer(self)
+
+            def _check():
+                if t.is_alive():
+                    return
+                poll.stop()
+                prog.close()
+                if result[0] is None or result[0][0] == "err":
+                    msg = result[0][1] if result[0] else "G-code generation failed"
+                    QMessageBox.critical(self, "Error", msg)
+                    return
+                self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
+                QMessageBox.information(self, "Success",
+                    f"G-code with tool changes saved to {output_path}")
+
+            poll.timeout.connect(_check)
+            poll.start(100)
 
 
         # ======================================================================
@@ -3926,10 +3961,40 @@ if has_display:
                         "Tool changes enabled but no holder slots are configured — "
                         "falling back to single-pass vpype.")
 
-            if not self._run_vpype_cmd(svg_path, config_path, profile, output_path):
-                return
-            self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
-            QMessageBox.information(self, "Success", f"G-code saved to {output_path}")
+            prog = QProgressDialog("Generating G-code…", None, 0, 0, self)
+            prog.setWindowTitle("pl0tb0t")
+            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            prog.setMinimumDuration(0)
+            prog.show()
+            QApplication.processEvents()
+
+            result = [False]
+            err_out = []
+
+            def _run():
+                result[0] = self._run_vpype_cmd(
+                    svg_path, config_path, profile, output_path,
+                    silent=True, _err_out=err_out)
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+
+            poll = QTimer(self)
+
+            def _check():
+                if t.is_alive():
+                    return
+                poll.stop()
+                prog.close()
+                if not result[0]:
+                    msg = err_out[0] if err_out else "vpype failed"
+                    QMessageBox.critical(self, "vpype Error", msg)
+                    return
+                self.load_gcode_file(output_path, artboard_mm=self._svg_page_mm(svg_path))
+                QMessageBox.information(self, "Success", f"G-code saved to {output_path}")
+
+            poll.timeout.connect(_check)
+            poll.start(100)
 
         # ------------------------------------------------------------------
         # G-code
