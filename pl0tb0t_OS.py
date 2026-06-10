@@ -3911,7 +3911,10 @@ if has_display:
                 return
             import threading
             self._queue_plot_btn.setEnabled(False)
-            self._queue_status_lbl.setText(f"Fetching {job_id}\u2026")
+            prog = QProgressDialog(f"Fetching {job_id}\u2026", None, 0, 0, self)
+            prog.setWindowTitle("Loading SVG")
+            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            prog.show()
             base_url, key = self._queue_server_params()
 
             def _fetch():
@@ -3940,6 +3943,7 @@ if has_display:
                     layers   = self._parse_svg_layers(str(svg_path))
                     drawable = [l for l in layers if l.get("color")]
                     ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
+                    prog.close()
                     self.signals.queue_pen_assign.emit({
                         "job_id":   job_id,
                         "job":      job,
@@ -3950,6 +3954,7 @@ if has_display:
                         "key":      key,
                     })
                 except Exception as e:
+                    prog.close()
                     self.signals.show_error.emit("Queue Error", str(e))
                     self.signals.update_status.emit("__q_refresh__")
 

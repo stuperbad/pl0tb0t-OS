@@ -133,6 +133,9 @@ class GrblDaemon:
                     rl = resp.lower()
                     if rl.startswith("ok"):
                         break
+                    if rl.startswith("[msg:"):
+                        # Informational message, ignore
+                        continue
                     if rl.startswith("error") or rl.startswith("alarm"):
                         err = resp
                         break
