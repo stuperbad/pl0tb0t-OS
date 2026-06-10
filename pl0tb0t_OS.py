@@ -2818,14 +2818,17 @@ if has_display:
                     tool_idx += 1
             return assignments
 
-        def _confirm_pen_assignments(self, assignments: list) -> bool:
+        def _confirm_pen_assignments(self, assignments: list, paper_size_mm=None, colors_exceed_slots=False) -> bool:
             dlg = QDialog(self)
             dlg.setWindowTitle("Confirm Pen Assignments")
             layout = QVBoxLayout(dlg)
-            layout.addWidget(QLabel(
-                "SVG colors will be plotted in this order.\n"
-                "Make sure each slot has the correct pen loaded before continuing."
-            ))
+
+            msg = "SVG colors will be plotted in this order.\nMake sure each slot has the correct pen loaded."
+            if paper_size_mm:
+                msg += f"\n\nPaper: {paper_size_mm[0]:.1f} × {paper_size_mm[1]:.1f} mm"
+            if colors_exceed_slots:
+                msg += "\n\n⚠ More colors than slots — only assigned colors will plot."
+            layout.addWidget(QLabel(msg))
             # collapse duplicate color→slot rows
             seen_rows = {}
             slot_idx = 0
@@ -4018,13 +4021,20 @@ if has_display:
                     tool_idx += 1
 
             if assignments:
-                if len(assignments) < len(ordered):
-                    QMessageBox.warning(self, "Not enough holder slots",
-                        "More SVG colors found than configured holder slots \u2014 "
-                        "only assigned slots will be plotted.")
-                if not self._confirm_pen_assignments(assignments):
+                colors_exceed = len(assignments) < len(ordered)
+                paper_mm = self._svg_page_mm(svg_path)
+
+                prog = QProgressDialog("Preparing pen assignments\u2026", None, 0, 0, self)
+                prog.setWindowTitle("Loading")
+                prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+                prog.show()
+                QApplication.processEvents()
+
+                if not self._confirm_pen_assignments(assignments, paper_size_mm=paper_mm, colors_exceed_slots=colors_exceed):
+                    prog.close()
                     self._queue_plot_btn.setEnabled(True)
                     return
+                prog.close()
 
             def _mark_plotting():
                 try:
@@ -4216,11 +4226,8 @@ if has_display:
             if self.vpype_toolchanges_cb.isChecked() and self._svg_layers:
                 assignments = self._assign_layers_to_holder_slots(self._svg_layers)
                 if assignments:
-                    if len(assignments) < len(self._ordered_svg_layers_for_plot(self._svg_layers)):
-                        QMessageBox.warning(self, "Not enough holder slots",
-                            "More SVG colors/layers were detected than configured holder slots. "
-                            "Only assigned slots will be generated.")
-                    if not self._confirm_pen_assignments(assignments):
+                    colors_exceed = len(assignments) < len(self._ordered_svg_layers_for_plot(self._svg_layers))
+                    if not self._confirm_pen_assignments(assignments, colors_exceed_slots=colors_exceed):
                         return
                     self._run_vpype_with_toolchanges(
                         svg_path, config_path, profile, output_path, assignments)
