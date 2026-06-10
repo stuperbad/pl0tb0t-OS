@@ -229,7 +229,7 @@ class GrblDaemon:
         try:
             if self._ser:
                 self._ser.close()
-            s = serial.Serial(port, baud, timeout=0.05, dsrdtr=False, rtscts=False)
+            s = serial.Serial(port, baud, timeout=0.001, dsrdtr=False, rtscts=False)
             time.sleep(2)
             s.flushInput()
             self._ser = s
