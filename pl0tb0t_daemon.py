@@ -256,6 +256,7 @@ class GrblDaemon:
             self._homed = False
             _log("Serial disconnected")
             self._broadcast({"event": "disconnected"})
+            self._broadcast_status()  # Update UI with new state
         return {"ok": True}
 
     def _h_send(self, data):
