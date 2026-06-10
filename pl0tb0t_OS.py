@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.38"
+__version__ = "0.4.39"
 import os
 import sys
 import time
@@ -3991,6 +3991,7 @@ if has_display:
                     self.signals.show_error.emit("Queue Error", str(e))
                     self.signals.update_status.emit("__q_refresh__")
 
+            _debug_log("about to start thread")
             threading.Thread(target=_fetch, daemon=True).start()
 
         def _queue_on_pen_assign(self, ctx):
