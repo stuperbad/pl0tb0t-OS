@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.36"
+__version__ = "0.4.37"
 import os
 import sys
 import time
@@ -3948,6 +3948,7 @@ if has_display:
             prog.setWindowTitle("Loading SVG")
             prog.setWindowModality(Qt.WindowModality.ApplicationModal)
             prog.show()
+            _debug_log('dialog shown, about to get params')
             base_url, key = self._queue_server_params()
 
             def _fetch():
