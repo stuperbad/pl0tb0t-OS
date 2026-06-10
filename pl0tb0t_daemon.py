@@ -310,96 +310,34 @@ class GrblDaemon:
         self._streaming = True
         _log(f"Streaming {total} lines")
 
-        RX_BUF = 120  # GRBL serial Rx buffer is 128 bytes; keep margin
-
         def _run():
-            sent          = 0
-            c_line        = []   # byte lengths of in-flight lines awaiting ok
-            _last_progress = 0.0
-            _last_status   = 0.0
-
             try:
-                with self._cmd_lock:
-                    # Drain any stale responses
-                    while not self._resp_q.empty():
-                        try: self._resp_q.get_nowait()
-                        except: pass
-                    self._capturing = True
-
-                    line_idx = 0
-                    err = None
-
-                    while (line_idx < len(lines) or c_line) and err is None:
-                        if self._stream_stop.is_set():
-                            break
-
-                        # Pause: drain in-flight oks then block until resumed
-                        if not self._stream_pause.is_set():
-                            while c_line:
-                                try:
-                                    r = self._resp_q.get(timeout=0.5)
-                                except queue.Empty:
-                                    if self._stream_stop.is_set():
-                                        break
-                                    continue
-                                rl = r.lower()
-                                if rl.startswith("ok"):
-                                    del c_line[0]; sent += 1
-                                elif rl.startswith(("error", "alarm")):
-                                    del c_line[0]; sent += 1; err = r; break
-                            if err or self._stream_stop.is_set():
-                                break
-                            self._stream_pause.wait()
-                            continue
-
-                        # Send: fill GRBL RX buffer with as many lines as fit
-                        while line_idx < len(lines):
-                            line = lines[line_idx]
-                            lb = len(line.encode("utf-8")) + 1  # +1 for \n
-                            if c_line and sum(c_line) + lb >= RX_BUF:
-                                break
-                            with self._write_lock:
-                                self._ser.write((line + "\n").encode("utf-8"))
-                            c_line.append(lb)
-                            line_idx += 1
-
-                        # Drain one ok (blocks until GRBL executes a command
-                        # and frees a planner slot, keeping buffer always full)
-                        if c_line:
-                            while not self._stream_stop.is_set():
-                                try:
-                                    r = self._resp_q.get(timeout=0.1)
-                                except queue.Empty:
-                                    now = time.time()
-                                    if now - _last_status >= 0.5:
-                                        self._realtime(b"?")
-                                        _last_status = now
-                                    continue
-                                rl = r.lower()
-                                if rl.startswith("ok"):
-                                    del c_line[0]; sent += 1
-                                    break
-                                elif rl.startswith(("error", "alarm")):
-                                    _log(f"Stream error at {sent}: {r}")
-                                    self._broadcast({"event": "gcode_error",
-                                                     "line_num": sent, "line": "", "message": r})
-                                    del c_line[0]; sent += 1; err = r
-                                    break
-
-                        now = time.time()
-                        if now - _last_progress >= 0.25:
-                            self._broadcast({"event": "progress", "sent": sent, "total": total})
-                            _last_progress = now
-                        if now - _last_status >= 0.5:
-                            self._realtime(b"?")
-                            _last_status = now
-
+                sent = 0
+                _last_progress = time.time()
+                for line in lines:
+                    if self._stream_stop.is_set():
+                        break
+                    self._stream_pause.wait()
+                    if self._stream_stop.is_set():
+                        break
+                    resp_lines, err = self._grbl_send(line, wait_ok=True)
+                    # Do NOT broadcast grbl_line per move — sendall() blocks when the
+                    # UI socket buffer fills, stalling the GRBL planner between lines.
+                    if err:
+                        _log(f"Stream error at line {sent}: {err}")
+                        self._broadcast({"event": "gcode_error",
+                                         "line_num": sent, "line": line, "message": err})
+                        break
+                    sent += 1
+                    now = time.time()
+                    if now - _last_progress >= 0.25:   # throttle progress to ~4 Hz
+                        self._broadcast({"event": "progress", "sent": sent, "total": total})
+                        _last_progress = now
             except Exception as e:
                 _log(f"Stream exception: {e}")
                 self._broadcast({"event": "gcode_error",
                                  "line_num": 0, "line": "", "message": str(e)})
             finally:
-                self._capturing = False
                 self._streaming = False
                 self._stream_stop.clear()
                 self._stream_pause.set()
