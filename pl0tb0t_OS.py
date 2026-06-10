@@ -1941,11 +1941,10 @@ if has_display:
             if not line:
                 return
             if not self._daemon.daemon_alive:
-                self.grbl_log_list.addItem("! not connected")
+                self.signals.grbl_log.emit("! not connected")
                 return
             self.grbl_cmd_edit.clear()
-            self.grbl_log_list.addItem(f">>> {line}")
-            self.grbl_log_list.scrollToBottom()
+            self.signals.grbl_log.emit(f">>> {line}")
 
             def _run():
                 try:
@@ -1953,11 +1952,10 @@ if has_display:
                     resp = result.get("lines", [])
                     if not resp and not result.get("ok"):
                         resp = [result.get("error", "error")]
-                    QTimer.singleShot(0, lambda r=resp: [
-                        self.grbl_log_list.addItem(f"    {l}") for l in r
-                    ] or self.grbl_log_list.scrollToBottom())
+                    for l in resp:
+                        self.signals.grbl_log.emit(f"    {l}")
                 except Exception as e:
-                    QTimer.singleShot(0, lambda: self.grbl_log_list.addItem(f"! {e}"))
+                    self.signals.grbl_log.emit(f"! {e}")
 
             threading.Thread(target=_run, daemon=True).start()
 
@@ -1986,14 +1984,11 @@ if has_display:
                     f"GRBL  rate X:{_fmt(x)} Y:{_fmt(y)} Z:{_fmt(z)} mm/min  "
                     f"accel X:{_fmt(ax)} Y:{_fmt(ay)} Z:{_fmt(az)} mm/s²"
                 )
-                log_lines = [
-                    f"$110={_fmt(x)}  $111={_fmt(y)}  $112={_fmt(z)}  (max rate mm/min)",
-                    f"$120={_fmt(ax)}  $121={_fmt(ay)}  $122={_fmt(az)}  (accel mm/s²)",
-                ]
                 QTimer.singleShot(0, lambda: self.gcode_status_label.setText(status_txt))
-                QTimer.singleShot(0, lambda: [
-                    self.grbl_log_list.addItem(l) for l in log_lines
-                ] or self.grbl_log_list.scrollToBottom())
+                self.signals.grbl_log.emit(
+                    f"$110={_fmt(x)}  $111={_fmt(y)}  $112={_fmt(z)}  (max rate mm/min)")
+                self.signals.grbl_log.emit(
+                    f"$120={_fmt(ax)}  $121={_fmt(ay)}  $122={_fmt(az)}  (accel mm/s²)")
             except Exception:
                 pass
 
