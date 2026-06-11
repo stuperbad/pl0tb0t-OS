@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.43"
+__version__ = "0.4.85"
 import os
 import sys
 import time
@@ -98,6 +98,16 @@ class OSConfig:
     draw_speed: int = 3000        # mm/min — G1 feed rate while drawing
     vpype_config: str = "pl0tb0t_0x0_config.cfg"
     vpype_profile: str = "pl0tb0t_0x0"
+    # Signature / attribution band
+    sig_enabled: bool = False
+    sig_show_preview: bool = True
+    sig_suppress_export: bool = False
+    sig_show_logo: bool = True
+    sig_font: str = "ef"
+    sig_custom_msg: str = ""
+    sig_height_mm: float = 2.0
+    sig_y_offset_mm: float = 0.0   # shift from auto-centered position (+ = toward paper edge)
+    sig_h_pad_mm: float = 0.0      # extra horizontal inset from margin on both sides
 
 
 def _load_json(path: str, default: dict) -> dict:
@@ -125,6 +135,15 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         draw_speed=int(data.get("draw_speed", 3000)),
         vpype_config=data.get("vpype_config", "pl0tb0t_0x0_config.cfg"),
         vpype_profile=data.get("vpype_profile", "pl0tb0t_0x0"),
+        sig_enabled=bool(data.get("sig_enabled", False)),
+        sig_show_preview=bool(data.get("sig_show_preview", True)),
+        sig_suppress_export=bool(data.get("sig_suppress_export", False)),
+        sig_show_logo=bool(data.get("sig_show_logo", True)),
+        sig_font=str(data.get("sig_font", "ef")),
+        sig_custom_msg=str(data.get("sig_custom_msg", "")),
+        sig_height_mm=float(data.get("sig_height_mm", 2.0)),
+        sig_y_offset_mm=float(data.get("sig_y_offset_mm", 0.0)),
+        sig_h_pad_mm=float(data.get("sig_h_pad_mm", 0.0)),
     )
 
 
@@ -442,6 +461,7 @@ if has_display:
         grbl_log       = pyqtSignal(str)
         queue_jobs_ready = pyqtSignal(list)
         queue_pen_assign = pyqtSignal(object)  # carries ctx dict from _queue_plot_selected
+        update_banner  = pyqtSignal(str)    # update Make tab banner text
         daemon_indicator = pyqtSignal()   # refresh daemon status dot (thread-safe)
 
     class AspectSvgPreviewWidget(QWidget):
@@ -881,6 +901,9 @@ if has_display:
             self.signals.grbl_log.connect(self._append_grbl_log)
             self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
             self.signals.queue_pen_assign.connect(self._queue_on_pen_assign)
+            self.signals.update_banner.connect(
+                lambda t: self._make_webview.page().runJavaScript(f"setBannerText({repr(t)})"))
+
             self.signals.daemon_indicator.connect(self._update_daemon_indicator)
 
             self._build_ui()
@@ -1067,7 +1090,8 @@ if has_display:
                 ("Connection",       self._scrolled(self._build_connection_panel()), False, 0),
                 ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
-                ("Machine Settings", self._scrolled(self._build_settings_panel()),   False, 1),
+                ("Machine Settings",   self._scrolled(self._build_settings_panel()),   False, 1),
+                ("Signature Settings", self._scrolled(self._build_signature_panel()),  False, 0),
             ])
             middle_col = self._panel_column([
                 ("Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
@@ -1190,6 +1214,7 @@ if has_display:
             view.setPage(page)
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
+            view.page().loadFinished.connect(lambda ok: self._push_signature_config() if ok else None)
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -1483,6 +1508,106 @@ if has_display:
                                            "Travel speed for non-contact tool-change moves")
             self._cfg_tc_approach = _field("Approach speed (mm/min):", "tc_approach",
                                            "Slow docking/undocking speed")
+
+            layout.addStretch()
+            return w
+
+        def _push_signature_config(self):
+            """Push current signature config to the Make tab JS."""
+            cfg = self.config
+            js = (
+                'window._signatureConfig = {'
+                + 'enabled:' + ('true' if cfg.sig_enabled else 'false') + ','
+                + 'showPreview:' + ('true' if cfg.sig_show_preview else 'false') + ','
+                + 'suppressExport:' + ('true' if cfg.sig_suppress_export else 'false') + ','
+                + 'showLogo:' + ('true' if cfg.sig_show_logo else 'false') + ','
+                + 'font:"' + cfg.sig_font + '",'
+                + 'customMsg:"' + cfg.sig_custom_msg.replace('"', '\\"') + '",'
+                + 'heightMm:' + str(cfg.sig_height_mm) + ','
+                + 'yOffsetMm:' + str(cfg.sig_y_offset_mm) + ','
+                + 'hPadMm:' + str(cfg.sig_h_pad_mm)
+                + '};'
+                + 'try{if(window.sketchAPI&&window.sketchAPI.redraw)window.sketchAPI.redraw();}catch(e){}'
+            )
+            try:
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
+        def _build_signature_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(8)
+
+            def _sig_check(label, attr):
+                cb = QCheckBox(label)
+                cb.setChecked(bool(getattr(self.config, attr)))
+                def _toggle(state, a=attr):
+                    setattr(self.config, a, bool(state))
+                    save_config(self.config)
+                    self._push_signature_config()
+                cb.stateChanged.connect(_toggle)
+                layout.addWidget(cb)
+                return cb
+
+            def _sig_field(label, attr, w_px=70):
+                row = QHBoxLayout()
+                lbl = QLabel(label)
+                lbl.setFixedWidth(160)
+                row.addWidget(lbl)
+                edit = QLineEdit(str(getattr(self.config, attr)))
+                edit.setFixedWidth(w_px)
+                def _save(a=attr, e=edit):
+                    try:
+                        setattr(self.config, a, float(e.text()))
+                        save_config(self.config)
+                        self._push_signature_config()
+                    except ValueError:
+                        pass
+                edit.editingFinished.connect(_save)
+                row.addWidget(edit)
+                row.addStretch()
+                layout.addLayout(row)
+                return edit
+
+            self._sig_enabled_cb  = _sig_check('Enable signature',          'sig_enabled')
+            self._sig_preview_cb  = _sig_check('Show preview on canvas',    'sig_show_preview')
+            self._sig_suppress_cb = _sig_check('Suppress from SVG export',  'sig_suppress_export')
+            self._sig_logo_cb     = _sig_check('Include 90% logo',          'sig_show_logo')
+
+            # Font selector
+            font_row = QHBoxLayout()
+            font_lbl = QLabel('Font:')
+            font_lbl.setFixedWidth(160)
+            font_row.addWidget(font_lbl)
+            self._sig_font_combo = QComboBox()
+            self._sig_font_combo.addItems(['EF Script', 'Hershey'])
+            self._sig_font_combo.setCurrentIndex(0 if self.config.sig_font == 'ef' else 1)
+            def _on_font_change(idx):
+                self.config.sig_font = 'ef' if idx == 0 else 'hershey'
+                save_config(self.config)
+                self._push_signature_config()
+            self._sig_font_combo.currentIndexChanged.connect(_on_font_change)
+            font_row.addWidget(self._sig_font_combo)
+            font_row.addStretch()
+            layout.addLayout(font_row)
+
+            # Numeric fields
+            self._sig_height_edit   = _sig_field('Text height (mm):',        'sig_height_mm')
+            self._sig_yoffset_edit  = _sig_field('Y offset from center (mm):','sig_y_offset_mm')
+            self._sig_hpad_edit     = _sig_field('H padding (mm):',           'sig_h_pad_mm')
+
+            # Custom message (full-width)
+            msg_lbl = QLabel('Custom message:')
+            layout.addWidget(msg_lbl)
+            self._sig_msg_edit = QLineEdit(self.config.sig_custom_msg)
+            def _on_msg_done():
+                self.config.sig_custom_msg = self._sig_msg_edit.text()
+                save_config(self.config)
+                self._push_signature_config()
+            self._sig_msg_edit.editingFinished.connect(_on_msg_done)
+            layout.addWidget(self._sig_msg_edit)
 
             layout.addStretch()
             return w
@@ -1905,6 +2030,8 @@ if has_display:
             self.gcode_stop = False
             self._queue_post_machine_status(False)
             self.signals.gcode_done.emit()
+            self.signals.update_banner.emit("● Plot complete — machine idle")
+            QTimer.singleShot(5000, lambda: self.signals.update_banner.emit(""))
 
         def _on_daemon_gcode_error(self, line_num: int, line: str, msg: str):
             self.signals.show_error.emit(
@@ -3599,6 +3726,7 @@ if has_display:
                 self.feed_override_slider.setValue(100)
                 self.tc_override_slider.setValue(100)
                 self.run_gcode()
+                self.signals.update_banner.emit("● Plot in progress... you may continue making art.")
             elif msg.startswith("__q_cloud__"):
                 n = msg.split("__q_cloud__", 1)[1]
                 self._queue_status_lbl.setText(f"Ingested {n} job(s) from cloud ↓")
@@ -3944,10 +4072,10 @@ if has_display:
                 return
             import threading
             self._queue_plot_btn.setEnabled(False)
-            prog = QProgressDialog(f"Fetching {job_id}\u2026", None, 0, 0, self)
-            prog.setWindowTitle("Loading SVG")
-            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
-            prog.show()
+#             prog = QProgressDialog(f"Fetching {job_id}\u2026", None, 0, 0, self)
+#             prog.setWindowTitle("Loading SVG")
+#             prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+#             prog.show()
             _debug_log('dialog shown, about to get params')
             _debug_log('params received')
             base_url, key = self._queue_server_params()
@@ -4025,18 +4153,18 @@ if has_display:
                 colors_exceed = len(assignments) < len(ordered)
                 paper_mm = self._svg_page_mm(svg_path)
 
-                prog = QProgressDialog("Preparing pen assignments\u2026", None, 0, 0, self)
-                prog.setWindowTitle("Loading")
-                prog.setWindowModality(Qt.WindowModality.ApplicationModal)
-                prog.show()
-                QApplication.processEvents()
-
-                if not self._confirm_pen_assignments(assignments, paper_size_mm=paper_mm, colors_exceed_slots=colors_exceed):
-                    prog.close()
-                    self._queue_plot_btn.setEnabled(True)
-                    return
-                prog.close()
-
+#                 prog = QProgressDialog("Preparing pen assignments\u2026", None, 0, 0, self)
+#                 prog.setWindowTitle("Loading")
+#                 prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+#                 prog.show()
+#                 QApplication.processEvents()
+# 
+#                 if not self._confirm_pen_assignments(assignments, paper_size_mm=paper_mm, colors_exceed_slots=colors_exceed):
+#                     prog.close()
+#                     self._queue_plot_btn.setEnabled(True)
+#                     return
+#                 prog.close()
+# 
             def _mark_plotting():
                 try:
                     self._queue_http(f"/jobs/{job_id}/status",
@@ -4050,11 +4178,12 @@ if has_display:
 
             # \u2500\u2500 Multi-color: per-layer vpype + tool changes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
             if assignments:
-                prog = QProgressDialog("Generating G-code\u2026", None, 0, 0, self)
-                prog.setWindowTitle("pl0tb0t")
-                prog.setWindowModality(Qt.WindowModality.ApplicationModal)
-                prog.setMinimumDuration(0)
-                prog.show()
+                self.signals.update_banner.emit("● Plotting… generating gcode via vpype")
+                # prog = QProgressDialog("Generating G-code\u2026", None, 0, 0, self)
+                # prog.setWindowTitle("pl0tb0t")
+                # prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+                # prog.setMinimumDuration(0)
+                # prog.show()
                 QApplication.processEvents()
                 result = [None]
 
@@ -4122,7 +4251,7 @@ if has_display:
                     if t.is_alive():
                         return
                     poll.stop()
-                    prog.close()
+                    # prog.close()  # dialog removed
                     if result[0] is None or result[0][0] == "err":
                         msg = result[0][1] if result[0] else "G-code generation failed"
                         QMessageBox.critical(self, "Error", msg)
@@ -4137,6 +4266,7 @@ if has_display:
                             self.signals.update_status.emit("__q_refresh__")
                         threading.Thread(target=_mark_err, daemon=True).start()
                         return
+                    self.signals.update_banner.emit("● Plotting… sending to machine")
                     self.load_gcode_file(str(gcode_path),
                                          artboard_mm=self._svg_page_mm(svg_path))
                     if self.port and gcode_path.exists():

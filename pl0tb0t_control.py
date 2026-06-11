@@ -21,7 +21,7 @@ class PlotterControl:
     def __init__(self):
         self.config = load_config()
         self.port = None
-        self.tools = load_tools(self.config.tools_path)
+        self.tools = load_tools()
         self.machine_pos = {"x": 0.0, "y": 0.0, "z": 0.0}
         self.work_pos = {"x": 0.0, "y": 0.0, "z": 0.0}
         self.work_offset = {"x": 0.0, "y": 0.0, "z": 0.0}

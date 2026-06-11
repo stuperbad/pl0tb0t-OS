@@ -9,6 +9,7 @@
     <script src="lib/p5.min.js"></script>
     <script src="lib/p5.svg.js"></script>
     <script src="scripts/interactiveSVG.js"></script>
+    <script src="scripts/sharedPaperControls.js"></script>
     <script src="scripts/sketches/cmykFlowCircles.js"></script>
     <script src="scripts/sketches/circlesFromLines.js"></script>
     <script src="scripts/sketches/lineArrays.js"></script>
@@ -19,6 +20,8 @@
     <script src="scripts/sketches/unbuiltSculptures.js"></script>
     <style>
         html, body { height: 100%; margin: 0; padding: 0; background: #fff; overflow: hidden; }
+        * { user-select: none; -webkit-user-select: none; }
+        input[type=text], input[type=number], textarea { user-select: text; -webkit-user-select: text; }
         #app { display: flex; height: 100vh; overflow: hidden; }
 
         /* Left: sketch canvas */
@@ -26,7 +29,7 @@
         #sketch-frame { flex: 1 1 0; background: #fdfdfd; border: 1px solid #e0e0e0; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
         #sketch-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #eee; flex-shrink: 0; }
         /* Machine busy banner */
-        #busy-banner { display: none; background: #ff9800; color: #000; font-weight: 700; font-size: 13px; text-align: center; padding: 6px; flex-shrink: 0; }
+        #busy-banner { display: none; color: #ff9800; font-weight: 700; font-size: 13px; padding: 6px; flex-shrink: 0; margin-bottom: 6px; }
         #busy-banner.visible { display: block; }
 
         #sketch-header label { font-weight: 600; font-size: 14px; margin: 0; white-space: nowrap; }
@@ -42,7 +45,7 @@
         /* Right: controls panel */
         #ctrl-col { flex: 0 0 150px; min-width: 0; overflow: hidden; display: flex; flex-direction: column; padding: 10px 10px 10px 0; }
         #ctrl-card { flex: 1 1 0; background: #f8f9fb; border: 1px solid #e0e0e0; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
-        #ctrl-scroll { flex: 1 1 0; overflow-y: auto; padding: 14px; }
+        #ctrl-scroll { flex: 1 1 0; overflow-y: auto; padding: 14px; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
 
         /* Touch-friendly controls */
         .control-label { display: flex; align-items: center; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
@@ -64,6 +67,18 @@
         .palette-label { font-size: 9px; color: #666; }
         input[type=color] { width: 100%; height: 38px; padding: 2px 3px; cursor: pointer; border-radius: 6px; }
 
+        /* Segmented chip controls (touch-friendly select replacement) */
+        .seg-ctrl { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+        .seg-btn { flex: 1 1 auto; min-height: 34px; padding: 5px 8px; border: 1.5px solid #d0d5dd; border-radius: 8px; background: #fff; color: #344054; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; text-align: center; touch-action: manipulation; -webkit-tap-highlight-color: transparent; line-height: 1.3; user-select: none; }
+        .seg-btn:active { background: #e8ecf8; }
+        .seg-btn.seg-active { background: #111; color: #fff; border-color: #111; }
+        /* Sketch selector chips */
+        #sketchSelector { display: none !important; }
+        #sketch-header { flex-wrap: wrap; padding-bottom: 10px; }
+        #sketch-header label { align-self: center; }
+        #sketch-chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+        #sketch-chips .seg-btn { flex: 0 0 auto; min-height: 32px; font-size: 12px; padding: 4px 11px; border-radius: 16px; }
+
         /* Action buttons */
         #ctrl-actions { padding: 10px 14px; border-top: 1px solid #e0e0e0; display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
         #ctrl-actions .btn { flex: 1 1 auto; min-width: 70px; font-size: 13px; padding: 8px 10px; min-height: 40px; }
@@ -78,33 +93,41 @@
         #queueStatus { font-size: 12px; color: #555; padding: 4px 14px 8px; min-height: 20px; flex-shrink: 0; }
 
         /* Queue strip */
-        #queue-strip { padding: 8px 14px 10px; border-top: 1px solid #e0e0e0; flex-shrink: 0; max-height: 160px; overflow: hidden; display: flex; flex-direction: column; }
-        #queue-strip-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        #queue-strip { padding: 6px 14px 10px; border-top: 1px solid #e0e0e0; flex-shrink: 0; }
+        #queue-strip-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
         #queue-strip-header span { font-size: 12px; font-weight: 700; color: #555; }
         #mobile-link { display: block; font-size: 10px; color: #aaa; text-decoration: none; margin-top: 1px; }
         #mobile-link:hover { color: #64b5f6; }
         #queueRefreshBtn { background: none; border: none; color: #aaa; cursor: pointer; font-size: 16px; padding: 0 4px; }
-        #queueCards { display: flex; gap: 8px; overflow-x: auto; flex: 1 1 0; }
-        #queueCards::-webkit-scrollbar { height: 4px; }
-        #queueCards::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
-        .q-card { flex: 0 0 120px; background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 6px 8px; font-size: 11px; }
-        .q-card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .q-card-meta { color: #aaa; margin-top: 2px; }
-        .q-card-status { margin-top: 2px; }
+        #queueCollapseBtn { background: none; border: none; color: #aaa; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; touch-action: manipulation; }
+        #queueCards { display: flex; flex-direction: column; gap: 5px; max-height: 210px; overflow-y: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
+        .q-card { display: flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #e0e0e0; border-radius: 7px; padding: 5px 7px; font-size: 11px; }
+        .q-card-info { flex: 1; min-width: 0; }
+        .q-card-title { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+        .q-card-title .q-sketch-name { font-weight: 600; }
+        .q-card-meta { color: #aaa; font-size: 10px; margin-top: 1px; }
+        .q-card-status { font-size: 10px; margin-top: 1px; }
         .qs-queued { color: #aaa; }
         .qs-plotting { color: #c07000; font-weight: 700; }
         .qs-done { color: #2a7; }
         .qs-error { color: #c00; }
         #queueEmpty { color: #bbb; font-size: 11px; font-style: italic; align-self: center; }
         .q-old-pill { opacity: 0.45; display: flex; align-items: center; justify-content: center; color: #888; font-size: 11px; cursor: default; }
+        .q-card-actions { display: flex; gap: 3px; flex-shrink: 0; }
+        .q-card-btn { background: none; border: 1px solid #e0e0e0; border-radius: 5px; cursor: pointer; font-size: 13px; padding: 3px 6px; color: #555; touch-action: manipulation; -webkit-tap-highlight-color: transparent; line-height: 1; }
+        .q-card-btn:active { background: #f0f0f0; }
+        .q-card-btn.q-plot-btn { background: #111; color: #fff; border-color: #111; }
+        .q-card-btn.q-plot-btn:active { background: #333; }
+            #fetch-progress { display: none; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #2196f3, #1976d2); animation: progress 1.5s infinite; z-index: 1000; }
+        @keyframes progress { 0% { width: 0%; } 50% { width: 70%; } 100% { width: 100%; } }
     </style>
 </head>
 <body>
 <div id="app">
-    <div id="busy-banner">&#9679; Machine is currently plotting — your job will be queued</div>
-
+    <div id="fetch-progress"></div>
     <!-- Sketch column -->
     <div id="sketch-col">
+        <div id="busy-banner">● Plotting...</div>
         <div id="sketch-frame">
             <div id="sketch-header">
                 <label for="sketchSelector">Sketch</label>
@@ -134,6 +157,7 @@
             <div id="ctrl-actions">
                 <button id="reseed"     class="btn btn-outline-secondary" type="button">Reseed</button>
                 <button id="randomize"  class="btn btn-outline-secondary" type="button">Random</button>
+                <button id="shuffleLayout" class="btn btn-outline-secondary" type="button" style="display:none">Shuffle</button>
                 <button id="pause"      class="btn btn-outline-secondary" type="button">Pause</button>
                 <button id="saveToQueue" class="btn" type="button">Save</button>
                 <button id="sendToQueue" class="btn" type="button">→ Plot</button>
@@ -145,7 +169,10 @@
                         <span style="font-size:12px;font-weight:700;color:#555;">Queue <span id="queueCount"></span></span>
                         <a href="http://pl0tb0tpi5:5001/mobile" id="mobile-link" target="_blank">&#128241; pl0tb0tpi5:5001/mobile</a>
                     </div>
-                    <button id="queueRefreshBtn" title="Refresh">&#8635;</button>
+                    <div style="display:flex;gap:2px;align-items:center;">
+                        <button id="queueCollapseBtn" title="Collapse">&#9662;</button>
+                        <button id="queueRefreshBtn" title="Refresh">&#8635;</button>
+                    </div>
                 </div>
                 <div id="queueCards"><span id="queueEmpty">No jobs queued.</span></div>
             </div>
@@ -167,6 +194,9 @@
     // ── Button wiring ─────────────────────────────────────────────────────────
     document.getElementById('reseed').addEventListener('click', function() {
         if (window.sketchAPI && typeof window.sketchAPI.reseed === 'function') window.sketchAPI.reseed();
+    });
+    document.getElementById('shuffleLayout').addEventListener('click', function() {
+        if (window.sketchAPI && typeof window.sketchAPI.shuffleLayout === 'function') window.sketchAPI.shuffleLayout();
     });
     document.getElementById('randomize').addEventListener('click', function() {
         if (window.sketchAPI && typeof window.sketchAPI.randomize === 'function') {
@@ -239,9 +269,10 @@
     }
 
     function addToQueue(options) {
+        document.getElementById("fetch-progress").style.display = "block";
         var btn = options.btn;
         btn.disabled = true;
-        queueStatus('Generating SVG…', '#888');
+        // SVG generation is in p5.js, not shown
         var sketchId  = document.getElementById('sketchSelector').value || 'sketch';
         var paperSize = (document.getElementById('paperSize') || {}).value || '9x12';
         var snapshot  = window.sketchAPI && window.sketchAPI.getParamsSnapshot ? window.sketchAPI.getParamsSnapshot() : [];
@@ -277,7 +308,7 @@
             });
         }).catch(function(err) {
             queueStatus('Error: ' + err.message, '#c00');
-        }).finally(function() { btn.disabled = false; });
+        }).finally(function() { btn.disabled = false; document.getElementById("fetch-progress").style.display = "none"; });
     }
 
     document.getElementById('saveToQueue').addEventListener('click', function() {
@@ -285,28 +316,58 @@
     });
 
     document.getElementById('sendToQueue').addEventListener('click', function() {
-        console.log("Plot button clicked");
         var btn = this;
-        btn.disabled = true;
-        queueStatus('Checking machine…', '#888');
-        fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
-            btn.disabled = false;
-        console.log("About to fetch /status from", QUEUE_URL);
-            queueStatus('', '');
-            if (s.busy) {
-                if (!confirm('Machine is plotting. Save to queue for later?')) return;
+        var palette;
+        if (window.sketchAPI && window.sketchAPI.getPlotColors) {
+            palette = window.sketchAPI.getPlotColors();
+        } else {
+            var snapshot = window.sketchAPI && window.sketchAPI.getParamsSnapshot ? window.sketchAPI.getParamsSnapshot() : [];
+            var paletteParam = snapshot.find ? snapshot.find(function(p){ return p.id === 'palette'; }) : null;
+            palette = (paletteParam && Array.isArray(paletteParam.value) && paletteParam.value.length) ? paletteParam.value : ['#000000'];
+        }
+        var paperSize = (document.getElementById('paperSize') || {}).value || '9x12';
+        showPenConfirmDialog(palette, paperSize, function() {
+            btn.disabled = true;
+            var banner = document.getElementById('busy-banner');
+            banner.textContent = '● Plotting… generating SVG';
+            banner.classList.add('visible');
+            fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
+                if (s.busy) {
+                    addToQueue({ requestPlot: false, btn: btn });
+                } else {
+                    addToQueue({ requestPlot: true, btn: btn });
+                }
+            }).catch(function() {
                 addToQueue({ requestPlot: false, btn: btn });
-            } else {
-                addToQueue({ requestPlot: true, btn: btn });
-            }
-        }).catch(function() {
-            btn.disabled = false;
-            queueStatus('', '');
-            addToQueue({ requestPlot: false, btn: btn });
+            });
         });
     });
 
     // ── Queue strip ───────────────────────────────────────────────────────────
+    function loadRecipeIntoEditor(recipe) {
+        if (!recipe || typeof recipe !== 'object') return;
+        var sketchId = recipe.sketch || '';
+        var sel = document.getElementById('sketchSelector');
+        function apply() {
+            if (window.sketchAPI && typeof window.sketchAPI.applyRecipe === 'function') {
+                window.sketchAPI.applyRecipe(recipe);
+            } else if (window.sketchAPI && typeof window.sketchAPI.applyParamsSnapshot === 'function' && Array.isArray(recipe.params)) {
+                window.sketchAPI.applyParamsSnapshot(recipe.params);
+            }
+        }
+        if (sel && sketchId && sel.value !== sketchId) {
+            sel.value = sketchId;
+            var chips = document.getElementById('sketch-chips');
+            if (chips) chips.querySelectorAll('.seg-btn').forEach(function(b) {
+                b.classList.toggle('seg-active', b.dataset.val === sketchId);
+            });
+            sel.dispatchEvent(new Event('change'));
+            setTimeout(apply, 700);
+        } else {
+            apply();
+        }
+    }
+
     function fetchQueue() {
         fetch(QUEUE_URL + '/jobs', { headers: queueHeaders() }).then(function(r){ return r.json(); }).then(function(jobs) {
             var cards = document.getElementById('queueCards');
@@ -328,9 +389,38 @@
                 var card = document.createElement('div');
                 card.className = 'q-card';
                 var age = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
-                card.innerHTML = '<div class="q-card-name">' + (j.sketch_name || j.id) + '</div>'
+                var sn = j.sketch_name || '';
+                var snCap = sn ? sn.charAt(0).toUpperCase() + sn.slice(1) : '';
+                card.innerHTML = '<div class="q-card-info">'
+                    + '<div class="q-card-title">' + (snCap ? '<span class="q-sketch-name">' + snCap + '</span> | ' : '') + j.id + '</div>'
                     + '<div class="q-card-meta">' + (j.paper_size || '') + (age ? ' · ' + age : '') + '</div>'
-                    + '<div class="q-card-status qs-' + (j.status || 'queued') + '">' + (j.status || 'queued') + '</div>';
+                    + '<div class="q-card-status qs-' + (j.status || 'queued') + '">' + (j.status || 'queued') + '</div>'
+                    + '</div>'
+                    + '<div class="q-card-actions">'
+                    + (j.has_recipe ? '<button class="q-card-btn q-load-btn">Edit</button>' : '')
+                    + '<button class="q-card-btn q-plot-btn" title="Plot">&#9654;</button>'
+                    + '</div>';
+                (function(jj) {
+                    card.querySelector('.q-plot-btn').addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        fetch(QUEUE_URL + '/jobs/' + jj.id + '/plot-request', { method: 'POST', headers: queueHeaders() })
+                            .then(function() { queueStatus('Plot requested \u2713', '#2a7'); setTimeout(function(){ queueStatus(''); }, 3000); })
+                            .catch(function(err) { queueStatus('Plot error: ' + err.message, '#c00'); });
+                    });
+                    if (jj.has_recipe) {
+                        card.querySelector('.q-load-btn').addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            fetch(QUEUE_URL + '/jobs/' + jj.id + '/recipe', { headers: queueHeaders() })
+                                .then(function(r) { return r.json(); })
+                                .then(function(recipe) {
+                                    loadRecipeIntoEditor(recipe);
+                                    queueStatus('Loaded into editor \u2713', '#2a7');
+                                    setTimeout(function(){ queueStatus(''); }, 3000);
+                                })
+                                .catch(function(err) { queueStatus('Load error: ' + err.message, '#c00'); });
+                        });
+                    }
+                })(j);
                 cards.appendChild(card);
             });
             if (old.length && recent.length) {
@@ -342,6 +432,12 @@
         }).catch(function(){ /* queue server may not be running yet */ });
     }
     document.getElementById('queueRefreshBtn').addEventListener('click', fetchQueue);
+    document.getElementById('queueCollapseBtn').addEventListener('click', function() {
+        var cards = document.getElementById('queueCards');
+        var collapsed = cards.style.display === 'none';
+        cards.style.display = collapsed ? '' : 'none';
+        this.textContent = collapsed ? '\u25BE' : '\u25B8';
+    });
     setInterval(fetchQueue, 10000);
     fetchQueue();
 
@@ -349,12 +445,55 @@
     function fetchMachineStatus() {
         fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
             var banner = document.getElementById('busy-banner');
-            banner.classList.toggle('visible', !!s.busy);
+            if (s.busy) {
+                banner.classList.add('visible');
+                if (!banner.dataset.pyStep) banner.textContent = '● Plotting…';
+            }
+            // never hide from poll — Python clears it when done
         }).catch(function(){});
     }
-    setInterval(fetchMachineStatus, 6000);
+    setInterval(fetchMachineStatus, 3000);
     fetchMachineStatus();
+
+    function showPenConfirmDialog(palette, paperSize, onConfirm, onCancel) {
+        var overlay = document.createElement('div');
+        overlay.id = 'pen-confirm-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.45);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        var dlg = document.createElement('div');
+        dlg.style.cssText = 'background:#fff;border-radius:8px;padding:20px 24px;min-width:280px;box-shadow:0 4px 24px rgba(0,0,0,0.25);font-family:inherit;';
+        var rows = palette.map(function(c, i) {
+            return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+                + '<div style="width:22px;height:22px;border-radius:3px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
+                + '<span style="font-size:13px;">' + c + ' &rarr; Slot ' + (i+1) + '</span>'
+                + '</div>';
+        }).join('');
+        dlg.innerHTML = '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">Confirm Pen Assignments</div>'
+            + '<div style="font-size:12px;color:#555;margin-bottom:12px;">SVG colors will be plotted in this order.<br>Make sure each slot has the correct pen loaded.</div>'
+            + '<div style="font-size:12px;color:#555;margin-bottom:12px;">Paper: ' + paperSize + '</div>'
+            + rows
+            + '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">'
+            + '<button id="jspca-cancel" style="padding:7px 16px;border:1px solid #ccc;border-radius:5px;background:#f5f5f5;cursor:pointer;font-size:13px;">Cancel</button>'
+            + '<button id="jspca-plot" style="padding:7px 16px;border:none;border-radius:5px;background:#4caf50;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">Plot</button>'
+            + '</div>';
+        overlay.appendChild(dlg);
+        document.body.appendChild(overlay);
+        document.getElementById('jspca-cancel').onclick = function() { overlay.remove(); if(onCancel) onCancel(); };
+        document.getElementById("jspca-plot").onclick  = function() { overlay.remove(); onConfirm(); };
+        overlay.addEventListener("keydown", function(e) { if (e.key === "Enter") { overlay.remove(); onConfirm(); } if (e.key === "Escape") { overlay.remove(); if(onCancel) onCancel(); } });
+        overlay.setAttribute("tabindex", "-1"); overlay.focus();
+    }
+
+
+    function setBannerText(text) {
+        if (!text) { var b = document.getElementById("busy-banner"); b.classList.remove("visible"); b.dataset.pyStep = ""; return; }
+        var b = document.getElementById('busy-banner');
+        b.textContent = text;
+        b.dataset.pyStep = text;
+        b.classList.add('visible');
+    }
 </script>
+<script src="scripts/ef_script_font.js"></script>
+<script src="scripts/signature.js"></script>
 <script src="scripts/makeSketch.js"></script>
 <script>
 (function() {
@@ -389,6 +528,40 @@
         didDrag = false;
     });
 })();
+
+// Sketch selector: replace native <select> with touch-friendly chip row
+(function() {
+    var origSel = document.getElementById('sketchSelector');
+    if (!origSel) return;
+    var chips = document.createElement('div');
+    chips.id = 'sketch-chips';
+    Array.from(origSel.options).forEach(function(opt) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'seg-btn' + (opt.value === origSel.value ? ' seg-active' : '');
+        btn.textContent = opt.textContent.trim();
+        btn.dataset.val = opt.value;
+        btn.addEventListener('click', function() {
+            if (origSel.value === opt.value) return;
+            origSel.value = opt.value;
+            chips.querySelectorAll('.seg-btn').forEach(function(b) {
+                b.classList.toggle('seg-active', b.dataset.val === origSel.value);
+            });
+            origSel.dispatchEvent(new Event('change'));
+        });
+        chips.appendChild(btn);
+    });
+    document.getElementById('sketch-header').appendChild(chips);
+})();
 </script>
 </body>
 </html>
+<script>
+window.addEventListener('error', function(e) {
+    console.error('ERROR:', e.message, e.filename, e.lineno);
+    var msg = document.createElement('div');
+    msg.style.cssText = 'position:fixed;top:10px;left:10px;background:red;color:white;padding:10px;z-index:9999;';
+    msg.textContent = 'ERROR: ' + e.message;
+    document.body.appendChild(msg);
+});
+</script>

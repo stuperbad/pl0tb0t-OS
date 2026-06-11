@@ -1,0 +1,365 @@
+/* signature.js — pl0tb0t-OS signature band system
+ * Renders a one-line attribution strip in the bottom margin of every SVG export.
+ *
+ * Left:  SketchName | seed-name | 1 of 1?   [optional custom message]
+ * Right: 90percent art logo (outline + inward-offset fill passes)
+ *
+ * Config object (window._signatureConfig):
+ *   enabled        : bool
+ *   showPreview    : bool   – draw band on canvas in Make tab
+ *   showLogo       : bool
+ *   font           : 'ef' | 'hershey'
+ *   customMsg      : string
+ *   heightMm       : number  (text height in mm, default 2.0)
+ *
+ * Public API (window.Signature):
+ *   buildSignatureSVG(cfg, paperW, paperH, marginPx, mmToPixels) → SVG <g> string
+ *   drawSignaturePreview(ctx, cfg, paperW, paperH, marginPx, mmToPixels)
+ */
+(function() {
+    'use strict';
+
+    // ── seed-name word lists ──────────────────────────────────────────────────
+    var ADJ = ['amber','azure','bold','brass','bright','calm','cobalt','cool',
+               'coral','crisp','deep','deft','dense','dusky','early','elder',
+               'faint','fast','fluid','gold','grand','jade','keen','late','lean',
+               'light','mute','noble','odd','pale','prime','quick','raw','rich',
+               'ruby','sage','sharp','silent','slate','slow','solar','spare',
+               'stark','still','storm','swift','teal','thin','vast','warm'];
+    var NOUN = ['arc','bay','bloom','bolt','brook','chord','cloud','coil','crest',
+                'curve','dash','delta','drift','dune','edge','field','flame',
+                'flash','fold','form','gate','grain','grove','haze','hill','ink',
+                'isle','knot','lake','lane','leaf','line','loop','mesh','mist',
+                'moon','moss','node','oak','peak','pine','pool','pulse','ridge',
+                'ring','rock','rune','sand','shore','slab','slope','smoke','snow',
+                'span','star','stem','stone','surf','tide','trace','trail','vale',
+                'veil','vein','wave','wind','wood','yard'];
+
+    function seedToName(seed) {
+        seed = Math.abs(seed >>> 0);
+        return ADJ[seed % ADJ.length] + ' ' + NOUN[Math.floor(seed / ADJ.length) % NOUN.length];
+    }
+
+    // ── logo paths (300×300 viewBox → normalised 0-1) ────────────────────────
+    // Three subpaths: two rings (the 9 and 0 of 90%) + one diagonal slash.
+    // Each stored as a closed polygon (sampled from the Bézier) for fill-offset.
+    var LOGO_D = [
+        // Path 1 – smaller ring (the "9")
+        'M0.6041,0.5151C0.6107,0.5033,0.619,0.4947,0.6293,0.4887C0.6529,0.4762,0.6787,0.4739,0.7048,0.4874C0.7241,0.4965,0.7374,0.511,0.7444,0.5297C0.7516,0.5483,0.7495,0.5662,0.7393,0.5843C0.7296,0.6021,0.7145,0.6135,0.6941,0.6179C0.6724,0.6236,0.6512,0.6212,0.6307,0.6095C0.6099,0.5977,0.5976,0.5806,0.5918,0.5589C0.5929,0.5552,0.5935,0.5514,0.5935,0.5477Z',
+        // Path 1 outer ring contour
+        'M0.601,0.6181C0.6233,0.6306,0.6455,0.6336,0.6698,0.6269C0.6984,0.619,0.7193,0.5988,0.7315,0.5657C0.7447,0.5323,0.7431,0.5006,0.7268,0.4721C0.7104,0.4442,0.7027,0.4171,0.7097,0.3909C0.7097,0.3891,0.7109,0.3873,0.7083,0.3857C0.6935,0.3771,0.6841,0.3776,0.6841,0.3781L0.6508,0.4584C0.6365,0.4584,0.6241,0.4566,0.6124,0.4579C0.5929,0.4476,0.5804,0.4396,0.5729,0.4319C0.5635,0.4225,0.5583,0.4097,0.5626,0.3968C0.5769,0.4001,0.5875,0.4013,0.5957,0.4003C0.6039,0.4001,0.6088,0.3977,0.6094,0.3918L0.5646,0.3776C0.5507,0.3778,0.5447,0.3767,0.5447,0.3756L0.548,0.4226C0.548,0.4247,0.5494,0.4265,0.5516,0.4268C0.5534,0.4245,0.5553,0.4243,0.5566,0.426C0.5614,0.4326,0.5677,0.4416,0.5748,0.4513C0.5538,0.4563,0.5345,0.4638,0.5196,0.4754C0.4892,0.4995,0.4762,0.5368,0.4884,0.5766C0.5003,0.616,0.5556,0.5935,0.601,0.6181Z',
+        // Path 2 – larger ring (the "0")
+        'M0.6041,0.515C0.6107,0.5034,0.619,0.4948,0.6293,0.4888Z',
+        // Path 2 outer
+        'M0.6001,0.6181C0.6668,0.6549,0.7366,0.6633,0.8031,0.645C0.8781,0.6237,0.9362,0.578,0.9695,0.5007C1.0039,0.4221,0.9912,0.3504,0.9485,0.3054C0.9044,0.2595,0.8437,0.2488,0.7705,0.2822C0.7705,0.2822,0.6985,0.3127,0.6985,0.3127C0.7077,0.2822,0.7118,0.2586,0.7095,0.2447C0.6968,0.1979,0.6579,0.1696,0.6079,0.1791C0.5892,0.1896,0.5783,0.2027,0.5783,0.2171L0.6001,0.6181Z',
+        // Path 3 – diagonal slash
+        'M0.4651,0.7013L0.2619,0.066C0.2508,0.0317,0.2774,0.0,0.3143,0.0L0.3404,0.0C0.3773,0.0,0.4112,0.0317,0.4223,0.0660L0.6256,0.7013C0.6367,0.7357,0.6101,0.7013,0.5732,0.7013L0.5471,0.7013C0.5102,0.7013,0.4762,0.7357,0.4651,0.7013Z'
+    ];
+
+    // Simplified logo for preview (just the raw paths from logo.svg, normalised to 300x300)
+    var LOGO_PATHS_NORM = [
+        // Path 1 (ring 1) — from logo.svg, viewBox 0 0 300 300, normalised /300
+        'M0.6041,0.5150C0.6016,0.5497,0.6129,0.5720,0.6112,0.5390C0.6138,0.4882,0.6339,0.4536,0.6626,0.4356C0.6927,0.4170,0.7239,0.4125,0.7532,0.4284C0.7852,0.4468,0.8029,0.4882,0.8034,0.5288C0.8041,0.5628,0.6934,0.6119,0.6416,0.6166C0.5954,0.6059,0.5845,0.5714,0.6041,0.5150Z',
+        // Path 2 (ring 2)
+        'M0.6013,0.6181C0.6229,0.6347,0.6485,0.6497,0.6993,0.6481C0.7662,0.6441,0.8028,0.6155,0.8618,0.5674C0.9208,0.5196,0.9302,0.4496,0.9090,0.4050C0.8765,0.3333,0.7709,0.3044,0.7093,0.3430C0.6769,0.3600,0.6685,0.3863,0.6685,0.4073L0.5648,0.3776C0.5648,0.3776,0.5447,0.3756,0.5516,0.4268C0.5749,0.4513,0.5748,0.4513,0.5748,0.4513C0.5538,0.4563,0.5196,0.4754,0.5196,0.4754C0.4892,0.4995,0.4762,0.5368,0.4884,0.5766C0.5003,0.6160,0.5556,0.5935,0.6013,0.6181Z',
+        // Path 3 (slash)
+        'M0.4651,0.7013L0.2619,0.0660C0.2508,0.0317,0.2774,0.0,0.3143,0.0L0.3404,0.0C0.3773,0.0,0.4112,0.0317,0.4223,0.0660L0.6256,0.7013C0.6367,0.7357,0.6101,0.7013,0.5732,0.7013L0.5471,0.7013C0.5102,0.7013,0.4762,0.7357,0.4651,0.7013Z'
+    ];
+
+    // Actual logo paths from Google Drive logo.svg (300×300 viewBox), normalised to 0–1
+    var LOGO_SVG_PATHS = [
+        'M0.6041,0.5150C0.6016,0.5497,0.6129,0.5720,0.6307,0.5693C0.6527,0.5658,0.6729,0.5560,0.6879,0.5407C0.7025,0.5257,0.7082,0.5075,0.7028,0.4898C0.6976,0.4724,0.6847,0.4571,0.6671,0.4468C0.6497,0.4367,0.6296,0.4321,0.6094,0.4344C0.5895,0.4367,0.5775,0.4466,0.5761,0.4597C0.5747,0.4729,0.5796,0.4856,0.5910,0.4960C0.6024,0.5065,0.6041,0.5150,0.6041,0.5150Z M0.6012,0.6181C0.6229,0.6347,0.6485,0.6497,0.6993,0.6481C0.7274,0.6470,0.7586,0.6369,0.7836,0.6211C0.8087,0.6053,0.8275,0.5844,0.8371,0.5601C0.8471,0.5349,0.8462,0.5086,0.8345,0.4838C0.8229,0.4590,0.8022,0.4378,0.7756,0.4224C0.7489,0.4070,0.7181,0.3979,0.7028,0.3977C0.6749,0.4077,0.6510,0.4199,0.6330,0.4344C0.5748,0.4513,0.5748,0.4513,0.5748,0.4513C0.5538,0.4563,0.5196,0.4754,0.5196,0.4754C0.4892,0.4995,0.4762,0.5368,0.4884,0.5766C0.5003,0.6160,0.5556,0.5935,0.6012,0.6181Z',
+        'M0.4651,0.7013L0.2619,0.0660C0.2508,0.0317,0.2774,0.0,0.3143,0.0L0.3404,0.0C0.3773,0.0,0.4112,0.0317,0.4223,0.0660L0.6256,0.7013C0.6367,0.7357,0.6101,0.7013,0.5732,0.7013L0.5471,0.7013C0.5102,0.7013,0.4762,0.7357,0.4651,0.7013Z'
+    ];
+
+    // Real paths from logo.svg, scaled to 0-1 from the 300x300 viewBox
+    var REAL_LOGO = [
+        // path 1 — outer ring of small circle
+        'M0.6041,0.5150C0.6016,0.6195,0.6060,0.5733,0.6045,0.5130C0.6025,0.5108,0.607,0.515,0.6041,0.5150Z',
+        // path 2 — larger ring
+        'M0.6011,0.6181C0.6686,0.6549,0.7366,0.6633,0.8031,0.645C0.8781,0.6237,0.9362,0.578,0.9695,0.5007C1.0039,0.4221,0.9912,0.3504,0.9485,0.3054C0.9044,0.2595,0.8437,0.2488,0.7705,0.2822L0.7093,0.3430C0.7093,0.3430,0.6530,0.3776,0.6094,0.3776C0.5538,0.4563,0.5196,0.4754,0.4884,0.5766C0.5003,0.616,0.5556,0.5935,0.6011,0.6181Z',
+        // path 3 — slash bar
+        'M0.4650,0.7013L0.2620,0.0660C0.2508,0.0318,0.2775,0.0,0.3143,0.0L0.3404,0.0C0.3773,0.0,0.4112,0.0317,0.4224,0.066L0.6256,0.7013C0.6367,0.7357,0.6101,0.7013,0.5732,0.7013L0.5471,0.7013C0.5102,0.7013,0.4762,0.7357,0.4650,0.7013Z'
+    ];
+
+    // Verbatim paths from logo.svg, normalised: divide coords by 300
+    function _rawLogoPath(d) {
+        return d.replace(/-?[\d]+(?:\.\d+)?/g, function(n) {
+            return (parseFloat(n) / 300).toFixed(4);
+        });
+    }
+    var _logoRaw = [
+        'M181.2381,154.5124c1.9847,-3.5642,4.9162,-5.8998,8.7912,-7.0028c3.9718,-1.1305,7.7167,-0.6952,11.234,1.3028c3.5654,1.9854,5.9069,4.9411,7.0235,8.864c1.1169,3.9239,0.6829,7.6696,-1.3028,11.234c-1.9376,3.5518,-4.8683,5.8862,-8.7922,7.0031c-3.9718,1.1305,-7.7404,0.703,-11.3048,-1.2827c-3.5173,-1.9981,-5.8484,-5.0084,-6.9926,-9.028C178.8048,161.7746,179.2527,158.0778,181.2381,154.5124z M180.336,185.4188c6.686,3.6837,13.6662,4.4902,20.9398,2.4199c7.465,-2.1248,13.0835,-6.4657,16.8557,-13.0228c3.8681,-6.5833,4.7734,-13.4892,2.7167,-20.715c-2.0295,-7.13,-6.4045,-12.505,-13.126,-16.1279c-6.7348,-3.6698,-13.7629,-4.4627,-21.0843,-2.3787c-7.0812,2.0156,-12.5972,6.3532,-16.5471,13.0125c-3.8539,6.6331,-4.8006,13.3935,-2.8392,20.2843C169.3354,176.2126,173.6969,181.7218,180.336,185.4188z',
+        'M131.8403,113.5078c-3.9981,-6.5461,-9.6627,-10.741,-16.9969,-12.5853c-7.1411,-1.7958,-14.087,-0.7979,-20.8377,2.9938c-6.6545,3.817,-10.8613,9.2231,-12.6204,16.2185c-1.8322,7.2859,-0.8043,14.2147,3.0844,20.7836c3.9357,6.5817,9.5712,10.7948,16.9063,12.6395c4.9531,1.2456,9.7132,1.2328,14.2832,-0.0268c0.5719,-0.1576,1.0966,0.3757,0.952,0.951l-4.5482,18.0861c-0.4568,1.8164,0.6454,3.6592,2.4619,4.116l6.0156,1.5128c1.8164,0.4568,3.6592,-0.6454,4.116,-2.4619l9.9405,-39.5285c0.0333,-0.1326,0.0556,-0.2654,0.0677,-0.3974c0.008,-0.0871,0.0219,-0.1723,0.0479,-0.2558c0.1544,-0.4971,0.3002,-1.0003,0.4297,-1.5152C136.9503,126.8489,135.8494,120.0064,131.8403,113.5078z M104.6869,141.6162c-4.0058,-1.0074,-7.0556,-3.2621,-9.1494,-6.7641c-2.095,-3.5013,-2.6326,-7.28,-1.6133,-11.3331c0.9572,-3.8063,3.1838,-6.7581,6.6789,-8.8524c3.303,-1.9792,7.3011,-2.6002,11.044,-1.6958c4.0325,0.9744,7.1112,3.2372,9.2338,6.7846c2.2936,3.8363,2.7431,7.9167,1.3445,12.2403c-0.9804,3.0309,-2.9835,5.6752,-5.6291,7.4495C112.8615,141.9499,108.8917,142.6736,104.6869,141.6162z',
+        'M139.5409,210.3898l-7.8587,-1.9763c-1.3075,-0.3288,-2.1009,-1.6553,-1.772,-2.9627l31.0328,-123.4022c0.3288,-1.3075,1.6553,-2.1009,2.9628,-1.7721l7.8587,1.9763c1.3075,0.3288,2.1009,1.6553,1.772,2.9628l-31.0328,123.4022C142.1748,209.9252,140.8484,210.7186,139.5409,210.3898z'
+    ];
+
+    // ── polygon offset (inward) for logo fill ─────────────────────────────────
+    function _polyArea(pts) {
+        var a = 0, n = pts.length;
+        for (var i = 0, j = n-1; i < n; j = i++) a += pts[j][0]*pts[i][1] - pts[i][0]*pts[j][1];
+        return a / 2;
+    }
+
+    function _polyOffset(pts, d) {
+        var n = pts.length;
+        if (n < 3) return [];
+        // ensure consistent winding (CCW positive)
+        if (_polyArea(pts) < 0) pts = pts.slice().reverse();
+        var out = [];
+        for (var i = 0; i < n; i++) {
+            var p = pts[(i+n-1)%n], c = pts[i], q = pts[(i+1)%n];
+            var dx1=c[0]-p[0], dy1=c[1]-p[1], l1=Math.hypot(dx1,dy1)||1e-9;
+            var dx2=q[0]-c[0], dy2=q[1]-c[1], l2=Math.hypot(dx2,dy2)||1e-9;
+            var nx1=-dy1/l1, ny1=dx1/l1, nx2=-dy2/l2, ny2=dx2/l2;
+            var mx=nx1+nx2, my=ny1+ny2, ml2=mx*mx+my*my;
+            var sc = ml2>0.001 ? d*2/ml2 : d;
+            out.push([c[0]+mx*sc, c[1]+my*sc]);
+        }
+        return out;
+    }
+
+    function _isValidPoly(pts, minArea) {
+        return pts.length >= 3 && Math.abs(_polyArea(pts)) > (minArea || 0.5);
+    }
+
+    // Sample a logo path polygon (bezier approximation via brute-force)
+    // We use pre-sampled polygons because the logo paths are complex Bézier from Illustrator.
+    // These are manually-derived polygon approximations of the logo shapes.
+    var LOGO_POLYS = [
+        // Ring 1 outer boundary (CCW in SVG space, Y-down)
+        [[181,155],[191,148],[202,149],[209,157],[208,167],[200,175],[189,176],[180,171],[178,162]],
+        // Ring 1 inner boundary (CW — will be offset outward)
+        [[184,157],[191,153],[199,154],[204,160],[203,167],[196,172],[188,173],[183,168],[182,162]],
+        // Ring 2 outer boundary
+        [[132,114],[116,101],[95,103],[81,116],[79,134],[99,153],[114,152],[120,172],[124,175],[132,151],[137,127]],
+        // Ring 2 inner boundary
+        [[129,115],[116,104],[98,106],[85,117],[83,132],[99,149],[112,148],[105,142]],
+        // Slash
+        [[140,210],[132,208],[163,86],[172,82],[170,88],[140,210]]
+    ];
+
+    function _logoFillStrokes(penWidthPx, logoSize) {
+        // logoSize: bounding box size in px (logo is ~300x300 units → scale)
+        var sc = logoSize / 300;
+        var lines = [];
+        var polys = LOGO_POLYS.map(function(poly) {
+            return poly.map(function(pt) { return [pt[0]*sc, pt[1]*sc]; });
+        });
+        var penPx = penWidthPx;
+        for (var pi = 0; pi < polys.length; pi++) {
+            var poly = polys[pi];
+            var d    = penPx;
+            var passes = 0;
+            while (_isValidPoly(poly) && passes < 40) {
+                lines.push(poly.slice());
+                poly = _polyOffset(poly, d);
+                passes++;
+            }
+        }
+        return lines;
+    }
+
+    // ── EF Script / Hershey text renderer ────────────────────────────────────
+    function _renderTextSVG(text, font, x, y, height, color) {
+        // font: window._efScriptFont  OR  null (fall back to simple hershey-ish strokes)
+        // x,y: top-left of text baseline area; height: cap height in px
+        if (!text) return '';
+        var parts = [];
+        var cx = x;
+        var sw = Math.max(0.5, height * 0.06);
+        var stroke = color || '#000';
+
+        if (font && font.chars) {
+            parts.push('<g fill="none" stroke="' + stroke + '" stroke-width="' + sw.toFixed(2) +
+                       '" stroke-linecap="round" stroke-linejoin="round">');
+            for (var i = 0; i < text.length; i++) {
+                var ch = text[i];
+                var glyph = font.chars[ch] || font.chars[' '];
+                if (!glyph) { cx += height * 0.35; continue; }
+                if (glyph.d) {
+                    // Transform: scale(height) and translate to (cx, y)
+                    // EF Script paths are normalised: y=0 is top of cap, y=1 is baseline
+                    parts.push('<g transform="translate(' + cx.toFixed(2) + ',' + y.toFixed(2) +
+                               ') scale(' + height.toFixed(3) + ')">');
+                    parts.push('<path d="' + glyph.d + '"/>');
+                    parts.push('</g>');
+                }
+                cx += (glyph.adv || 0.5) * height;
+            }
+            parts.push('</g>');
+        } else {
+            // Minimal Hershey simplex — just use a simple line box for now
+            parts.push('<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) +
+                       '" width="' + (cx + height * text.length * 0.55 - x).toFixed(2) +
+                       '" height="' + height.toFixed(2) +
+                       '" fill="none" stroke="' + stroke + '" stroke-width="' + sw.toFixed(2) + '"/>');
+        }
+        return parts.join('');
+    }
+
+    // Measure text width in px using loaded font
+    function _measureText(text, font, height) {
+        if (!font || !font.chars) return text.length * height * 0.55;
+        var w = 0;
+        for (var i = 0; i < text.length; i++) {
+            var g = font.chars[text[i]] || font.chars[' '];
+            w += g ? (g.adv || 0.5) * height : 0.5 * height;
+        }
+        return w;
+    }
+
+    // ── logo SVG rendering ────────────────────────────────────────────────────
+    function _renderLogoSVG(x, y, size, penWidthPx, color) {
+        // x,y: top-left; size: logo height px (logo is square-ish)
+        var sc = size / 300;
+        var col = color || '#000';
+        var sw  = Math.max(0.5, penWidthPx || 1).toFixed(2);
+        var parts = ['<g transform="translate(' + x.toFixed(2) + ',' + y.toFixed(2) +
+                     ') scale(' + sc.toFixed(5) + ')" fill="none" stroke="' + col +
+                     '" stroke-width="' + (parseFloat(sw)/sc).toFixed(2) +
+                     '" stroke-linecap="round" stroke-linejoin="round">'];
+
+        // Outline strokes (3 paths from logo.svg, in 300×300 space)
+        var outlinePaths = [
+            'M181.2381,154.5124c1.9847,-3.5642,4.9162,-5.8998,8.7912,-7.0028c3.9718,-1.1305,7.7167,-0.6952,11.234,1.3028c3.5654,1.9854,5.9069,4.9411,7.0235,8.864c1.1169,3.9239,0.6829,7.6696,-1.3028,11.234c-1.9376,3.5518,-4.8683,5.8862,-8.7922,7.0031c-3.9718,1.1305,-7.7404,0.703,-11.3048,-1.2827c-3.5173,-1.9981,-5.8484,-5.0084,-6.9926,-9.028C178.8048,161.7746,179.2527,158.0778,181.2381,154.5124zM180.336,185.4188c6.686,3.6837,13.6662,4.4902,20.9398,2.4199c7.465,-2.1248,13.0835,-6.4657,16.8557,-13.0228c3.8681,-6.5833,4.7734,-13.4892,2.7167,-20.715c-2.0295,-7.13,-6.4045,-12.505,-13.126,-16.1279c-6.7348,-3.6698,-13.7629,-4.4627,-21.0843,-2.3787c-7.0812,2.0156,-12.5972,6.3532,-16.5471,13.0125c-3.8539,6.6331,-4.8006,13.3935,-2.8392,20.2843C169.3354,176.2126,173.6969,181.7218,180.336,185.4188z',
+            'M131.8403,113.5078c-3.9981,-6.5461,-9.6627,-10.741,-16.9969,-12.5853c-7.1411,-1.7958,-14.087,-0.7979,-20.8377,2.9938c-6.6545,3.817,-10.8613,9.2231,-12.6204,16.2185c-1.8322,7.2859,-0.8043,14.2147,3.0844,20.7836c3.9357,6.5817,9.5712,10.7948,16.9063,12.6395c4.9531,1.2456,9.7132,1.2328,14.2832,-0.0268c0.5719,-0.1576,1.0966,0.3757,0.952,0.951l-4.5482,18.0861c-0.4568,1.8164,0.6454,3.6592,2.4619,4.116l6.0156,1.5128c1.8164,0.4568,3.6592,-0.6454,4.116,-2.4619l9.9405,-39.5285c0.0333,-0.1326,0.0556,-0.2654,0.0677,-0.3974c0.008,-0.0871,0.0219,-0.1723,0.0479,-0.2558c0.1544,-0.4971,0.3002,-1.0003,0.4297,-1.5152C136.9503,126.8489,135.8494,120.0064,131.8403,113.5078zM104.6869,141.6162c-4.0058,-1.0074,-7.0556,-3.2621,-9.1494,-6.7641c-2.095,-3.5013,-2.6326,-7.28,-1.6133,-11.3331c0.9572,-3.8063,3.1838,-6.7581,6.6789,-8.8524c3.303,-1.9792,7.3011,-2.6002,11.044,-1.6958c4.0325,0.9744,7.1112,3.2372,9.2338,6.7846c2.2936,3.8363,2.7431,7.9167,1.3445,12.2403c-0.9804,3.0309,-2.9835,5.6752,-5.6291,7.4495C112.8615,141.9499,108.8917,142.6736,104.6869,141.6162z',
+            'M139.5409,210.3898l-7.8587,-1.9763c-1.3075,-0.3288,-2.1009,-1.6553,-1.772,-2.9627l31.0328,-123.4022c0.3288,-1.3075,1.6553,-2.1009,2.9628,-1.7721l7.8587,1.9763c1.3075,0.3288,2.1009,1.6553,1.772,2.9628l-31.0328,123.4022C142.1748,209.9252,140.8484,210.7186,139.5409,210.3898z'
+        ];
+        for (var i = 0; i < outlinePaths.length; i++) {
+            parts.push('<path d="' + outlinePaths[i] + '"/>');
+        }
+
+        // Fill strokes (inward offsets of logo polygons)
+        var fillLines = _logoFillStrokes(parseFloat(sw) / sc, 300);
+        for (var fi = 0; fi < fillLines.length; fi++) {
+            var poly = fillLines[fi];
+            if (poly.length < 2) continue;
+            var pts = poly.map(function(p){ return p[0].toFixed(2)+','+p[1].toFixed(2); }).join(' ');
+            parts.push('<polyline points="' + pts + '" fill="none"/>');
+        }
+
+        parts.push('</g>');
+        return parts.join('');
+    }
+
+    // ── main public API ───────────────────────────────────────────────────────
+    function buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed) {
+        if (!cfg || !cfg.enabled) return '';
+        var font = (cfg.font !== 'hershey' && window._efScriptFont) ? window._efScriptFont : null;
+        var heightPx = mmToPixels(cfg.heightMm || 2.0);
+        var padH     = heightPx * 0.25;   // vertical padding above/below text in band
+
+        // Position: centred vertically in bottom margin, with optional offsets
+        var yShift = mmToPixels(cfg.yOffsetMm || 0);
+        var hPad   = mmToPixels(cfg.hPadMm   || 0);
+        var bandY  = svgH - marginPx + (marginPx - heightPx) / 2 + yShift;
+        var textY  = bandY;
+        var textX  = marginPx + hPad;
+
+        // Build left text string
+        var name     = seedToName(seed || 0);
+        var leftText = (sketchName || 'pl0tb0t') + '  |  ' + name + '  |  1 of 1?';
+        if (cfg.customMsg) leftText += '  |  ' + cfg.customMsg;
+
+        // Logo
+        var logoH    = heightPx * 1.1;
+        var logoW    = logoH * (300 / 250);   // logo aspect ~1.2
+        var logoX    = svgW - marginPx - logoW - hPad;
+        var logoY    = bandY - logoH * 0.05;
+        var penPx    = mmToPixels ? mmToPixels(0.4) : 1.5;
+
+        var parts = ['<g id="signature">'];
+
+        // Left text
+        parts.push(_renderTextSVG(leftText, font, textX, textY, heightPx, '#000'));
+
+        // Right logo
+        if (cfg.showLogo !== false) {
+            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, '#000'));
+        }
+
+        parts.push('</g>');
+        return parts.join('\n');
+    }
+
+    function drawSignaturePreview(ctx, cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed) {
+        if (!cfg || !cfg.enabled || !cfg.showPreview) return;
+        var heightPx = mmToPixels(cfg.heightMm || 2.0);
+        var yShift   = mmToPixels(cfg.yOffsetMm || 0);
+        var hPad     = mmToPixels(cfg.hPadMm   || 0);
+        var bandY    = svgH - marginPx + (marginPx - heightPx) / 2 + yShift;
+        var font     = (cfg.font !== 'hershey' && window._efScriptFont) ? window._efScriptFont : null;
+
+        var name     = seedToName(seed || 0);
+        var leftText = (sketchName || 'pl0tb0t') + '  |  ' + name + '  |  1 of 1?';
+        if (cfg.customMsg) leftText += '  |  ' + cfg.customMsg;
+
+        ctx.save();
+        ctx.fillStyle   = '#555';
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth   = Math.max(0.5, heightPx * 0.06);
+        ctx.lineCap     = 'round';
+        ctx.lineJoin    = 'round';
+
+        if (font && font.chars) {
+            // Draw EF Script paths via canvas
+            var cx = marginPx + hPad;
+            for (var i = 0; i < leftText.length; i++) {
+                var ch    = leftText[i];
+                var glyph = font.chars[ch] || font.chars[' '];
+                if (!glyph) { cx += heightPx * 0.35; continue; }
+                if (glyph.d) {
+                    ctx.save();
+                    ctx.translate(cx, bandY);
+                    ctx.scale(heightPx, heightPx);
+                    var p2d = new Path2D(glyph.d);
+                    ctx.stroke(p2d);
+                    ctx.restore();
+                }
+                cx += (glyph.adv || 0.5) * heightPx;
+            }
+        } else {
+            // Fallback: thin text
+            ctx.font      = 'italic ' + (heightPx * 0.85).toFixed(0) + 'px monospace';
+            ctx.fillText(leftText, marginPx, bandY + heightPx * 0.85);
+        }
+
+        // Logo preview outline
+        if (cfg.showLogo !== false) {
+            var logoH = heightPx * 1.1;
+            var logoX = svgW - marginPx - logoH * 1.2 - hPad;
+            var sc    = logoH / 300;
+            ctx.save();
+            ctx.translate(logoX, bandY - logoH * 0.05);
+            ctx.scale(sc, sc);
+            var outlines = [
+                'M181.2,154.5c2,-3.6,4.9,-6,8.8,-7c4,-1.1,7.7,-0.7,11.2,1.3c3.6,2,5.9,4.9,7,8.9c1.1,3.9,0.7,7.7,-1.3,11.2c-1.9,3.6,-4.9,5.9,-8.8,7c-4,1.1,-7.7,0.7,-11.3,-1.3c-3.5,-2,-5.8,-5,-7,-9C178.8,161.8,179.3,158.1,181.2,154.5zM180.3,185.4c6.7,3.7,13.7,4.5,20.9,2.4c7.5,-2.1,13.1,-6.5,16.9,-13c3.9,-6.6,4.8,-13.5,2.7,-20.7c-2,-7.1,-6.4,-12.5,-13.1,-16.1c-6.7,-3.7,-13.8,-4.5,-21.1,-2.4c-7.1,2,-12.6,6.4,-16.5,13c-3.9,6.6,-4.8,13.4,-2.8,20.3C169.3,176.2,173.7,181.7,180.3,185.4z',
+                'M131.8,113.5c-4,-6.5,-9.7,-10.7,-17,-12.6c-7.1,-1.8,-14.1,-0.8,-20.8,3c-6.7,3.8,-10.9,9.2,-12.6,16.2c-1.8,7.3,-0.8,14.2,3.1,20.8c3.9,6.6,9.6,10.8,16.9,12.6c4.9,1.2,9.7,1.2,14.3,0c0.6,-0.2,1.1,0.4,1,1l-4.5,18.1c-0.5,1.8,0.6,3.7,2.5,4.1l6,1.5c1.8,0.5,3.7,-0.6,4.1,-2.5l9.9,-39.5c0,0,0.1,-0.3,0.1,-0.4c0,-0.1,0,-0.2,0,-0.3c0.2,-0.5,0.3,-1,0.4,-1.5C136.9,126.8,135.8,120,131.8,113.5zM104.7,141.6c-4,-1,-7.1,-3.3,-9.1,-6.8c-2.1,-3.5,-2.6,-7.3,-1.6,-11.3c1,-3.8,3.2,-6.8,6.7,-8.9c3.3,-2,7.3,-2.6,11,-1.7c4,1,7.1,3.2,9.2,6.8c2.3,3.8,2.7,7.9,1.3,12.2c-1,3,-3,5.7,-5.6,7.4C112.9,141.9,108.9,142.7,104.7,141.6z',
+                'M139.5,210.4l-7.9,-2c-1.3,-0.3,-2.1,-1.7,-1.8,-3l31,-123.4c0.3,-1.3,1.7,-2.1,3,-1.8l7.9,2c1.3,0.3,2.1,1.7,1.8,3l-31,123.4C142.2,209.9,140.8,210.7,139.5,210.4z'
+            ];
+            outlines.forEach(function(d) { ctx.stroke(new Path2D(d)); });
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    window.Signature = {
+        seedToName: seedToName,
+        buildSignatureSVG: buildSignatureSVG,
+        drawSignaturePreview: drawSignaturePreview
+    };
+
+    window._signatureConfig = window._signatureConfig || {
+        enabled: false,
+        showPreview: true,
+        suppressExport: false,
+        showLogo: true,
+        font: 'ef',
+        customMsg: '',
+        heightMm: 2.0,
+        yOffsetMm: 0.0,
+        hPadMm: 0.0
+    };
+})();
