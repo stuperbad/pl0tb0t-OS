@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.4.85"
+__version__ = "0.5.41"
 import os
 import sys
 import time
@@ -96,6 +96,7 @@ class OSConfig:
     tc_rapid: int = 800           # mm/min — rapid moves during tool change
     tc_approach: int = 50         # mm/min — slow docking/undocking moves
     draw_speed: int = 3000        # mm/min — G1 feed rate while drawing
+    travel_speed: int = 6000      # mm/min — G0 rapid speed (used for time estimation)
     vpype_config: str = "pl0tb0t_0x0_config.cfg"
     vpype_profile: str = "pl0tb0t_0x0"
     # Signature / attribution band
@@ -106,8 +107,14 @@ class OSConfig:
     sig_font: str = "ef"
     sig_custom_msg: str = ""
     sig_height_mm: float = 2.0
-    sig_y_offset_mm: float = 0.0   # shift from auto-centered position (+ = toward paper edge)
+    sig_scale: float = 2.0       # visual/export scale multiplier
+    sig_y_offset_mm: float = 0.0   # legacy — superseded by sig_from_margin_mm
+    sig_from_margin_mm: float = 2.0  # mm from art/margin boundary downward into the margin
     sig_h_pad_mm: float = 0.0      # extra horizontal inset from margin on both sides
+    pen_width_mm: float = 0.4  # nib width — inherited by signature and all sketches
+    sig_logo_scale: float = 1.0    # logo size multiplier (relative to text height)
+    sig_sep_scale: float = 1.3     # | separator height multiplier relative to text
+    sig_sep_pad: float = 1.3       # horizontal gap on each side of | (in text-height ems)
 
 
 def _load_json(path: str, default: dict) -> dict:
@@ -133,6 +140,7 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         tc_rapid=int(data.get("tc_rapid", 800)),
         tc_approach=int(data.get("tc_approach", 50)),
         draw_speed=int(data.get("draw_speed", 3000)),
+        travel_speed=int(data.get("travel_speed", 6000)),
         vpype_config=data.get("vpype_config", "pl0tb0t_0x0_config.cfg"),
         vpype_profile=data.get("vpype_profile", "pl0tb0t_0x0"),
         sig_enabled=bool(data.get("sig_enabled", False)),
@@ -142,8 +150,14 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         sig_font=str(data.get("sig_font", "ef")),
         sig_custom_msg=str(data.get("sig_custom_msg", "")),
         sig_height_mm=float(data.get("sig_height_mm", 2.0)),
+        sig_scale=float(data.get("sig_scale", 2.0)),
         sig_y_offset_mm=float(data.get("sig_y_offset_mm", 0.0)),
+        sig_from_margin_mm=float(data.get("sig_from_margin_mm", 2.0)),
         sig_h_pad_mm=float(data.get("sig_h_pad_mm", 0.0)),
+        pen_width_mm=float(data.get("pen_width_mm", data.get("sig_pen_width_mm", 0.4))),
+        sig_logo_scale=float(data.get("sig_logo_scale", 1.0)),
+        sig_sep_scale=float(data.get("sig_sep_scale", 1.3)),
+        sig_sep_pad=float(data.get("sig_sep_pad", 1.3)),
     )
 
 
@@ -154,6 +168,152 @@ def save_config(config: OSConfig, path: str = CONFIG_PATH) -> None:
     cfg.pop("tools_path", None)   # legacy field, not used
     data.update(cfg)
     _save_json(path, data)
+
+
+def _fmt_duration(secs: float) -> str:
+    s = int(secs)
+    if s < 60:   return f'~{s}s'
+    m = s // 60
+    if m < 60:   return f'~{m} min'
+    h, rm = divmod(m, 60)
+    return f'~{h}h {rm}m' if rm else f'~{h}h'
+
+
+def _svg_path_stats(d: str):
+    """Return (length_px, lift_count) for an SVG path d attribute."""
+    import re as _re, math as _math
+    tokens = _re.findall(
+        r'[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?',
+        d or '')
+    total, lifts = 0.0, 0
+    px, py, sx, sy = 0.0, 0.0, 0.0, 0.0
+    cmd = 'L'
+    COUNTS = {'M':2,'L':2,'H':1,'V':1,'C':6,'S':4,'Q':4,'T':2,'A':7}
+    i, N = 0, len(tokens)
+    while i < N:
+        t = tokens[i]
+        if t.isalpha():
+            cmd = t
+            if t.upper() == 'Z':
+                total += _math.hypot(sx - px, sy - py)
+                px, py = sx, sy
+            i += 1; continue
+        c = cmd.upper(); rel = cmd.islower()
+        nc = COUNTS.get(c, 0)
+        if nc == 0 or i + nc > N:
+            i += 1; continue
+        a = [float(tokens[i + k]) for k in range(nc)]
+        i += nc
+        if c == 'M':
+            px = (px + a[0]) if rel else a[0]
+            py = (py + a[1]) if rel else a[1]
+            sx, sy = px, py; lifts += 1
+            cmd = 'l' if rel else 'L'
+        elif c == 'L':
+            ex = (px + a[0]) if rel else a[0]
+            ey = (py + a[1]) if rel else a[1]
+            total += _math.hypot(ex - px, ey - py); px, py = ex, ey
+        elif c == 'H':
+            ex = (px + a[0]) if rel else a[0]
+            total += abs(ex - px); px = ex
+        elif c == 'V':
+            ey = (py + a[0]) if rel else a[0]
+            total += abs(ey - py); py = ey
+        elif c in ('C', 'S'):
+            ex = (px + a[-2]) if rel else a[-2]
+            ey = (py + a[-1]) if rel else a[-1]
+            total += _math.hypot(ex - px, ey - py) * 1.15; px, py = ex, ey
+        elif c in ('Q', 'T'):
+            ex = (px + a[-2]) if rel else a[-2]
+            ey = (py + a[-1]) if rel else a[-1]
+            total += _math.hypot(ex - px, ey - py) * 1.1; px, py = ex, ey
+        elif c == 'A':
+            ex = (px + a[5]) if rel else a[5]
+            ey = (py + a[6]) if rel else a[6]
+            rx = abs(a[0])
+            chord = _math.hypot(ex - px, ey - py)
+            total += (rx * 2 * _math.asin(min(chord / (2*rx), 1.0))
+                      if rx > 0 else chord)
+            px, py = ex, ey
+    return total, lifts
+
+
+def _estimate_svg_time(svg_text: str, draw_speed_mmpm: float,
+                        travel_speed_mmpm: float = 6000) -> float:
+    """Estimate plot time in seconds from raw SVG text."""
+    import re as _re, math as _math
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(svg_text)
+    except Exception:
+        return 0.0
+    SVG_PX_PER_MM = 100.0 / 25.4
+    total_mm, total_lifts = 0.0, 0
+    color_set: set = set()
+    SKIP = {'none', 'white', '#fff', '#ffffff', 'transparent', 'inherit'}
+    def _tag(el): return el.tag.split('}')[-1] if '}' in el.tag else el.tag
+    def _color(el):
+        s = _re.search(r'stroke\s*:\s*([^;]+)', el.get('style', ''))
+        c = (s.group(1).strip() if s else None) or el.get('stroke', '')
+        return c if c and c.lower() not in SKIP else None
+    for el in root.iter():
+        tag = _tag(el)
+        col = _color(el)
+        if col: color_set.add(col)
+        if tag == 'path':
+            length_px, lifts = _svg_path_stats(el.get('d', ''))
+            total_mm += length_px / SVG_PX_PER_MM
+            total_lifts += lifts
+        elif tag == 'line':
+            x1, y1 = float(el.get('x1', 0)), float(el.get('y1', 0))
+            x2, y2 = float(el.get('x2', 0)), float(el.get('y2', 0))
+            total_mm += _math.hypot(x2 - x1, y2 - y1) / SVG_PX_PER_MM
+            total_lifts += 1
+        elif tag == 'circle':
+            total_mm += 2 * _math.pi * float(el.get('r', 0)) / SVG_PX_PER_MM
+            total_lifts += 1
+        elif tag in ('polyline', 'polygon'):
+            coords = [float(v) for v in _re.findall(
+                r'[-+]?\d*\.?\d+', el.get('points', ''))]
+            for k in range(0, len(coords) - 3, 2):
+                total_mm += _math.hypot(
+                    coords[k+2] - coords[k], coords[k+3] - coords[k+1]
+                ) / SVG_PX_PER_MM
+            total_lifts += 1
+    if total_mm <= 0:
+        return 0.0
+    draw_s   = (total_mm / max(draw_speed_mmpm, 1)) * 60.0
+    per_lift = (40.0 / max(travel_speed_mmpm, 1)) * 60.0 + 0.5
+    travel_s = min(total_lifts * per_lift, draw_s * 0.25)
+    tc_s     = max(0, len(color_set) - 1) * 30.0
+    return draw_s + travel_s + tc_s
+
+
+def _estimate_gcode_time(gcode_text: str, draw_speed_mmpm: float,
+                          travel_speed_mmpm: float) -> float:
+    """Estimate plot time in seconds by parsing G-code moves."""
+    import re as _re, math as _math
+    secs = 0.0
+    cur_f = float(draw_speed_mmpm)
+    rapid_f = float(max(travel_speed_mmpm, 100))
+    x = y = z = 0.0
+    def _coord(line, letter, default):
+        m = _re.search(letter + r'([-+]?\d*\.?\d+)', line, _re.IGNORECASE)
+        return float(m.group(1)) if m else default
+    for raw in gcode_text.splitlines():
+        line = _re.sub(r';.*', '', _re.sub(r'\(.*?\)', '', raw)).strip().upper()
+        if not line: continue
+        fm = _re.search(r'F([\d.]+)', line)
+        if fm: cur_f = float(fm.group(1))
+        if _re.match(r'G0?1\b', line):
+            nx, ny, nz = _coord(line,'X',x), _coord(line,'Y',y), _coord(line,'Z',z)
+            secs += _math.sqrt((nx-x)**2+(ny-y)**2+(nz-z)**2) / max(cur_f, 1) * 60.0
+            x, y, z = nx, ny, nz
+        elif _re.match(r'G0{1,2}\b', line):
+            nx, ny, nz = _coord(line,'X',x), _coord(line,'Y',y), _coord(line,'Z',z)
+            secs += _math.sqrt((nx-x)**2+(ny-y)**2+(nz-z)**2) / max(rapid_f, 1) * 60.0
+            x, y, z = nx, ny, nz
+    return secs
 
 
 def load_tools(path: str = CONFIG_PATH) -> List[Tool]:
@@ -311,7 +471,7 @@ class DaemonClient:
         return self.cmd({"cmd": "send", "line": line, "wait": wait}, timeout=30.0)
     def realtime(self, byte_val: int):       self.cmd({"cmd": "realtime", "byte": byte_val}, timeout=2.0)
     def home(self)                  -> dict: return self.cmd({"cmd": "home"}, timeout=120.0)
-    def stream(self, path: str)     -> dict: return self.cmd({"cmd": "stream", "path": path}, timeout=5.0)
+    def stream(self, path: str, est_s: float = 0) -> dict: return self.cmd({"cmd": "stream", "path": path, "est_s": est_s}, timeout=5.0)
     def pause(self)                 -> dict: return self.cmd({"cmd": "pause"})
     def resume(self)                -> dict: return self.cmd({"cmd": "resume"})
     def stop(self)                  -> dict: return self.cmd({"cmd": "stop"})
@@ -772,7 +932,9 @@ if has_display:
             recipe_size = self._format_bytes(job.get('recipe_size') or job.get('recipe_size_bytes'))
             recipe_meta = f"recipe {recipe_size}" if recipe_size else ("recipe" if job.get("has_recipe") else "")
             provenance  = "☁ web" if job.get("cloud_id") else "⌘ local"
-            meta_parts = [p for p in [paper, orient, size, recipe_meta] if p]
+            est_raw = job.get('est_time_s') or 0
+            est_str = _fmt_duration(est_raw) if est_raw > 0 else ""
+            meta_parts = [p for p in [paper, orient, size, recipe_meta, est_str] if p]
             meta = '  ·  '.join(meta_parts)
             if job_id:
                 meta = f'{meta}  ·  {job_id}' if meta else job_id
@@ -1031,9 +1193,30 @@ if has_display:
             apply_state()
             return panel
 
+        def _natural_content_height(self, widget):
+            # Drills through nested AdjustIgnored QScrollAreas and QSplitters,
+            # whose own sizeHint() lies about the real content size beneath them.
+            if widget is None:
+                return 0
+            if isinstance(widget, QScrollArea):
+                inner = widget.widget()
+                return self._natural_content_height(inner) if inner is not None else widget.sizeHint().height()
+            if isinstance(widget, QSplitter):
+                heights = [self._natural_content_height(widget.widget(i)) for i in range(widget.count())]
+                if not heights:
+                    return 0
+                if widget.orientation() == Qt.Orientation.Vertical:
+                    return sum(heights) + widget.handleWidth() * max(0, len(heights) - 1)
+                return max(heights)
+            if isinstance(widget, QListWidget):
+                # intentionally-scrollable log/list sub-regions — bounded, not grown to fit every row
+                return max(60, min(widget.sizeHint().height(), 180))
+            return widget.sizeHint().height()
+
         def _pack_panel_splitter(self, splitter):
             sizes = []
             used = 0
+            preview_idx = None
             for i in range(splitter.count()):
                 panel = splitter.widget(i)
                 if getattr(panel, "_column_spacer", False):
@@ -1041,14 +1224,40 @@ if has_display:
                 if getattr(panel, "_collapsed", False):
                     title_bar = getattr(panel, "_title_bar", None)
                     size = max(24, title_bar.sizeHint().height() if title_bar else 24)
-                else:
+                    panel.setMaximumHeight(size)
+                elif getattr(panel, "_is_preview", False):
+                    # Preview/visualizer panels (SVG preview, G-code view): bigger is
+                    # always better, so no content cap — and they're first in line for
+                    # any leftover column space instead of the inert spacer below.
+                    title_bar = getattr(panel, "_title_bar", None)
+                    title_h = max(24, title_bar.sizeHint().height() if title_bar else 24)
                     stretch = max(1, int(getattr(panel, "_panel_stretch", 1)))
-                    size = 220 * stretch
+                    size = title_h + 280 * stretch
+                    panel.setMaximumHeight(16777215)
+                    preview_idx = len(sizes)
+                else:
+                    title_bar = getattr(panel, "_title_bar", None)
+                    title_h = max(24, title_bar.sizeHint().height() if title_bar else 24)
+                    content = getattr(panel, "_content_widget", None)
+                    inner = content.widget() if content and hasattr(content, 'widget') else content
+                    content_h = self._natural_content_height(inner) if inner else 200
+                    size = max(80, title_h + content_h + 8)
+                    panel.setMaximumHeight(16777215)
                 sizes.append(size)
                 used += size
             spacer_size = max(1, splitter.height() - used - 12 * max(0, splitter.count() - 1))
+            if preview_idx is not None:
+                sizes[preview_idx] += spacer_size
+                spacer_size = 1
             sizes.append(spacer_size)
             splitter.setSizes(sizes)
+
+        def _repack_all_columns(self):
+            for col in (getattr(self, '_left_col', None), getattr(self, '_middle_col', None), getattr(self, '_right_col', None)):
+                if col is not None:
+                    self._pack_panel_splitter(col)
+
+        _PREVIEW_PANEL_TITLES = {"Print Queue", "G-code Runner"}
 
         def _panel_column(self, panel_specs):
             splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1059,6 +1268,7 @@ if has_display:
             for i, (title, widget, collapsed, stretch) in enumerate(panel_specs):
                 panel = self._panel(title, widget, collapsed)
                 panel._panel_stretch = max(1, int(stretch))
+                panel._is_preview = title in self._PREVIEW_PANEL_TITLES
                 splitter.addWidget(panel)
                 splitter.setStretchFactor(i, panel._panel_stretch)
             spacer = QWidget()
@@ -1090,12 +1300,13 @@ if has_display:
                 ("Connection",       self._scrolled(self._build_connection_panel()), False, 0),
                 ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
-                ("Machine Settings",   self._scrolled(self._build_settings_panel()),   False, 1),
-                ("Signature Settings", self._scrolled(self._build_signature_panel()),  False, 0),
+                ("Machine Settings",   self._scrolled(self._build_settings_panel()),   True, 1),
+                ("Make Tab Settings",  self._scrolled(self._build_make_tab_settings_panel()), True, 1),
             ])
             middle_col = self._panel_column([
                 ("Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
-                ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), False, 1),
+                ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), True,  1),
+                ("Signature Settings", self._scrolled(self._build_signature_panel()),  True, 0),
             ])
             right_col = self._panel_column([
                 ("Print Queue",     self._scrolled(self._build_queue_panel()),  False, 1),
@@ -1103,6 +1314,7 @@ if has_display:
                 ("G-code Runner",   self._scrolled(self._build_gcode_panel()),  False, 2),
             ])
 
+            self._left_col, self._middle_col, self._right_col = left_col, middle_col, right_col
             main_splitter.addWidget(left_col)
             main_splitter.addWidget(middle_col)
             main_splitter.addWidget(right_col)
@@ -1214,7 +1426,8 @@ if has_display:
             view.setPage(page)
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
-            view.page().loadFinished.connect(lambda ok: self._push_signature_config() if ok else None)
+            view.page().loadFinished.connect(
+                lambda ok: (self._push_signature_config(), self._push_pen_width(), self._push_make_tab_settings()) if ok else None)
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -1267,8 +1480,8 @@ if has_display:
         def _build_connection_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
-            layout.setContentsMargins(6, 6, 6, 6)
-            layout.setSpacing(6)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             # Daemon status indicator
             daemon_row = QHBoxLayout()
@@ -1310,18 +1523,100 @@ if has_display:
             row2.addWidget(home_btn)
             row2.addWidget(unlock_btn)
             row2.addWidget(grbl_btn)
-            row2.addStretch()
             layout.addLayout(row2)
+
             layout.addStretch()
 
             # Try connecting to an already-running daemon on startup
             QTimer.singleShot(500, self._try_reconnect_daemon)
             return w
 
+        def _build_make_tab_settings_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
+
+            # Render mode toggle — first in panel
+            self._render_mode = 'fast'
+            self._render_mode_btn = QPushButton('Mode: Show ► (fast hatch)')
+            self._render_mode_btn.setToolTip(
+                'Show Mode: canvas-tile fills, fast for live use\n'
+                'Home Mode: full geometry fills, higher quality'
+            )
+            def _toggle_render_mode():
+                self._render_mode = 'full' if self._render_mode == 'fast' else 'fast'
+                mode = self._render_mode
+                self._render_mode_btn.setText(
+                    'Mode: Show ► (fast hatch)' if mode == 'fast' else 'Mode: Home ■ (full hatch)'
+                )
+                self._make_webview.page().runJavaScript(
+                    f"window._pl0tMode = '{mode}';"
+                    f"if(window.makeSketchApp&&window.makeSketchApp.setRenderMode)"
+                    f"window.makeSketchApp.setRenderMode('{mode}');"
+                )
+            self._render_mode_btn.clicked.connect(_toggle_render_mode)
+            layout.addWidget(self._render_mode_btn)
+
+            layout.addSpacing(8)
+
+            # Paper size
+            paper_row = QHBoxLayout()
+            paper_lbl = QLabel('Paper size:')
+            paper_lbl.setFixedWidth(80)
+            paper_row.addWidget(paper_lbl)
+            self._make_paper_combo = QComboBox()
+            for val, lbl in [('5x7','5 × 7"'), ('9x12','9 × 12"'),
+                              ('11x14','11 × 14"'), ('11x17','11 × 17"'), ('14x17','14 × 17"')]:
+                self._make_paper_combo.addItem(lbl, val)
+            idx = self._make_paper_combo.findData('9x12')
+            if idx >= 0: self._make_paper_combo.setCurrentIndex(idx)
+            self._make_paper_combo.currentIndexChanged.connect(self._push_make_tab_settings)
+            paper_row.addWidget(self._make_paper_combo, 1)
+            layout.addLayout(paper_row)
+
+            # Margin
+            margin_row = QHBoxLayout()
+            margin_lbl = QLabel('Margin:')
+            margin_lbl.setFixedWidth(80)
+            margin_row.addWidget(margin_lbl)
+            self._make_margin_combo = QComboBox()
+            for val, lbl in [('0.5','½ inch'), ('0.75','¾ inch'), ('1','1 inch')]:
+                self._make_margin_combo.addItem(lbl, val)
+            idx = self._make_margin_combo.findData('1')
+            if idx >= 0: self._make_margin_combo.setCurrentIndex(idx)
+            self._make_margin_combo.currentIndexChanged.connect(self._push_make_tab_settings)
+            margin_row.addWidget(self._make_margin_combo, 1)
+            layout.addLayout(margin_row)
+
+            layout.addStretch()
+            return w
+
+        def _push_make_tab_settings(self):
+            """Push paper size, margin and render mode to the active Make tab sketch."""
+            paper  = self._make_paper_combo.currentData()
+            margin = self._make_margin_combo.currentData()
+            mode   = getattr(self, '_render_mode', 'fast')
+            js = (
+                f'try{{'
+                f'if(window.makeSketchApp&&window.makeSketchApp.setRenderMode)'
+                f'window.makeSketchApp.setRenderMode("{mode}");'
+                f'if(window.sketchAPI&&window.sketchAPI.applyParamsSnapshot){{'
+                f'window.sketchAPI.applyParamsSnapshot(['
+                f'{{"id":"paperSize","value":"{paper}"}},'
+                f'{{"id":"margin","value":"{margin}"}}]);'
+                f'}}}}catch(e){{}}'
+            )
+            try:
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
         def _build_jog_panel(self):
             grp = QWidget()
             layout = QVBoxLayout(grp)
-            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             info = QLabel("Tap = step  |  Hold (0.35s) = continuous  |  Shift = rapid")
             info.setStyleSheet("color: blue; font-style: italic;")
@@ -1365,7 +1660,6 @@ if has_display:
             z_row = QHBoxLayout()
             z_row.addWidget(self._jog_btn("↑ +Z", lambda: self.jog_axis("Z",  self._jog_dist())))
             z_row.addWidget(self._jog_btn("↓ -Z", lambda: self.jog_axis("Z", -self._jog_dist())))
-            z_row.addStretch()
             layout.addLayout(z_row)
             layout.addStretch()
             return grp
@@ -1384,7 +1678,8 @@ if has_display:
         def _build_workzero_panel(self):
             grp = QWidget()
             layout = QVBoxLayout(grp)
-            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             hdr = QHBoxLayout()
             hdr.addWidget(QLabel("Active WCS:"))
@@ -1443,7 +1738,6 @@ if has_display:
                 b = QPushButton(label)
                 b.clicked.connect(cmd)
                 travel_row1.addWidget(b)
-            travel_row1.addStretch()
             layout.addLayout(travel_row1)
 
             travel_row2 = QHBoxLayout()
@@ -1451,7 +1745,6 @@ if has_display:
             xy_safe_btn.setToolTip("Raise to safe clearance height, then move to work X0 Y0")
             xy_safe_btn.clicked.connect(self._travel_xy_safe)
             travel_row2.addWidget(xy_safe_btn)
-            travel_row2.addStretch()
             layout.addLayout(travel_row2)
 
             layout.addStretch()
@@ -1460,8 +1753,8 @@ if has_display:
         def _build_settings_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
-            layout.setContentsMargins(6, 6, 6, 6)
-            layout.setSpacing(10)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             def _section(title):
                 lbl = QLabel(title)
@@ -1475,7 +1768,6 @@ if has_display:
                 lbl.setFixedWidth(170)
                 row.addWidget(lbl)
                 edit = QLineEdit(str(getattr(self.config, attr)))
-                edit.setFixedWidth(80)
                 if tooltip:
                     edit.setToolTip(tooltip)
                 def _save(text, a=attr):
@@ -1486,8 +1778,7 @@ if has_display:
                     except ValueError:
                         pass
                 edit.editingFinished.connect(lambda e=edit, a=attr: _save(e.text(), a))
-                row.addWidget(edit)
-                row.addStretch()
+                row.addWidget(edit, 1)
                 layout.addLayout(row)
                 return edit
 
@@ -1500,6 +1791,12 @@ if has_display:
                                            "How high Z rises between strokes inside vpype layer G-code")
             self._cfg_pen_contact = _field("Contact Z (pen on paper) (mm):", "pen_contact_z",
                                            "Z position when the pen is on the paper surface")
+            self._cfg_pen_width   = _field("Pen width (mm):", "pen_width_mm",
+                                           "Nib width — affects fill density and stroke weight in all sketches")
+            self._cfg_pen_width.editingFinished.connect(lambda: self._push_pen_width())
+            self._cfg_pen_width.editingFinished.connect(lambda: self._push_signature_config())
+            self._cfg_travel_speed = _field("Travel speed (mm/min):", "travel_speed",
+                                            "G0 rapid speed — used only for plot-time estimation")
 
             _section("Tool Changes")
             self._cfg_tc_unplug   = _field("Unplug offset (mm):",  "tc_unplug_mm",
@@ -1524,8 +1821,13 @@ if has_display:
                 + 'font:"' + cfg.sig_font + '",'
                 + 'customMsg:"' + cfg.sig_custom_msg.replace('"', '\\"') + '",'
                 + 'heightMm:' + str(cfg.sig_height_mm) + ','
-                + 'yOffsetMm:' + str(cfg.sig_y_offset_mm) + ','
-                + 'hPadMm:' + str(cfg.sig_h_pad_mm)
+                + 'scale:' + str(cfg.sig_scale) + ','
+                + 'fromMarginMm:' + str(cfg.sig_from_margin_mm) + ','
+                + 'hPadMm:' + str(cfg.sig_h_pad_mm) + ','
+                + 'penWidthMm:' + str(cfg.pen_width_mm) + ','
+                + 'logoScale:' + str(cfg.sig_logo_scale) + ','
+                + 'sepScale:' + str(cfg.sig_sep_scale) + ','
+                + 'sepPad:' + str(cfg.sig_sep_pad)
                 + '};'
                 + 'try{if(window.sketchAPI&&window.sketchAPI.redraw)window.sketchAPI.redraw();}catch(e){}'
             )
@@ -1534,15 +1836,31 @@ if has_display:
             except Exception:
                 pass
 
+        def _push_pen_width(self):
+            """Push pen_width_mm and plot-speed globals to the Make tab."""
+            val  = self.config.pen_width_mm
+            ds   = self.config.draw_speed
+            ts   = self.config.travel_speed
+            js = (f'window._pl0tPenWidthMm={val};'
+                  f'window._pl0tDrawSpeed={ds};'
+                  f'window._pl0tTravelSpeed={ts};'
+                  f'try{{if(window.makeSketch&&window.makeSketch.setParam)'
+                  f'window.makeSketch.setParam("penWidthMm",{val});}}catch(e){{}}')
+            try:
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
         def _build_signature_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
-            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(8)
 
-            def _sig_check(label, attr):
+            def _sig_check(label, attr, tip=''):
                 cb = QCheckBox(label)
                 cb.setChecked(bool(getattr(self.config, attr)))
+                if tip: cb.setToolTip(tip)
                 def _toggle(state, a=attr):
                     setattr(self.config, a, bool(state))
                     save_config(self.config)
@@ -1551,13 +1869,14 @@ if has_display:
                 layout.addWidget(cb)
                 return cb
 
-            def _sig_field(label, attr, w_px=70):
+            def _sig_field(label, attr, w_px=70, tip=''):
                 row = QHBoxLayout()
                 lbl = QLabel(label)
                 lbl.setFixedWidth(160)
+                if tip: lbl.setToolTip(tip)
                 row.addWidget(lbl)
                 edit = QLineEdit(str(getattr(self.config, attr)))
-                edit.setFixedWidth(w_px)
+                if tip: edit.setToolTip(tip)
                 def _save(a=attr, e=edit):
                     try:
                         setattr(self.config, a, float(e.text()))
@@ -1566,15 +1885,14 @@ if has_display:
                     except ValueError:
                         pass
                 edit.editingFinished.connect(_save)
-                row.addWidget(edit)
-                row.addStretch()
+                row.addWidget(edit, 1)
                 layout.addLayout(row)
                 return edit
 
-            self._sig_enabled_cb  = _sig_check('Enable signature',          'sig_enabled')
-            self._sig_preview_cb  = _sig_check('Show preview on canvas',    'sig_show_preview')
-            self._sig_suppress_cb = _sig_check('Suppress from SVG export',  'sig_suppress_export')
-            self._sig_logo_cb     = _sig_check('Include 90% logo',          'sig_show_logo')
+            self._sig_enabled_cb  = _sig_check('Enable signature',          'sig_enabled',  tip='Draw an attribution band at the bottom of every sketch')
+            self._sig_preview_cb  = _sig_check('Show preview on canvas',    'sig_show_preview', tip='Render the band in the Make tab canvas (does not affect SVG export)')
+            self._sig_suppress_cb = _sig_check('Suppress from SVG export',  'sig_suppress_export', tip='Omit the signature band from SVG files sent to the plotter')
+            self._sig_logo_cb     = _sig_check('Include 90% logo',          'sig_show_logo',  tip='Add the 90percent art logo flush with the right margin')
 
             # Font selector
             font_row = QHBoxLayout()
@@ -1594,9 +1912,13 @@ if has_display:
             layout.addLayout(font_row)
 
             # Numeric fields
-            self._sig_height_edit   = _sig_field('Text height (mm):',        'sig_height_mm')
-            self._sig_yoffset_edit  = _sig_field('Y offset from center (mm):','sig_y_offset_mm')
-            self._sig_hpad_edit     = _sig_field('H padding (mm):',           'sig_h_pad_mm')
+            self._sig_height_edit   = _sig_field('Text height (mm):',        'sig_height_mm',  tip='Height of the signature text in mm (e.g. 2.0)')
+            self._sig_scale_edit    = _sig_field('Scale:',                   'sig_scale',      tip='Multiplies text height — scale the whole band up/down without changing the mm value')
+            self._sig_frombottom_edit = _sig_field('Offset into margin (mm):', 'sig_from_margin_mm', tip='Distance from the art/margin boundary downward into the margin. 0 = text flush with art edge. Leave at -1 to auto-center within whatever margin you have set.')
+            self._sig_hpad_edit     = _sig_field('Band padding (mm):',        'sig_h_pad_mm',   tip='Pulls the text and logo inward from the margin edges on both sides of the signature band')
+            self._sig_logo_scale_edit = _sig_field('Logo scale:',              'sig_logo_scale', tip='Scale the 90% logo independently from the text (1.0 = same height as text)')
+            self._sig_sep_scale_edit  = _sig_field('Separator scale:',          'sig_sep_scale',  tip='Makes | dividers taller than the text — 1.3 = 30% taller')
+            self._sig_sep_pad_edit    = _sig_field('Separator padding (em):',    'sig_sep_pad',    tip='Gap on each side of | in multiples of text height (1 em = 1x text height). Increase to spread text away from the | dividers equally on both sides.')
 
             # Custom message (full-width)
             msg_lbl = QLabel('Custom message:')
@@ -1713,12 +2035,13 @@ if has_display:
         def _build_testpen_panel(self):
             container = QWidget()
             vl = QVBoxLayout(container)
-            vl.setContentsMargins(6, 6, 6, 6)
-            vl.setSpacing(4)
+            vl.setContentsMargins(8, 8, 8, 8)
+            vl.setSpacing(8)
 
             fields_widget = QWidget()
             layout = QGridLayout(fields_widget)
             layout.setContentsMargins(0, 0, 0, 0)
+            layout.setColumnStretch(1, 1)
             fields = [
                 ("Number of pens to cycle:", "testpen_count_edit",    "3"),
                 ("Number of cycles:",        "testpen_cycles_edit",   "5"),
@@ -1733,6 +2056,7 @@ if has_display:
                 edit = QLineEdit(default)
                 setattr(self, attr, edit)
                 layout.addWidget(edit, row, 1)
+                edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             gen = QPushButton("Generate Test G-code")
             gen.clicked.connect(self.generate_testpen_gcode)
             layout.addWidget(gen, len(fields), 0, 1, 2)
@@ -1744,7 +2068,8 @@ if has_display:
         def _build_vpype_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
-            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             svg_row = QHBoxLayout()
             svg_row.addWidget(QLabel("SVG:"))
@@ -1812,13 +2137,17 @@ if has_display:
             gen_btn.clicked.connect(self.run_vpype)
             simp_row.addWidget(gen_btn)
             layout.addLayout(simp_row)
+            self._est_lbl = QLabel("")
+            self._est_lbl.setStyleSheet("color: #888; font-size: 11px; padding: 2px 0;")
+            layout.addWidget(self._est_lbl)
             layout.addStretch()
             return w
 
         def _build_gcode_panel(self):
             w = QWidget()
             layout = QVBoxLayout(w)
-            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
 
             file_row = QHBoxLayout()
             file_row.addWidget(QLabel("File:"))
@@ -2032,6 +2361,19 @@ if has_display:
             self.signals.gcode_done.emit()
             self.signals.update_banner.emit("● Plot complete — machine idle")
             QTimer.singleShot(5000, lambda: self.signals.update_banner.emit(""))
+            _pending = getattr(self, "_queue_pending_done", None)
+            if _pending:
+                self._queue_pending_done = None
+                _jid, _burl, _key = _pending
+                def _inc_count():
+                    try:
+                        self._queue_http(f"/jobs/{_jid}/status",
+                                         "PATCH", {"increment_plot_count": True},
+                                         base_url=_burl, key=_key)
+                    except Exception:
+                        pass
+                import threading as _t
+                _t.Thread(target=_inc_count, daemon=True).start()
 
         def _on_daemon_gcode_error(self, line_num: int, line: str, msg: str):
             self.signals.show_error.emit(
@@ -2218,6 +2560,7 @@ if has_display:
             self._daemon_status_label.setText(txt)
             self._daemon_status_label.setStyleSheet(f"color: {col}; font-size: 11px;")
             self._daemon_stop_btn.setVisible(alive)
+            QTimer.singleShot(0, self._repack_all_columns)
 
         def _stop_daemon(self):
             if QMessageBox.question(self, "Stop Daemon",
@@ -2699,8 +3042,7 @@ if has_display:
                 ]:
                     b = QPushButton(text)
                     b.clicked.connect(fn)
-                    rl.addWidget(b)
-                rl.addStretch()
+                    rl.addWidget(b, 1)
                 self.pen_buttons_layout.addWidget(row)
 
         def _pen_speeds(self):
@@ -2864,13 +3206,18 @@ if has_display:
                 return None
 
             def layer_dominant_color(group):
-                for child in group.iter():
-                    tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                def _find(el, inh=""):
+                    c = elem_color(el) or inh
+                    tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
                     if tag in ("path", "line", "polyline", "polygon", "circle", "ellipse"):
-                        c = elem_color(child)
-                        if c:
-                            return c
-                return None
+                        return c if c else None
+                    child_inh = elem_color(el) or inh
+                    for child in el:
+                        result = _find(child, child_inh)
+                        if result:
+                            return result
+                    return None
+                return _find(group)
 
             layers = []
             try:
@@ -2884,13 +3231,28 @@ if has_display:
                         layers.append({"label": label, "color": layer_dominant_color(g)})
                 else:
                     seen = []
-                    for el in root.iter():
+                    def _collect(el, inh=""):
+                        c = elem_color(el) or inh
                         tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
                         if tag in ("path", "line", "polyline", "polygon", "circle", "ellipse"):
-                            c = elem_color(el)
-                            if c and c not in seen:
+                            if c and c not in seen and c.lower() not in _SKIP:
                                 seen.append(c)
                                 layers.append({"label": c, "color": c})
+                        else:
+                            child_inh = elem_color(el) or inh
+                            for child in el:
+                                _collect(child, child_inh)
+                    for child in root:
+                        _collect(child)
+                # Relabel the signature layer if the SVG has id="signature"
+                sig_el = next((el for el in root.iter() if el.get('id') == 'signature'), None)
+                if sig_el is not None:
+                    sig_color = layer_dominant_color(sig_el)
+                    if sig_color:
+                        for layer in layers:
+                            if layer.get('color', '').lower() == sig_color.lower():
+                                layer['label'] = 'Signature Layer'
+                                break
             except Exception:
                 pass
             return layers
@@ -3021,18 +3383,20 @@ if has_display:
                 new_root = ET.Element(root.tag, root.attrib)
                 found = False
 
-                def filtered_copy(el):
+                def filtered_copy(el, inherited=""):
                     nonlocal found
                     raw_tag = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+                    el_stroke = stroke_of(el) or inherited
                     if raw_tag in DRAW_TAGS:
-                        if stroke_of(el) == target:
+                        if el_stroke == target:
                             found = True
                             return copy.deepcopy(el)
                         return None
                     if raw_tag == "g":
+                        child_inh = stroke_of(el) or inherited
                         new_g = ET.Element(el.tag, el.attrib)
                         for child in el:
-                            copied = filtered_copy(child)
+                            copied = filtered_copy(child, child_inh)
                             if copied is not None:
                                 new_g.append(copied)
                         return new_g if len(new_g) else None
@@ -3224,6 +3588,17 @@ if has_display:
             layers = self._parse_svg_layers(path)
             self._svg_layers = layers
             self._update_svg_layer_display(layers)
+            try:
+                _svg_text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+                _est_s = _estimate_svg_time(_svg_text,
+                                            self.config.draw_speed,
+                                            self.config.travel_speed)
+                _est_str = _fmt_duration(_est_s) if _est_s > 0 else ""
+                lbl = getattr(self, "_est_lbl", None)
+                if lbl is not None:
+                    lbl.setText(f"Est. plot time: {_est_str}" if _est_str else "")
+            except Exception:
+                pass
 
         def browse_vpype_config(self):
             pass   # config path is now in Machine Settings
@@ -3302,30 +3677,38 @@ if has_display:
                         f"G53 G0 Z{safe_z:.3f}",
                         f"G1 F{self.config.draw_speed}",
                     ]
-                    n_layers = len(matched)
                     err_out = []
+                    # pre-filter: only layers with actual drawable paths
+                    active_layers = []
                     for i, (layer, tool) in enumerate(matched):
                         color = layer.get("color", "")
+                        pre_svg = os.path.join(tmp_dir, f"layer_{i}.svg")
+                        if self._split_svg_by_color(svg_path, color, pre_svg):
+                            active_layers.append((layer, tool, pre_svg, i))
+                        else:
+                            final_lines.append(f"; layer {i+1} ({color}) skipped — no drawable paths")
+                    if not active_layers:
+                        result[0] = ("err", "No drawable layers found in SVG")
+                        return
+                    n_layers = len(active_layers)
+                    for j, (layer, tool, pre_svg, orig_i) in enumerate(active_layers):
+                        color = layer.get("color", "")
                         label = layer.get("label", color)
-                        tmp_svg   = os.path.join(tmp_dir, f"layer_{i}.svg")
-                        tmp_gcode = os.path.join(tmp_dir, f"layer_{i}.gcode")
-                        if not self._split_svg_by_color(svg_path, color, tmp_svg):
-                            result[0] = ("err", f"No elements found for color {color} ({label})")
-                            return
+                        tmp_gcode = os.path.join(tmp_dir, f"layer_{orig_i}.gcode")
                         err_out.clear()
-                        if not self._run_vpype_cmd(tmp_svg, layer_cfg, "pl0tb0t_layer",
+                        if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                    tmp_gcode, silent=True, _err_out=err_out):
                             msg = err_out[0] if err_out else "vpype failed"
                             result[0] = ("err", f"vpype failed for layer {label}: {msg}")
                             return
-                        is_last = (i == n_layers - 1)
-                        final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
+                        is_last = (j == n_layers - 1)
+                        final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
                         first_xy = self._first_draw_xy(tmp_gcode)
                         if first_xy:
                             final_lines.append("; pre-position over drawing start at safe height")
                             final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
                         final_lines.append(
-                            f"; --- Layer {i+1}: {tool.name} holder - {label} ({color}) ---")
+                            f"; --- Layer {j+1}: {tool.name} holder - {label} ({color}) ---")
                         with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
                             for ln in f:
                                 ln = ln.strip()
@@ -3386,8 +3769,8 @@ if has_display:
             # ── Left side: controls + card list ──────────────────────────────
             w = QWidget()
             lay = QVBoxLayout(w)
-            lay.setContentsMargins(8, 8, 4, 8)
-            lay.setSpacing(6)
+            lay.setContentsMargins(8, 8, 8, 8)
+            lay.setSpacing(8)
             splitter.addWidget(w)
 
             # ── Right side: SVG preview ───────────────────────────────────────
@@ -3396,8 +3779,8 @@ if has_display:
             preview_container.setStyleSheet(
                 "background:#f8f8f8;border-left:1px solid #ddd;")
             prev_lay = QVBoxLayout(preview_container)
-            prev_lay.setContentsMargins(6, 6, 6, 6)
-            prev_lay.setSpacing(4)
+            prev_lay.setContentsMargins(8, 8, 8, 8)
+            prev_lay.setSpacing(8)
 
             self._queue_svg_widget = AspectSvgPreviewWidget()
             self._queue_svg_widget.setSizePolicy(
@@ -3411,8 +3794,9 @@ if has_display:
             prev_lay.addWidget(self._queue_preview_lbl)
 
             splitter.addWidget(preview_container)
-            splitter.setStretchFactor(0, 3)
-            splitter.setStretchFactor(1, 2)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 1)
+            splitter.setSizes([10000, 10000])
 
             self._queue_preview_cache = {}   # job_id → svg bytes
 
@@ -3938,6 +4322,12 @@ if has_display:
             import pathlib, threading
             fname = pathlib.Path(path).stem
             svg_text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+            try:
+                _est_s = _estimate_svg_time(svg_text,
+                                            self.config.draw_speed,
+                                            self.config.travel_speed)
+            except Exception:
+                _est_s = 0.0
             base_url, key = self._queue_server_params()
             def _post():
                 try:
@@ -3947,6 +4337,7 @@ if has_display:
                         "sketch_name": fname,
                         "paper_size": "8.5x11",
                         "orientation": "portrait",
+                        "est_time_s": round(_est_s),
                     }).encode()
                     headers = {
                         "User-Agent": f"pl0tb0t-OS/{__version__}",
@@ -4124,6 +4515,35 @@ if has_display:
             _debug_log("about to start thread")
             threading.Thread(target=_fetch, daemon=True).start()
 
+        def _get_queue_sig_svg(self, edition: int) -> str:
+            """Generate a fresh signature SVG fragment via the webview (main thread)."""
+            from PyQt6.QtCore import QEventLoop
+            result = ['']
+            loop = QEventLoop()
+            js = (
+                '(function(ed){'
+                'try{'
+                '  var cfg=window._signatureConfig;'
+                '  if(!cfg||!cfg.enabled)return "";'
+                '  if(!window.makeSketchApp||!window.makeSketchApp.getSignatureSvgForQueue)return "";'
+                '  var prev=cfg._editionOverride;'
+                '  cfg._editionOverride=ed;'
+                '  var r=window.makeSketchApp.getSignatureSvgForQueue(null)||"";'
+                '  cfg._editionOverride=prev;'
+                '  return r;'
+                '}catch(e){return "";}'
+                f'}})({edition})'
+            )
+            def _cb(val):
+                result[0] = val or ''
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                pass
+            return result[0]
+
         def _queue_on_pen_assign(self, ctx):
             import threading, tempfile, pathlib, shutil
             job_id   = ctx["job_id"]
@@ -4148,6 +4568,9 @@ if has_display:
                     color_to_tool[color] = tool
                     assignments.append((layer, tool))
                     tool_idx += 1
+                elif self.tools:
+                    # overflow: bundle with darkest assigned tool (last slot)
+                    assignments.append((layer, self.tools[tool_idx - 1]))
 
             if assignments:
                 colors_exceed = len(assignments) < len(ordered)
@@ -4176,6 +4599,11 @@ if has_display:
             threading.Thread(target=_mark_plotting, daemon=True).start()
             self._queue_status_lbl.setText(f"Processing {job_id}\u2026")
 
+            # Generate fresh signature SVG with correct edition number (main thread)
+            _edition = int((job or {}).get("plot_count", 0)) + 1
+            _sig_svg = self._get_queue_sig_svg(_edition)
+            self._queue_pending_done = (job_id, base_url, key)
+
             # \u2500\u2500 Multi-color: per-layer vpype + tool changes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
             if assignments:
                 self.signals.update_banner.emit("● Plotting… generating gcode via vpype")
@@ -4190,6 +4618,30 @@ if has_display:
                 def _generate():
                     gen_tmp = pathlib.Path(tempfile.mkdtemp(prefix="pl0tb0t_"))
                     try:
+                        def _strip_sig(s):
+                            m = 'id="signature"'
+                            if m not in s: return s
+                            idx = s.find(m)
+                            g0 = s.rfind('<g', 0, idx)
+                            if g0 == -1: return s
+                            depth, i, n = 0, g0, len(s)
+                            while i < n:
+                                if s[i:i+2] == '<g' and (i+2 >= n or s[i+2] in ' \t\n\r>'):
+                                    depth += 1; i += 2
+                                elif s[i:i+4] == '</g>':
+                                    depth -= 1
+                                    if depth == 0: return s[:g0] + s[i+4:]
+                                    i += 4
+                                else: i += 1
+                            return s
+                        _svg_str = pathlib.Path(svg_path).read_text(encoding='utf-8')
+                        _svg_str = _strip_sig(_svg_str)
+                        if _sig_svg:
+                            _svg_str = _svg_str.rstrip()
+                            if _svg_str.endswith('</svg>'):
+                                _svg_str = _svg_str[:-6] + _sig_svg + '\n</svg>'
+                        pathlib.Path(svg_path).write_text(_svg_str, encoding='utf-8')
+
                         layer_cfg = str(gen_tmp / "layer.cfg")
                         safe_z = assignments[0][1].safe_z
                         self._write_layer_vpype_config(layer_cfg, safe_z=safe_z)
@@ -4200,29 +4652,37 @@ if has_display:
                             f"G53 G0 Z{safe_z:.3f}",
                             f"G1 F{self.config.draw_speed}",
                         ]
-                        n_layers = len(assignments)
                         err_out = []
+                        # pre-filter: only layers with actual drawable paths
+                        active_layers = []
                         for i, (layer, tool) in enumerate(assignments):
+                            color = layer.get("color", "")
+                            pre_svg = str(gen_tmp / f"layer_{i}.svg")
+                            if self._split_svg_by_color(svg_path, color, pre_svg):
+                                active_layers.append((layer, tool, pre_svg, i))
+                            else:
+                                final_lines.append(f"; layer {i+1} ({color}) skipped — no drawable paths")
+                        if not active_layers:
+                            result[0] = ("err", "No drawable layers found in SVG")
+                            return
+                        n_layers = len(active_layers)
+                        for j, (layer, tool, pre_svg, orig_i) in enumerate(active_layers):
                             color  = layer.get("color", "")
                             label  = layer.get("label", color)
-                            l_svg   = str(gen_tmp / f"layer_{i}.svg")
-                            l_gcode = str(gen_tmp / f"layer_{i}.gcode")
-                            if not self._split_svg_by_color(svg_path, color, l_svg):
-                                result[0] = ("err", f"No elements for color {color} ({label})")
-                                return
+                            l_gcode = str(gen_tmp / f"layer_{orig_i}.gcode")
                             err_out.clear()
-                            if not self._run_vpype_cmd(l_svg, layer_cfg, "pl0tb0t_layer",
+                            if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                        l_gcode, silent=True, _err_out=err_out):
                                 msg = err_out[0] if err_out else "vpype failed"
                                 result[0] = ("err", f"vpype failed for {label}: {msg}")
                                 return
-                            is_last = (i == n_layers - 1)
-                            final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(i > 0)))
+                            is_last = (j == n_layers - 1)
+                            final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
                             first_xy = self._first_draw_xy(l_gcode)
                             if first_xy:
                                 final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
                             final_lines.append(
-                                f"; --- Layer {i+1}: {tool.name} - {label} ({color}) ---")
+                                f"; --- Layer {j+1}: {tool.name} - {label} ({color}) ---")
                             with open(l_gcode, "r", encoding="utf-8", errors="ignore") as f:
                                 for ln in f:
                                     ln = ln.strip()
@@ -4269,7 +4729,9 @@ if has_display:
                     self.signals.update_banner.emit("● Plotting… sending to machine")
                     self.load_gcode_file(str(gcode_path),
                                          artboard_mm=self._svg_page_mm(svg_path))
+                    _debug_log(f"_check: gcode={gcode_path} exists={gcode_path.exists()} port={self.port} running={self.gcode_running}")
                     if self.port and gcode_path.exists():
+                        _debug_log("_check: emitting __q_autorun__")
                         self.signals.update_status.emit("__q_autorun__")
                     else:
                         self.signals.show_info.emit(
@@ -4307,6 +4769,26 @@ if has_display:
                     )
                     if _sp.call(cmd, shell=True) != 0:
                         raise RuntimeError("vpype returned non-zero exit code")
+                    if self.tools and gcode_path.exists():
+                        tool = self.tools[0]
+                        raw_lines = pathlib.Path(gcode_path).read_text(encoding='utf-8', errors='ignore').splitlines()
+                        body = [ln for ln in raw_lines if ln.strip()]
+                        wrapped = [
+                            "; Pl0tb0t single-pass plot — auto tool pickup",
+                            "G21 G90",
+                            f"G53 G0 Z{tool.safe_z:.3f}",
+                            f"G1 F{self.config.draw_speed}",
+                        ]
+                        wrapped.extend(self._tool_pickup_gcode(tool, from_drop=False))
+                        wrapped.extend(body)
+                        wrapped.extend(self._tool_drop_gcode(tool, chain_next=False))
+                        wrapped += [
+                            "; === END ===",
+                            f"G53 G0 Z{tool.safe_z:.3f}",
+                            "G53 G0 X-300.000 Y-200.000",
+                            "M2",
+                        ]
+                        pathlib.Path(gcode_path).write_text('\n'.join(wrapped) + '\n', encoding='utf-8')
                     if self.port and gcode_path.exists():
                         self.gcode_path = str(gcode_path)
                         self.signals.update_status.emit("__q_autorun__")
@@ -4469,6 +4951,20 @@ if has_display:
             self._load_gcode_lines(file_path)
             self.parse_gcode_for_preview(file_path, artboard_mm=artboard_mm)
             self.refresh_gcode_viewer()
+            try:
+                _gc_text = pathlib.Path(file_path).read_text(encoding="utf-8", errors="ignore")
+                _est_s = _estimate_gcode_time(_gc_text,
+                                              self.config.draw_speed,
+                                              self.config.travel_speed)
+                self._gcode_est_s = _est_s
+                _est_str = _fmt_duration(_est_s) if _est_s > 0 else ""
+                if _est_str:
+                    self.gcode_run_btn.setText(f"\u25b6 Run  ·  {_est_str}")
+                    self.gcode_status_label.setText(f"Loaded · est. {_est_str}")
+                else:
+                    self.gcode_run_btn.setText("\u25b6 Run")
+            except Exception:
+                pass
 
         def _load_gcode_lines(self, file_path: str):
             self.gcode_lines = []
@@ -4656,6 +5152,7 @@ if has_display:
                 self.gcode_status_label.setText(f"Failed to load: {e}")
 
         def run_gcode(self):
+            _debug_log(f"run_gcode: port={self.port} path={self.gcode_path} running={self.gcode_running}")
             if not self.port:
                 QMessageBox.critical(self, "Error", "Not connected!"); return
             if not self.gcode_path:
@@ -4711,7 +5208,9 @@ if has_display:
                                 continue
                             line = self._apply_feed_override(line)
                             f_tmp.write(line + "\n")
-                    result = self._daemon.stream(self._gcode_tmp_path)
+                    _debug_log(f"runner: streaming {self._gcode_tmp_path}")
+                    result = self._daemon.stream(self._gcode_tmp_path, est_s=getattr(self, "_gcode_est_s", 0))
+                    _debug_log(f"runner: stream result={result}")
                     if not result.get("ok"):
                         self.signals.show_error.emit("Stream Error", result.get("error", "?"))
                         self.gcode_running = False
@@ -4934,6 +5433,25 @@ def main():
                 os.environ["QT_QPA_PLATFORM"] = "xcb"
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
+        app.setStyleSheet("""
+            QPushButton {
+                padding: 4px 10px;
+                min-height: 22px;
+                border: 1px solid #bbb;
+                border-radius: 4px;
+                background: #f7f7f7;
+            }
+            QPushButton:hover { background: #ececec; }
+            QPushButton:pressed { background: #dcdcdc; }
+            QPushButton:disabled { color: #999; background: #f0f0f0; }
+            QLineEdit, QComboBox {
+                padding: 3px 6px;
+                min-height: 20px;
+                border: 1px solid #bbb;
+                border-radius: 4px;
+            }
+            QComboBox::drop-down { border: none; width: 18px; }
+        """)
         window = PlotterApp()
         window.show()
         sys.exit(app.exec())
