@@ -83,7 +83,11 @@
             params: allParams,
             hasPause: false,
             stylePresets: (entry.stylePresets || []),
-            setParam: function (id, val) { paramState[id] = val; },
+            hideGlobalScatter: true,
+            setParam: function (id, val) {
+                if (typeof val === 'string' && val.charAt(0) === '[') { try { var a = JSON.parse(val); if (Array.isArray(a)) val = a; } catch (e) {} }
+                paramState[id] = val;
+            },
             getParamsSnapshot: function () {
                 return allParams.map(function (pd) { return { id: pd.id, value: paramState[pd.id] }; });
             },

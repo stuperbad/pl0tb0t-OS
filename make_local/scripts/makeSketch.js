@@ -466,7 +466,7 @@
                         value:'off', group:'textures', showModeHidden:true,
                         options:[{value:'off',label:'Off (connected)'},{value:'on',label:'On (lift pen)'}] }]);
                 }
-                if (params && !params.some(function(p){return p.id==='scatterFill';})) {
+                if (params && !params.some(function(p){return p.id==='scatterFill';}) && !(registeredApi && registeredApi.hideGlobalScatter)) {
                     params = params.concat([{ id:'scatterFill', label:'Scatter fills', type:'select', multiSelect:true, value:[], group:'textures', showModeHidden:true,
                         options:[{value:'sprigFill',label:'Scatter sprig'},{value:'ribbonFill',label:'Scatter ribbon'},{value:'crossFill',label:'Scatter cross'},{value:'asteriskFill',label:'Scatter asterisk'}] }]);
                 }
