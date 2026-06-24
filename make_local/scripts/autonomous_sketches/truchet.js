@@ -7,6 +7,7 @@
  */
 (function () {
     var paper = window.makeSketchUtils;
+    var fills = window.plotFills;
 
     function makeRng(seed) {
         var s = (seed >>> 0) || 1;
@@ -22,16 +23,18 @@
     ];
 
     var PRESETS = {
-        maze:      { palette: ['#1a1a1a'], bgColor: '#f5f0e8', cellSize: 7,  curviness: 'arcs' },
-        circuit:   { palette: ['#1b9e5a'], bgColor: '#0d1b2a', cellSize: 9,  curviness: 'mixed' },
-        linen:     { palette: ['#2d2416'], bgColor: '#faf6ef', cellSize: 13, curviness: 'diagonals' },
-        blueprint: { palette: ['#2a6fb0'], bgColor: '#0f2044', cellSize: 8,  curviness: 'arcs' }
+        maze:      { palette: ['#1a1a1a'], cellSize: 7,  curviness: 'arcs' },
+        circuit:   { palette: ['#1b9e5a'], cellSize: 9,  curviness: 'mixed' },
+        linen:     { palette: ['#2d2416'], cellSize: 13, curviness: 'diagonals' },
+        blueprint: { palette: ['#2a6fb0'], cellSize: 8,  curviness: 'arcs' }
     };
 
     var params = [
         { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6, group: 'color',
           value: ['#1a1a1a'], options: STD_PAL },
-        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'color' },
+        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'advanced' },
+        { id: 'fillStyle', label: 'Cell fills', type: 'select', multiSelect: true, value: [], group: 'general',
+          options: window.plotFills.FILL_STYLE_OPTIONS },
         { id: 'colorMode', label: 'Color mode', type: 'select', value: 'single', group: 'color',
           options: [{ value: 'single', label: 'Single' }, { value: 'random', label: 'Random' }, { value: 'checker', label: 'Checker' }] },
         { id: 'cellSize',   label: 'Tile size (mm)', type: 'range', min: 4, max: 20, step: 1, value: 9, group: 'general' },
@@ -61,6 +64,10 @@
 
         var palette = (Array.isArray(P.palette) && P.palette.length) ? P.palette : ['#1a1a1a'];
         var bg = P.bgColor || '#ffffff';
+        var fillStyles = (Array.isArray(P.fillStyle) ? P.fillStyle : (P.fillStyle ? [P.fillStyle] : [])).filter(function (x) { return x && x !== 'none'; });
+        var fillSpacing = (paper.DPI / 25.4) / Math.max(0.2, fills.getEffectiveDensity());
+        var fillProb = fills.getFillProb();
+        var fillAngle = fills.getFillAngle();
         var bias = Math.max(0, Math.min(1, Number(P.biasSplit) / 100));
 
         var drawW = W - 2 * mp, drawH = H - 2 * mp;
@@ -114,6 +121,13 @@
                           ' A ' + R.toFixed(2) + ' ' + R.toFixed(2) + ' 0 0 1 ' + rgtX.toFixed(2) + ' ' + rgtY.toFixed(2);
                 }
 
+                if (fillStyles.length && rng() < fillProb) {
+                    var cellPoly = [{ x: cx, y: cy }, { x: cx + cellPx, y: cy }, { x: cx + cellPx, y: cy + cellPx }, { x: cx, y: cy + cellPx }];
+                    var fSeed = (seed ^ (row * 73856093) ^ (col * 19349663)) >>> 0;
+                    fills.fillPolyMultiD(cellPoly, fillStyles, fillAngle, fillSpacing, fSeed).forEach(function (fd) {
+                        parts.push('<path d="' + fd + '" fill="none" stroke="' + color + '" stroke-width="' + sw.toFixed(2) + '" stroke-linecap="round"/>');
+                    });
+                }
                 parts.push('<path d="' + d + '" fill="none" stroke="' + color +
                     '" stroke-width="' + sw.toFixed(2) + '" stroke-linecap="round"/>');
             }

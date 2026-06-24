@@ -919,6 +919,16 @@ window.plotFills = (function () {
         return d;
     }
 
+    // Fill a polygon with ONE style chosen (by seed) from a list of allowed
+    // styles — for sketches that let several fills be toggled on at once.
+    function fillPolyMultiD(poly, styles, angleDeg, spacing, seed) {
+        var arr = Array.isArray(styles) ? styles : (styles ? [styles] : []);
+        arr = arr.filter(function (x) { return x && x !== 'none' && x !== 'plain'; });
+        if (!arr.length) return [];
+        var idx = Math.abs(seed || 0) % arr.length;
+        return fillPolyD(poly, arr[idx], angleDeg, spacing, seed);
+    }
+
     // Fill one polygon with any shared style. Returns an array of SVG path-d
     // strings (crosshatch/cross styles return two). Honors global Stroke
     // imperfection. 'none' returns []. style defaults to 'hatch'.
@@ -989,6 +999,7 @@ window.plotFills = (function () {
         drawSquiggleSeparate:   drawSquiggleSeparate,
         connectedPathD:         connectedPathD,
         fillPolyD:              fillPolyD,
+        fillPolyMultiD:         fillPolyMultiD,
         FILL_STYLE_OPTIONS:     FILL_STYLE_OPTIONS,
         drawConnectedRows:      drawConnectedRows,
         drawSeparateRows:       drawSeparateRows,

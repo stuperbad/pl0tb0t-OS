@@ -54,25 +54,23 @@
     var FILL_CYCLE = ['hatch', 'squiggle', 'zigzag', 'crosshatch', 'waves'];
 
     var PRESETS = {
-        earth:  { palette: ['#2c1810', '#5c3317', '#8b4513', '#a0522d', '#c8a26b'], bgColor: '#f5f0eb' },
-        ocean:  { palette: ['#0a1628', '#1a3a5c', '#1e6091', '#2980b9', '#5dade2'], bgColor: '#eef6fb' },
-        fire:   { palette: ['#4d0000', '#8b0000', '#cc2200', '#ff4500', '#ff8c00'], bgColor: '#fff6ee' },
-        slate:  { palette: ['#1c1c2e', '#3d3d5c', '#52527a', '#7070a0', '#9898c0'], bgColor: '#f3f3f8' },
-        forest: { palette: ['#0b1a0b', '#2d5a2d', '#3d7a3d', '#5a9e5a', '#7abc7a'], bgColor: '#f0f5f0' }
+        earth:  { palette: ['#2c1810', '#5c3317', '#8b4513', '#a0522d', '#c8a26b'] },
+        ocean:  { palette: ['#0a1628', '#1a3a5c', '#1e6091', '#2980b9', '#5dade2'] },
+        fire:   { palette: ['#4d0000', '#8b0000', '#cc2200', '#ff4500', '#ff8c00'] },
+        slate:  { palette: ['#1c1c2e', '#3d3d5c', '#52527a', '#7070a0', '#9898c0'] },
+        forest: { palette: ['#0b1a0b', '#2d5a2d', '#3d7a3d', '#5a9e5a', '#7abc7a'] }
     };
 
     var params = [
         { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6, group: 'color',
           value: ['#2c1810', '#5c3317', '#8b4513', '#a0522d', '#c8a26b'], options: STD_PAL },
-        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'color' },
+        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'advanced' },
         { id: 'layers',    label: 'Layers',        type: 'range', min: 3, max: 12, step: 1, value: 6,  group: 'general' },
         { id: 'roughness', label: 'Edge roughness', type: 'range', min: 0, max: 100, step: 5, value: 50, group: 'general' },
         { id: 'waviness',  label: 'Waviness',       type: 'range', min: 0, max: 100, step: 5, value: 40, group: 'general' },
         { id: 'hatchAngle', label: 'Hatch angle',   type: 'range', min: -90, max: 90, step: 5, value: 30, group: 'general' },
-        { id: 'fillStyle', label: 'Fill style', type: 'select', value: 'mixed', group: 'general',
-          options: [{ value: 'mixed', label: 'Mixed' }, { value: 'hatch', label: 'Hatch' },
-                    { value: 'squiggle', label: 'Squiggle' }, { value: 'zigzag', label: 'Zigzag' },
-                    { value: 'crosshatch', label: 'Cross' }, { value: 'waves', label: 'Waves' }] },
+        { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'general',
+          options: window.plotFills.FILL_STYLE_OPTIONS },
         { id: 'alternate', label: 'Alternate angle', type: 'select', value: 'on', group: 'general',
           options: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }] },
         { id: 'border', label: 'Border', type: 'select', value: 'on', group: 'general',
@@ -149,7 +147,6 @@
         for (var li = 0; li < nLayers; li++) {
             var poly = layerPoly(li);
             var color = palette[li % palette.length];
-            var fStyle = (P.fillStyle === 'mixed') ? FILL_CYCLE[li % FILL_CYCLE.length] : P.fillStyle;
             var sign = (P.alternate === 'on') ? (li % 2 === 0 ? 1 : -1) : 1;
             var angle = sign * Number(P.hatchAngle) + globalAngle + (rng() * 16 - 8);
 
@@ -158,31 +155,7 @@
                 '" stroke-width="' + sw.toFixed(2) + '" stroke-linejoin="round"/>');
 
             if (rng() > fillProb) continue;
-
-            if (scatter && scatter.length) {
-                var st = scatter[li % scatter.length].replace('Fill', '');
-                emit(segsToPath(fills.scatterPolyFill(poly, st, spacing * 1.4, 1.0, (seed ^ (li * 0x9e3779b1)) >>> 0)), color);
-                continue;
-            }
-
-            if (fStyle === 'crosshatch') {
-                var r1 = fills.hatchPolyRows(poly, angle, spacing);
-                var r2 = fills.hatchPolyRows(poly, angle + 90, spacing);
-                if (imperfection > 0) { r1 = fills.sketchHatchRows(r1, li * 1.3, spacing * imperfection * 0.6); }
-                emit(fills.connectedPathD(r1), color);
-                emit(fills.connectedPathD(r2), color);
-            } else if (fStyle === 'squiggle') {
-                var rows = fills.hatchPolyRows(poly, angle, spacing);
-                emit(fills.connectedPathD(fills.squiggleRows(rows, spacing * 0.8, li * 0.3, spacing * (0.4 + imperfection))), color);
-            } else if (fStyle === 'zigzag') {
-                emit(fills.connectedPathD(fills.zigzagPolyRows(poly, angle, spacing, li * 0.4)), color);
-            } else if (fStyle === 'waves') {
-                emit(fills.waveConnectedPathD(poly, angle, spacing, li * 0.15), color);
-            } else {
-                var hr = fills.hatchPolyRows(poly, angle, spacing);
-                if (imperfection > 0) hr = fills.sketchHatchRows(hr, li * 1.3, spacing * imperfection * 0.6);
-                emit(fills.connectedPathD(hr), color);
-            }
+            fills.fillPolyMultiD(poly, P.fillStyle, angle, spacing, (seed ^ (li * 0x9e3779b1)) >>> 0).forEach(function (d) { emit(d, color); });
         }
 
         if (P.border === 'on') {
@@ -199,10 +172,10 @@
         name: 'strata',
         description: 'Geological strata cross-section: undulating parametric layers with selectable fills.',
         stylePresets: [
-            { label: 'Earthy mixed', values: { fillStyle:'mixed', layers:6, roughness:50, waviness:40, palette:['#8b4513','#a0522d','#c8a26b','#2d5a2d'], bgColor:'#ffffff' } },
-            { label: 'Ocean waves', values: { fillStyle:'waves', layers:5, waviness:65, roughness:35, palette:['#1e6091','#2196f3'], bgColor:'#ffffff' } },
-            { label: 'Sharp hatch', values: { fillStyle:'hatch', hatchAngle:45, alternate:'on', roughness:30, layers:7 } },
-            { label: 'Soft squiggle', values: { fillStyle:'squiggle', roughness:70, waviness:55, layers:8 } }
+            { label: 'Earthy mixed', values: { fillStyle:['hatch','squiggleHatch','zigzagHatch','crosshatch','waves'], layers:6, roughness:50, waviness:40, palette:['#8b4513','#a0522d','#c8a26b','#2d5a2d'] } },
+            { label: 'Ocean waves', values: { fillStyle:['waves'], layers:5, waviness:65, roughness:35, palette:['#1e6091','#2196f3'] } },
+            { label: 'Sharp hatch', values: { fillStyle:['hatch'], hatchAngle:45, alternate:'on', roughness:30, layers:7 } },
+            { label: 'Soft squiggle', values: { fillStyle:['squiggleHatch'], roughness:70, waviness:55, layers:8 } }
         ],
         presets: Object.keys(PRESETS),
         params: params,

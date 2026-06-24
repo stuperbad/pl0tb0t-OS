@@ -77,30 +77,30 @@
     var PRESETS = {
         organic:      { seedDistribution: 'gridJitter', relaxIterations: 3, cellScale: 0.88,
                         fillStyle: 'hatch', colorMode: 'byDistance', numSeeds: 70,
-                        palette: ['#5c3317', '#8b4513', '#a0522d', '#c8a26b'], bgColor: '#f5f0eb' },
+                        palette: ['#5c3317', '#8b4513', '#a0522d', '#c8a26b'] },
         fractured:    { seedDistribution: 'random', relaxIterations: 0, cellScale: 0.97,
                         fillStyle: 'crosshatch', colorMode: 'randomPerCell', numSeeds: 110,
-                        palette: ['#1c1c2e', '#3d3d5c', '#52527a', '#cc2200'], bgColor: '#f3f3ef' },
+                        palette: ['#1c1c2e', '#3d3d5c', '#52527a', '#cc2200'] },
         radial_bloom: { seedDistribution: 'radial', relaxIterations: 2, hatchAngleMode: 'radialFromCenter',
                         fillStyle: 'hatch', colorMode: 'byCellSize', numSeeds: 80,
-                        palette: ['#ff4500', '#ff8c00', '#ffd700', '#e63946', '#ff9800'], bgColor: '#1a0f0a' },
+                        palette: ['#ff4500', '#ff8c00', '#ffd700', '#e63946', '#ff9800'] },
         blueprint_cells: { seedDistribution: 'gridJitter', relaxIterations: 4, fillStyle: 'none',
                         strokeOutline: 'yes', colorMode: 'single', numSeeds: 55,
-                        palette: ['#bcd4ee'], bgColor: '#0c1f33' }
+                        palette: ['#bcd4ee'] }
     };
 
     var params = [
         { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6, group: 'color',
           value: ['#000000'], options: STD_PAL },
-        { id: 'bgColor', label: 'Background', type: 'color', value: '#f5f0eb', group: 'color' },
+        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'advanced' },
         { id: 'numSeeds', label: 'Cell count', type: 'range', min: 10, max: 150, step: 5, value: 60, group: 'general' },
         { id: 'seedDistribution', label: 'Seed layout', type: 'select', value: 'random', group: 'general',
           options: [{ value: 'random', label: 'Random' }, { value: 'gridJitter', label: 'Grid jitter' },
                     { value: 'radial', label: 'Radial' }] },
         { id: 'relaxIterations', label: 'Relax (Lloyd)', type: 'range', min: 0, max: 4, step: 1, value: 2, group: 'general' },
         { id: 'cellScale', label: 'Cell inset', type: 'range', min: 0.5, max: 1.0, step: 0.01, value: 0.92, group: 'general' },
-        { id: 'fillStyle', label: 'Fill style', type: 'select', value: 'hatch', group: 'general',
-          options: [{ value: 'contour', label: 'Contour' }, { value: 'hatch', label: 'Hatch' }, { value: 'sketchHatch', label: 'Chaotic hatch' }, { value: 'squiggleHatch', label: 'Squiggle' }, { value: 'zigzagHatch', label: 'Zigzag' }, { value: 'crosshatch', label: 'Crosshatch' }, { value: 'waves', label: 'Waves' }, { value: 'sprigFill', label: 'Scatter sprig' }, { value: 'ribbonFill', label: 'Scatter ribbon' }, { value: 'crossFill', label: 'Scatter cross' }, { value: 'asteriskFill', label: 'Scatter asterisk' }, { value: 'none', label: 'Outline only' }] },
+        { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'general',
+          options: window.plotFills.FILL_STYLE_OPTIONS },
         { id: 'hatchAngleMode', label: 'Hatch angle', type: 'select', value: 'perCellRandom', group: 'general',
           options: [{ value: 'fixed', label: 'Fixed' }, { value: 'perCellRandom', label: 'Per-cell random' },
                     { value: 'radialFromCenter', label: 'Radial from center' }] },
@@ -231,14 +231,14 @@
                     '" stroke-width="' + sw.toFixed(2) + '" stroke-linejoin="round"/>');
             }
 
-            if (P.fillStyle === 'none' || rng() > fillProb) continue;
+            if (rng() > fillProb) continue;
 
             var angle;
             if (P.hatchAngleMode === 'fixed') angle = globalAngle;
             else if (P.hatchAngleMode === 'radialFromCenter') angle = Math.atan2(m.y - cy0, m.x - cx0) * 180 / Math.PI;
             else angle = rng() * 180;
 
-            fills.fillPolyD(inset, P.fillStyle, angle, spacing, (seed ^ (i * 2654435761)) >>> 0).forEach(function (d) { emit(d, color); });
+            fills.fillPolyMultiD(inset, P.fillStyle, angle, spacing, (seed ^ (i * 2654435761)) >>> 0).forEach(function (d) { emit(d, color); });
         }
 
         // Artboard edge frame — matches the built-in sketches' paper border.

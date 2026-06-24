@@ -26,16 +26,16 @@
     ];
 
     var PRESETS = {
-        cityscape: { palette: ['#1a1a1a'], bgColor: '#f5f0e8', heightMode: 'random', faceStyle: 'hatch', gapProb: 12 },
-        pyramid:   { palette: ['#3a2a1a'], bgColor: '#f7efe0', heightMode: 'pyramid', faceStyle: 'crosshatch', gapProb: 0 },
-        circuit:   { palette: ['#0a3d2e', '#1a6b4f', '#5dba8f'], bgColor: '#eef6ee', heightMode: 'noise', faceStyle: 'hatch', gapProb: 8 },
-        blueprint: { palette: ['#1a3a6b'], bgColor: '#eef3fb', heightMode: 'wave', faceStyle: 'plain', gapProb: 0 }
+        cityscape: { palette: ['#1a1a1a'], heightMode: 'random', faceStyle: 'hatch', gapProb: 12 },
+        pyramid:   { palette: ['#3a2a1a'], heightMode: 'pyramid', faceStyle: 'crosshatch', gapProb: 0 },
+        circuit:   { palette: ['#0a3d2e', '#1a6b4f', '#5dba8f'], heightMode: 'noise', faceStyle: 'hatch', gapProb: 8 },
+        blueprint: { palette: ['#1a3a6b'], heightMode: 'wave', faceStyle: 'plain', gapProb: 0 }
     };
 
     var params = [
         { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6, group: 'color',
           value: ['#1a1a1a'], options: STD_PAL },
-        { id: 'bgColor', label: 'Background', type: 'color', value: '#f5f0e8', group: 'color' },
+        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'advanced' },
         { id: 'gridCols', label: 'Grid columns', type: 'range', min: 3, max: 16, step: 1, value: 9, group: 'general' },
         { id: 'gridRows', label: 'Grid rows', type: 'range', min: 3, max: 16, step: 1, value: 7, group: 'general' },
         { id: 'heightScale', label: 'Height scale', type: 'range', min: 0.2, max: 3, step: 0.1, value: 1.3, group: 'general' },
@@ -44,8 +44,8 @@
           options: [{ value: 'random', label: 'Random' }, { value: 'noise', label: 'Smooth noise' },
                     { value: 'pyramid', label: 'Pyramid' }, { value: 'wave', label: 'Wave' }] },
         { id: 'gapProb', label: 'Gap %', type: 'range', min: 0, max: 60, step: 1, value: 12, group: 'general' },
-        { id: 'faceStyle', label: 'Face fill', type: 'select', value: 'hatch', group: 'general',
-          options: [{ value: 'contour', label: 'Contour' }, { value: 'hatch', label: 'Hatch' }, { value: 'sketchHatch', label: 'Chaotic hatch' }, { value: 'squiggleHatch', label: 'Squiggle' }, { value: 'zigzagHatch', label: 'Zigzag' }, { value: 'crosshatch', label: 'Crosshatch' }, { value: 'waves', label: 'Waves' }, { value: 'sprigFill', label: 'Scatter sprig' }, { value: 'ribbonFill', label: 'Scatter ribbon' }, { value: 'crossFill', label: 'Scatter cross' }, { value: 'asteriskFill', label: 'Scatter asterisk' }, { value: 'plain', label: 'Outline only' }] },
+        { id: 'faceStyle', label: 'Face fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'general',
+          options: window.plotFills.FILL_STYLE_OPTIONS },
         { id: 'shadeStrength', label: 'Shade contrast', type: 'range', min: 0, max: 100, step: 5, value: 60, group: 'general' }
     ];
 
@@ -168,7 +168,7 @@
         }
         function fillFace(poly, angle, mult, color) {
             var sp = spacing / mult;
-            fills.fillPolyD(poly, P.faceStyle, angle, sp, (seed ^ Math.round(angle * 7 + poly[0].x)) >>> 0).forEach(function (d) { emitFill(d, color); });
+            fills.fillPolyMultiD(poly, P.faceStyle, angle, sp, (seed ^ Math.round(angle * 7 + poly[0].x)) >>> 0).forEach(function (d) { emitFill(d, color); });
         }
 
         // draw order: back to front (increasing c+r moves down-screen, toward viewer)
@@ -202,7 +202,7 @@
             emitPoly(rightFace, rightColor);
             emitPoly(leftFace, leftColor);
 
-            if (P.faceStyle !== 'plain') {
+            if (Array.isArray(P.faceStyle) ? P.faceStyle.filter(function(x){return x && x!=='plain';}).length : (P.faceStyle && P.faceStyle !== 'plain')) {
                 fillFace(topFace, 10 + globalAngle, topMult, topColor);
                 fillFace(rightFace, 100 + globalAngle, rightMult, rightColor);
                 fillFace(leftFace, 170 + globalAngle, leftMult, leftColor);

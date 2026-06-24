@@ -79,16 +79,16 @@
     ];
 
     var PRESETS = {
-        summit: { terrain: 'summit', palette: ['#1a0a00'], bgColor: '#f4f0e8' },
-        basin:  { terrain: 'basin',  palette: ['#001033'], bgColor: '#e8eef4' },
-        range:  { terrain: 'range',  palette: ['#0d1a0d'], bgColor: '#f2f0eb' },
-        dunes:  { terrain: 'dunes',  palette: ['#1a1200'], bgColor: '#f5f0d8' }
+        summit: { terrain: 'summit', palette: ['#1a0a00'] },
+        basin:  { terrain: 'basin',  palette: ['#001033'] },
+        range:  { terrain: 'range',  palette: ['#0d1a0d'] },
+        dunes:  { terrain: 'dunes',  palette: ['#1a1200'] }
     };
 
     var params = [
         { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6, group: 'color',
           value: ['#10243a'], options: STD_PAL },
-        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'color' },
+        { id: 'bgColor', label: 'Background', type: 'color', value: '#ffffff', group: 'advanced' },
         { id: 'colorByBand', label: 'Color by elevation', type: 'select', value: 'off', group: 'color',
           options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
         { id: 'terrain', label: 'Terrain', type: 'select', value: 'range', group: 'general',
@@ -99,7 +99,13 @@
         { id: 'relief',    label: 'Relief / height', type: 'range', min: 20, max: 100, step: 5, value: 60, group: 'general' },
         { id: 'roughness', label: 'Roughness',       type: 'range', min: 0, max: 100, step: 5, value: 35, group: 'general' },
         { id: 'detail',    label: 'Detail',          type: 'range', min: 1, max: 100, step: 1, value: 50, group: 'general' },
-        { id: 'indexEvery', label: 'Bold every Nth', type: 'range', min: 0, max: 8, step: 1, value: 4, group: 'general' }
+        { id: 'indexEvery', label: 'Bold every Nth', type: 'range', min: 0, max: 8, step: 1, value: 4, group: 'general' },
+        { id: 'fillMode', label: 'Render', type: 'select', value: 'lines', group: 'general',
+          options: [{ value: 'lines', label: 'Contour lines' }, { value: 'fill', label: 'Filled regions' }] },
+        { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'general',
+          options: window.plotFills.FILL_STYLE_OPTIONS, visibleWhen: { param: 'fillMode', values: ['fill'] } },
+        { id: 'fillPct', label: '% regions filled', type: 'range', min: 0, max: 100, step: 5, value: 100, group: 'general',
+          visibleWhen: { param: 'fillMode', values: ['fill'] } }
     ];
 
     function buildDefaults() { var P = {}; params.forEach(function (pd) { P[pd.id] = pd.value; }); return P; }
@@ -165,6 +171,30 @@
             '<rect width="' + W + '" height="' + H + '" fill="' + bg + '"/>'
         ];
 
+        if (P.fillMode === 'fill') {
+            var spacingF = (paper.DPI / 25.4) / Math.max(0.2, fills.getEffectiveDensity());
+            var styles = Array.isArray(P.fillStyle) ? P.fillStyle : (P.fillStyle ? [P.fillStyle] : []);
+            var prob = Math.max(0, Math.min(1, Number(P.fillPct) / 100));
+            var gAngle = fills.getFillAngle();
+            var nBands = Math.max(2, nLevels - 1);
+            var fpx = 26, fcN = Math.max(4, Math.round(dW / fpx)), frN = Math.max(4, Math.round(dH / fpx));
+            var fcw = dW / fcN, fch = dH / frN;
+            for (var fr2 = 0; fr2 < frN; fr2++) {
+                for (var fc2 = 0; fc2 < fcN; fc2++) {
+                    var hcc = evalHeight((fc2 + 0.5) / fcN, (fr2 + 0.5) / frN, peaks, noiseAmp, n1, n2);
+                    var bt = (hcc - lo) / (hi - lo); if (bt < 0) bt = 0; if (bt > 1) bt = 1;
+                    var band = Math.min(nBands - 1, Math.floor(bt * nBands));
+                    var csd = (seed ^ (fr2 * 73856093) ^ (fc2 * 19349663)) >>> 0;
+                    if (makeRng(csd)() > prob) continue;
+                    var fcol = (P.colorByBand === 'on') ? palette[band % palette.length] : palette[0];
+                    var x0 = ox + fc2 * fcw, y0 = oy + fr2 * fch;
+                    var cellPoly = [{ x: x0, y: y0 }, { x: x0 + fcw, y: y0 }, { x: x0 + fcw, y: y0 + fch }, { x: x0, y: y0 + fch }];
+                    fills.fillPolyMultiD(cellPoly, styles, gAngle + band * 24, spacingF, csd).forEach(function (d) {
+                        parts.push('<path d="' + d + '" fill="none" stroke="' + fcol + '" stroke-width="' + sw.toFixed(2) + '" stroke-linecap="round"/>');
+                    });
+                }
+            }
+        } else
         for (var lv = 0; lv < nLevels; lv++) {
             var thresh = lo + (hi - lo) * lv / (nLevels - 1);
             var isIdx = idxEvery > 0 && (lv % idxEvery === 0);
