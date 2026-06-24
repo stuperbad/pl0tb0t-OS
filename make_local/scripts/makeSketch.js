@@ -4,6 +4,11 @@
     var currentP5 = null;
     var registeredApi = null;
     var lastSketchName = null;
+    // Per-launch random fallback for the signature/print name, used when the
+    // active sketch doesn't supply its own getSignatureSeed(). Re-rolled on Reseed.
+    if (typeof window._pl0tSigSeed === 'undefined' || !window._pl0tSigSeed) {
+        window._pl0tSigSeed = Math.floor(Math.random() * 1e9) + 1;
+    }
 
     function getParamGroup(pdef) {
         if (pdef.group) return pdef.group;
@@ -28,9 +33,19 @@
         var marginPx = window.makeSketchUtils.getMarginPixels(marginIn);
         var mmToPx   = function(mm) { return window.makeSketchUtils.mmToPixels(mm); };
         var seed = (registeredApi && typeof registeredApi.getSignatureSeed === 'function')
-            ? registeredApi.getSignatureSeed() : 0;
-        var label = lastSketchName || 'pl0tb0t';
-        label = label.charAt(0).toUpperCase() + label.slice(1);
+            ? registeredApi.getSignatureSeed() : (window._pl0tSigSeed || 0);
+        var DISPLAY_NAMES = {
+            'cmyk':             'CMYK Flow',
+            'artproofs':        'Artproofs',
+            'circlesFromLines': 'Circles From Lines',
+            'lineArrays':       'Line Arrays',
+            'zigzag':           'Zigzag',
+            'whirls':           'Whirls',
+            'unbuiltSculptures':'Unbuilt Sculptures',
+            'patternTest':      'Pattern Test'
+        };
+        var label = DISPLAY_NAMES[lastSketchName] ||
+            (lastSketchName ? lastSketchName.charAt(0).toUpperCase() + lastSketchName.slice(1) : 'pl0tb0t');
         window.Signature.drawSignaturePreview(
             currentP5.drawingContext, window._signatureConfig,
             currentP5.width, currentP5.height, marginPx, mmToPx, label, seed
@@ -118,7 +133,8 @@
                     var data = currentP5.canvas.toDataURL('image/png');
                     var a = document.createElement('a');
                     a.href = data;
-                    var ts = new Date().toISOString().replace(/[:.]/g,'-');
+                    var _slug = (window.makeSketchApp && window.makeSketchApp.getSeedSlug) ? window.makeSketchApp.getSeedSlug() : '';
+                var ts = _slug || new Date().toISOString().replace(/[:.]/g,'-');
                     a.download = '90percentart-'+ (lastSketchName||'sketch') + '-' + ts + '.png';
                     document.body.appendChild(a);
                     a.click();
@@ -151,7 +167,8 @@
                     alert('No sketch available for SVG export.');
                     return;
                 }
-                var ts = new Date().toISOString().replace(/[:.]/g,'-');
+                var _slug = (window.makeSketchApp && window.makeSketchApp.getSeedSlug) ? window.makeSketchApp.getSeedSlug() : '';
+                var ts = _slug || new Date().toISOString().replace(/[:.]/g,'-');
                 var filename = '90percentart-'+ (lastSketchName||'sketch') + '-' + ts + '.svg';
                 var fileHandlePromise = null;
 
@@ -423,13 +440,17 @@
         };
 
         // update parameter UI if sketch provides params
-        setTimeout(function(){
+        setTimeout(function(){ buildParamUI(registeredApi); }, 80);
+    }
+
+    function buildParamUI(registeredApi) {
             try {
                 var paramsContainer = document.getElementById('dynamicParams');
                 var staticControls = document.getElementById('staticControls');
                 var groupMeta = {
                     paper:    { title: 'Paper',    open: false },
                     general:  { title: 'General',  open: true  },
+                    orientation: { title: 'Orientation', open: true },
                     arcs:     { title: 'Arcs',     open: true  },
                     wedges:   { title: 'Wedges',   open: true  },
                     textures: { title: 'Textures', open: true  },
@@ -439,6 +460,43 @@
                 // clear existing dynamic
                 if (paramsContainer) paramsContainer.innerHTML = '';
                 var params = (registeredApi && registeredApi.params) ? registeredApi.params : null;
+                // Inject global fill params that apply to all sketches
+                if (params && !params.some(function(p){return p.id==='penLiftFills';})) {
+                    params = params.concat([{ id:'penLiftFills', label:'Pen lifts during fills', type:'select',
+                        value:'off', group:'textures', showModeHidden:true,
+                        options:[{value:'off',label:'Off (connected)'},{value:'on',label:'On (lift pen)'}] }]);
+                }
+                if (params && !params.some(function(p){return p.id==='scatterFill';})) {
+                    params = params.concat([{ id:'scatterFill', label:'Scatter fills', type:'select', multiSelect:true, value:[], group:'textures', showModeHidden:true,
+                        options:[{value:'sprigFill',label:'Scatter sprig'},{value:'ribbonFill',label:'Scatter ribbon'},{value:'crossFill',label:'Scatter cross'},{value:'asteriskFill',label:'Scatter asterisk'}] }]);
+                }
+                if (params && !params.some(function(p){return p.id==='fillAngle';})) {
+                    params = params.concat([{ id:'fillAngle', label:'Fill angle', type:'range', min:0, max:180, step:5, value:0, group:'textures', showModeHidden:true }]);
+                }
+                if (params && !params.some(function(p){return p.id==='fillImperfection';})) {
+                    params = params.concat([{ id:'fillImperfection', label:'Stroke imperfection', type:'range', min:0, max:100, step:5, value:0, group:'textures', showModeHidden:true }]);
+                }
+                if (params && !params.some(function(p){return p.id==='fillDensity';})) {
+                    params = params.concat([{ id:'fillDensity', label:'Fill density', type:'range', min:30, max:150, step:5, value:50, group:'textures', showModeHidden:true }]);
+                }
+                if (params && !params.some(function(p){return p.id==='fillProb';})) {
+                    params = params.concat([{ id:'fillProb', label:'% cells filled', type:'range', min:0, max:100, step:5, value:100, group:'textures', showModeHidden:true }]);
+                }
+                if (params && !params.some(function(p){return p.id==='landscape';})) {
+                    params = params.concat([{ id:'landscape', label:'Orientation', type:'select',
+                        value: window._pl0tLandscape ? 'on' : 'off', group:'paper',
+                        options:[{value:'off',label:'Portrait'},{value:'on',label:'Landscape'}] }]);
+                }
+                if (params && !params.some(function(p){return p.id==='plotHorizontal';})) {
+                    params = params.concat([{ id:'plotHorizontal', label:'Plot horizontal', type:'select',
+                        value: window._pl0tPlotHorizontal ? 'on' : 'off', group:'advanced', showModeHidden:true,
+                        options:[{value:'off',label:'Off'},{value:'on',label:'On (rotate plot 90\u00b0)'}] }]);
+                }
+                if (params && !params.some(function(p){return p.id==='delayRender';})) {
+                    params = params.concat([{ id:'delayRender', label:'Delay render', type:'select',
+                        value: window._pl0tDelayRender ? 'on' : 'off', group:'advanced', showModeHidden:true,
+                        options:[{value:'off',label:'Off (live)'},{value:'on',label:'On (manual)'}] }]);
+                }
                 if (!paramsContainer) return;
 
                 function ensureGroup(name) {
@@ -464,13 +522,17 @@
 
                 // Pre-create only the groups used by the active sketch, in a stable order.
                 // This keeps Artproofs-only groups from leaking into Whirls and other sketches.
-                var preferredGroups = ['paper', 'general', 'arcs', 'wedges', 'textures', 'color', 'advanced'];
+                var preferredGroups = ['advanced', 'paper', 'general', 'orientation', 'arcs', 'wedges', 'textures', 'color'];
                 var groupsInUse = {};
                 (params || []).forEach(function(pdef) { groupsInUse[getParamGroup(pdef)] = true; });
                 preferredGroups.forEach(function(k) { if (groupsInUse[k]) ensureGroup(k); });
                 Object.keys(groupsInUse).forEach(function(k) {
                     if (preferredGroups.indexOf(k) === -1) ensureGroup(k);
                 });
+                // Paper group stays visible in both modes (Landscape lives here);
+                // its mode-only rows hide individually via showModeHidden.
+                var _pg = document.getElementById('param-group-paper');
+                if (_pg) _pg.style.display = '';
 
                 function getParamValue(id) {
                     var input = document.getElementById(id);
@@ -480,6 +542,56 @@
 
                 function normalizeValues(values) {
                     return Array.isArray(values) ? values.map(String) : [String(values)];
+                }
+
+                function maybeRegen() {
+                    if (window._pl0tDelayRender && (window._pl0tMode === 'full')) { if (typeof window._pl0tMarkDirty === 'function') window._pl0tMarkDirty(); return; }
+                    scheduleRender();
+                }
+
+                // Apply a preset's param values, reusing each control's own commit
+                // path so side-effects (plotFills globals, chip sync) all fire; the
+                // new render scheduler coalesces them into a single render.
+                function applyStylePreset(values) {
+                    if (!values) return;
+                    Object.keys(values).forEach(function(id) {
+                        var val = values[id];
+                        var pdef = (params || []).find(function(pp){ return pp.id === id; });
+                        if (pdef) pdef.value = val;
+                        var el = document.getElementById(id);
+                        if (el && typeof el._setUIValue === 'function') { el._setUIValue(val); return; }   // colorPalette
+                        // Update the control directly (NO input dispatch — avoids the range
+                        // debounce that caused a stale first render then a corrected second).
+                        if (el) {
+                            if (el.type === 'hidden') {
+                                el.value = Array.isArray(val) ? JSON.stringify(val) : String(val);
+                                if (el._segCtrl) {
+                                    var _arr; try { _arr = JSON.parse(el.value); if (!Array.isArray(_arr)) _arr = [String(el.value)]; } catch(e) { _arr = [String(el.value)]; }
+                                    el._segCtrl.querySelectorAll('.seg-btn').forEach(function(b){ b.classList.toggle('seg-active', _arr.indexOf(b.dataset.segVal) >= 0); });
+                                }
+                            } else {
+                                el.value = val;
+                                var sv = document.getElementById(id + 'Value'); if (sv) sv.textContent = String(val);
+                            }
+                        }
+                        var pv = el ? ((el.type === 'range' || el.type === 'number') ? Number(el.value) : el.value) : val;
+                        if (window.plotFills) {
+                            if (id === 'fillAngle') window.plotFills.setFillAngle(Number(pv));
+                            else if (id === 'fillImperfection') window.plotFills.setFillImperfection(Number(pv));
+                            else if (id === 'fillDensity') window.plotFills.setFillDensity(Number(pv));
+                            else if (id === 'fillProb') window.plotFills.setFillProb(Number(pv) / 100);
+                            else if (id === 'penLiftFills') window.plotFills.setPenLift(pv === 'on');
+                            else if (id === 'scatterFill') { var _sf; try { _sf = JSON.parse(pv); } catch(e) { _sf = [pv]; } if (!Array.isArray(_sf)) _sf = [String(pv)]; window.plotFills.setScatterStyles(_sf.filter(Boolean)); }
+                        }
+                        if (id === 'landscape') window._pl0tLandscape = (pv === 'on');
+                        else if (id === 'plotHorizontal') { window._pl0tPlotHorizontal = (pv === 'on'); if (typeof window._pl0tApplyOrientation === 'function') window._pl0tApplyOrientation(); }
+                        else if (id === 'delayRender') { window._pl0tDelayRender = (pv === 'on'); var _rb = document.getElementById('renderNow'); if (_rb) _rb.style.display = (pv === 'on') ? '' : 'none'; }
+                        window.controls = window.controls || {};
+                        window.controls[id] = pv;
+                        if (registeredApi && typeof registeredApi.setParam === 'function') { try { registeredApi.setParam(id, pv); } catch(e){} }
+                    });
+                    applyConditionalUI(params);
+                    maybeRegen();
                 }
 
                 function applyConditionalUI(params) {
@@ -494,6 +606,8 @@
                             try { var _pa=JSON.parse(currentValue); _activeVals=Array.isArray(_pa)?_pa.map(String):[String(currentValue)]; }
                             catch(e) { _activeVals=[String(currentValue)]; }
                             row.style.display = _activeVals.some(function(v){return allowedValues.indexOf(v)!==-1;}) ? '' : 'none';
+                        } else if (pdef.showModeHidden && (window._pl0tMode || 'fast') !== 'full') {
+                            row.style.display = 'none';
                         } else {
                             row.style.display = '';
                         }
@@ -509,6 +623,7 @@
                             labelSpan.textContent = labelText;
                         }
                     });
+                    hideEmptyGroups();
                 }
 
                 if (params && params.length && paramsContainer) {
@@ -518,6 +633,11 @@
                         var row = document.createElement('div');
                         row.className = 'mb-3';
                         row.setAttribute('data-param-id', pdef.id);
+                        // Hide in show mode; home mode (full) always shows
+                        if (pdef.showModeHidden) {
+                            row.dataset.showModeHidden = '1';
+                            if ((window._pl0tMode || 'fast') !== 'full') row.style.display = 'none';
+                        }
 
                         var label = document.createElement('label');
                         label.className = 'control-label';
@@ -607,7 +727,7 @@
                                     try { registeredApi.setParam(pdef.id, c); } catch(e) {}
                                 }
                                 applyConditionalUI(params);
-                                if (typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
+                                maybeRegen();
                                 rebuildOrderStrip();
                             }
 
@@ -750,7 +870,7 @@
                                     try { registeredApi.setParam(pdef.id, true); } catch(e) {}
                                 }
                                 applyConditionalUI(params);
-                                if (typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
+                                maybeRegen();
                             });
                             row.appendChild(actionButton);
                             ensureGroup(getParamGroup(pdef)).appendChild(row);
@@ -833,11 +953,37 @@
                             if (spanValue) spanValue.textContent = input.value;
                             window.controls = window.controls || {};
                             window.controls[pdef.id] = val;
-                            if (registeredApi && typeof registeredApi.setParam === 'function') {
-                                try { registeredApi.setParam(pdef.id, val); } catch(e){}
+                            if (input.type === 'range') {
+                                if (input._redrawTimer) clearTimeout(input._redrawTimer);
+                                input._redrawTimer = setTimeout(function() {
+                                    var v = Number(input.value);
+                                    if (pdef.id === 'fillAngle')        { window.plotFills && window.plotFills.setFillAngle(v); }
+                                    if (pdef.id === 'fillImperfection') { window.plotFills && window.plotFills.setFillImperfection(v); }
+                                    if (pdef.id === 'fillDensity')      { window.plotFills && window.plotFills.setFillDensity(v); }
+                                    if (pdef.id === 'fillProb')         { window.plotFills && window.plotFills.setFillProb(v / 100); }
+                                    if (registeredApi && typeof registeredApi.setParam === 'function') {
+                                        try { registeredApi.setParam(pdef.id, v); } catch(e){}
+                                    }
+                                    applyConditionalUI(params);
+                                    maybeRegen();
+                                }, 150);
+                            } else {
+                                if (pdef.id === 'penLiftFills') { window.plotFills && window.plotFills.setPenLift(val === 'on'); }
+                                if (pdef.id === 'scatterFill') {
+                                    var _sfv = val;
+                                    if (typeof _sfv === 'string') { try { _sfv = JSON.parse(_sfv); } catch(e) { _sfv = [_sfv]; } }
+                                    if (!Array.isArray(_sfv)) _sfv = [String(_sfv)];
+                                    window.plotFills && window.plotFills.setScatterStyles(_sfv.filter(Boolean));
+                                }
+                                if (pdef.id === 'landscape')      { window._pl0tLandscape = (val === 'on'); }
+                                if (pdef.id === 'plotHorizontal') { window._pl0tPlotHorizontal = (val === 'on'); if (typeof window._pl0tApplyOrientation === 'function') window._pl0tApplyOrientation(); }
+                                if (pdef.id === 'delayRender')    { window._pl0tDelayRender = (val === 'on'); var _rb = document.getElementById('renderNow'); if (_rb) _rb.style.display = (val === 'on') ? '' : 'none'; }
+                                if (registeredApi && typeof registeredApi.setParam === 'function') {
+                                    try { registeredApi.setParam(pdef.id, val); } catch(e){}
+                                }
+                                applyConditionalUI(params);
+                                maybeRegen();
                             }
-                            applyConditionalUI(params);
-                            if (typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
                         }
                         // on change handler
                         input.addEventListener('input', commitInputValue);
@@ -851,6 +997,27 @@
                         ensureGroup(getParamGroup(pdef)).appendChild(row);
                     });
                     applyConditionalUI(params);
+                    // Upfront Preset selector (first control in General).
+                    if (registeredApi && Array.isArray(registeredApi.stylePresets) && registeredApi.stylePresets.length) {
+                        var _isHome = (window._pl0tMode || 'fast') === 'full';
+                        var _genBody = ensureGroup('general');
+                        var _pRow = document.createElement('div'); _pRow.className = 'mb-3'; _pRow.setAttribute('data-param-id', '__stylePreset');
+                        var _pLab = document.createElement('label'); _pLab.className = 'control-label';
+                        var _pSpan = document.createElement('span'); _pSpan.className = 'param-label-text'; _pSpan.textContent = 'Preset';
+                        _pLab.appendChild(_pSpan); _pRow.appendChild(_pLab);
+                        var _pSel = document.createElement('select'); _pSel.id = '__stylePreset'; _pSel.className = 'form-control form-control-sm';
+                        var _ph = document.createElement('option'); _ph.value = ''; _ph.textContent = 'Choose a preset\u2026'; _ph.disabled = true; _ph.selected = true; _pSel.appendChild(_ph);
+                        registeredApi.stylePresets.forEach(function(ps, idx) {
+                            if (ps && ps.home && !_isHome) return;
+                            var o = document.createElement('option'); o.value = String(idx); o.textContent = ps.label || ('Preset ' + (idx + 1)); _pSel.appendChild(o);
+                        });
+                        _pSel.addEventListener('change', function() {
+                            var ps = registeredApi.stylePresets[Number(this.value)];
+                            if (ps) applyStylePreset(ps.values);
+                        });
+                        _pRow.appendChild(_pSel);
+                        if (_genBody) _genBody.insertBefore(_pRow, _genBody.firstChild);
+                    }
                 } else {
                     if (staticControls) staticControls.style.display = '';
                 }
@@ -864,17 +1031,163 @@
                 }
                 var shuffleBtn = document.getElementById('shuffleLayout');
                 if (shuffleBtn) shuffleBtn.style.display = (registeredApi && typeof registeredApi.shuffleLayout === 'function') ? '' : 'none';
+                var _renderBtn = document.getElementById('renderNow');
+                if (_renderBtn) _renderBtn.style.display = window._pl0tDelayRender ? '' : 'none';
             } catch(e) { console.error('build param UI error', e); }
-        }, 80);
+    }
+
+    // ── Coalesced deferred render ───────────────────────────────────────
+    // Param edits update controls immediately; the heavy (main-thread) render
+    // is debounced + deferred a couple frames so the UI paints first and rapid
+    // changes collapse into one render. A subtle badge shows during long renders.
+    function _renderIndicator(on) {
+        var el = document.getElementById('pl0t-render-indicator');
+        if (!el) {
+            if (!on) return;
+            el = document.createElement('div');
+            el.id = 'pl0t-render-indicator';
+            el.textContent = '\u27f3 rendering\u2026';
+            el.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9998;' +
+                'background:rgba(124,77,255,0.92);color:#fff;font:600 11px system-ui,sans-serif;' +
+                'padding:4px 10px;border-radius:12px;pointer-events:none;opacity:0;' +
+                'transition:opacity .12s ease;box-shadow:0 1px 6px rgba(0,0,0,.25);';
+            document.body.appendChild(el);
+        }
+        el.style.opacity = on ? '1' : '0';
+    }
+
+    function scheduleRender() {
+        if (window._pl0tRenderTimer) clearTimeout(window._pl0tRenderTimer);
+        window._pl0tRenderTimer = setTimeout(function() {
+            window._pl0tRenderTimer = null;
+            _renderIndicator(true);
+            // Two frames so the badge + control state paint before the blocking render.
+            requestAnimationFrame(function() { requestAnimationFrame(function() {
+                try { if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate(); }
+                finally { _renderIndicator(false); }
+            }); });
+        }, 30);
+    }
+
+    function hideEmptyGroups() {
+        var groups = document.querySelectorAll('.param-group');
+        for (var i = 0; i < groups.length; i++) {
+            var g = groups[i];
+            var rows = g.querySelectorAll('[data-param-id]');
+            if (!rows.length) { g.style.display = ''; continue; }
+            var anyVisible = false;
+            for (var j = 0; j < rows.length; j++) { if (rows[j].style.display !== 'none') { anyVisible = true; break; } }
+            g.style.display = anyVisible ? '' : 'none';
+        }
     }
 
     window.makeSketchApp = {
         make: make,
+        buildParamUI: buildParamUI,
+        drawSignatureOverlay: function() { try { _drawSignatureOverlay(); } catch (e) {} },
+        getSeedSlug: function() {
+            try {
+                if (!window.Signature || !window.Signature.seedToName) return '';
+                var seed = (registeredApi && typeof registeredApi.getSignatureSeed === 'function')
+                    ? registeredApi.getSignatureSeed() : (window._pl0tSigSeed || 0);
+                var snap = (window.sketchAPI && window.sketchAPI.getParamsSnapshot)
+                    ? window.sketchAPI.getParamsSnapshot() : [];
+                // FNV-1a 32-bit hash over serialised params + seed
+                var str = JSON.stringify(snap) + '|' + seed;
+                var h = 2166136261;
+                for (var i = 0; i < str.length; i++) {
+                    h ^= str.charCodeAt(i);
+                    h = Math.imul(h, 16777619) >>> 0;
+                }
+                return window.Signature.seedToName(h).replace(/\s+/g, '-');
+            } catch(e) {}
+            return '';
+        },
+        setRenderMode: function(mode) {
+            window._pl0tMode = mode;
+            // Toggle paper params and group for show vs home mode
+            var _isHome = (mode === 'full');
+            document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
+                el.style.display = _isHome ? '' : 'none';
+            });
+            var _paperGrp = document.getElementById('param-group-paper');
+            if (_paperGrp) _paperGrp.style.display = '';   // Landscape lives here; visible in both modes
+            // Keep a hidden input so getParamValue('_renderMode') works for visibleWhen
+            var _rmEl = document.getElementById('_renderMode');
+            if (!_rmEl) {
+                _rmEl = document.createElement('input');
+                _rmEl.type = 'hidden';
+                _rmEl.id = '_renderMode';
+                document.body.appendChild(_rmEl);
+            }
+            _rmEl.value = mode;
+            // Toggle visibility of params gated on _renderMode (e.g. scatterFill)
+            try {
+                var _api = registeredApi || (window.sketchAPI && window.sketchAPI._registeredApi);
+                var _params = (_api && _api.params) ? _api.params : [];
+                _params.forEach(function(pdef) {
+                    if (!pdef.visibleWhen || pdef.visibleWhen.param !== '_renderMode') return;
+                    var _row = document.querySelector('[data-param-id="' + pdef.id + '"]');
+                    if (!_row) return;
+                    var _allowed = (pdef.visibleWhen.values || []).map(String);
+                    _row.style.display = _allowed.indexOf(mode) !== -1 ? '' : 'none';
+                });
+            } catch(e) {}
+            try {
+                if (registeredApi && typeof registeredApi.setParam === 'function')
+                    registeredApi.setParam('_renderMode', mode);
+            } catch(e) {}
+            try { hideEmptyGroups(); } catch(e) {}
+            try {
+                if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function')
+                    window.sketchAPI.regenerate();
+                else if (currentP5 && typeof currentP5.redraw === 'function')
+                    currentP5.redraw();
+            } catch(e) {}
+        },
         remakeCurrent: function() {
             make((selector && selector.value) ? selector.value : (lastSketchName || 'default'));
         },
         getCurrentSketchName: function() {
             return (selector && selector.value) ? selector.value : lastSketchName;
+        },
+        getSignatureSvgForQueue: function(svgElement) {
+            try {
+            if (!window._signatureConfig || !window._signatureConfig.enabled) return '';
+            if (!window.Signature || typeof window.Signature.buildSignatureSVG !== 'function') return '';
+            var cfg = window._signatureConfig;
+            var svgW, svgH;
+            if (svgElement) {
+                var vb = svgElement.viewBox && svgElement.viewBox.baseVal;
+                svgW = (vb && vb.width) ? vb.width : (parseFloat(svgElement.getAttribute('width')) || (currentP5 ? currentP5.width : 800));
+                svgH = (vb && vb.height) ? vb.height : (parseFloat(svgElement.getAttribute('height')) || (currentP5 ? currentP5.height : 800));
+            } else {
+                svgW = currentP5 ? currentP5.width : 800;
+                svgH = currentP5 ? currentP5.height : 800;
+            }
+            var marginIn = 1;
+            if (registeredApi && Array.isArray(registeredApi.params)) {
+                var mp = registeredApi.params.find(function(x) { return x.id === 'margin'; });
+                if (mp) marginIn = parseFloat(mp.value) || 1;
+            }
+            var marginPx = window.makeSketchUtils && window.makeSketchUtils.getMarginPixels
+                ? window.makeSketchUtils.getMarginPixels(marginIn) : marginIn * 96;
+            var mmToPx = function(mm) {
+                return window.makeSketchUtils && window.makeSketchUtils.mmToPixels
+                    ? window.makeSketchUtils.mmToPixels(mm) : mm * 3.7795;
+            };
+            var seed = (registeredApi && typeof registeredApi.getSignatureSeed === 'function')
+                ? registeredApi.getSignatureSeed() : (window._pl0tSigSeed || 0);
+            var DISPLAY_NAMES = {
+                'cmyk': 'CMYK Flow', 'artproofs': 'Artproofs',
+                'circlesFromLines': 'Circles From Lines', 'lineArrays': 'Line Arrays',
+                'zigzag': 'Zigzag', 'whirls': 'Whirls',
+                'unbuiltSculptures': 'Unbuilt Sculptures', 'patternTest': 'Pattern Test'
+            };
+            var label = DISPLAY_NAMES[lastSketchName] ||
+                (lastSketchName ? lastSketchName.charAt(0).toUpperCase() + lastSketchName.slice(1) : 'pl0tb0t');
+            return window.Signature.buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPx, label, seed);
+            } catch(e) { return ''; }
         }
     };
 

@@ -10,6 +10,9 @@
     <script src="lib/p5.svg.js"></script>
     <script src="scripts/interactiveSVG.js"></script>
     <script src="scripts/sharedPaperControls.js"></script>
+    <script src="scripts/autonomous_manifest.js"></script>
+    <script src="scripts/autonomousLoader.js"></script>
+    <script src="scripts/sharedFills.js"></script>
     <script src="scripts/sketches/cmykFlowCircles.js"></script>
     <script src="scripts/sketches/circlesFromLines.js"></script>
     <script src="scripts/sketches/lineArrays.js"></script>
@@ -34,7 +37,7 @@
 
         #sketch-header label { font-weight: 600; font-size: 14px; margin: 0; white-space: nowrap; }
         #sketchSelector { flex: 1; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; height: 38px; }
-        #make-sketch { flex: 1 1 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #make-sketch { flex: 1 1 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 8px; }
         #make-sketch canvas, #make-sketch svg { width: auto !important; height: auto !important; max-width: 100%; max-height: 100%; border-radius: 8px; display: block; }
 
         /* Width toggle handle — click to cycle narrow/wide */
@@ -88,6 +91,13 @@
         #sendToQueue { background: #111; color: #fff; border-color: #111; font-weight: 700; font-size: 14px; }
         #sendToQueue:hover { background: #333; border-color: #333; }
         #sendToQueue:disabled { background: #888; border-color: #888; }
+        #renderNow { background: #7c4dff; color: #fff; border-color: #7c4dff; font-weight: 700; }
+        #renderNow:hover { background: #6a3df0; border-color: #6a3df0; }
+        #renderNow.dirty { box-shadow: 0 0 0 2px #d1b3ff; animation: pl0t-pulse 1.1s ease-in-out infinite; }
+        @keyframes pl0t-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
+        #refineEstBtn { background: transparent; color: #aaa; border: 1px solid #444; font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+        #refineEstBtn:hover { color: #fff; border-color: #aaa; }
+        #refineEstBtn:disabled { color: #555; border-color: #333; cursor: default; }
 
         /* Status */
         #queueStatus { font-size: 12px; color: #555; padding: 4px 14px 8px; min-height: 20px; flex-shrink: 0; }
@@ -143,6 +153,7 @@
                 </select>
             </div>
             <div id="make-sketch"></div>
+            <div id="zoom-bar" style="display:flex;align-items:center;justify-content:center;gap:3px;padding:4px 0 2px;flex-shrink:0;"><button id="zoom-out" title="Zoom out" style="border:1px solid #ccc;background:#fff;cursor:pointer;font-size:15px;padding:1px 8px;border-radius:4px;line-height:1.3;">&#8722;</button><span id="zoom-pct" style="min-width:42px;text-align:center;font-size:12px;font-family:monospace;color:#555;padding:0 2px;">100%</span><button id="zoom-in"  title="Zoom in"  style="border:1px solid #ccc;background:#fff;cursor:pointer;font-size:15px;padding:1px 8px;border-radius:4px;line-height:1.3;">+</button><button id="zoom-fit" title="Reset to 100%"  style="border:1px solid #ccc;background:#fff;cursor:pointer;font-size:11px;padding:1px 7px;border-radius:4px;line-height:1.5;color:#666;">1:1</button></div>
         </div>
     </div>
 
@@ -159,8 +170,10 @@
                 <button id="randomize"  class="btn btn-outline-secondary" type="button">Random</button>
                 <button id="shuffleLayout" class="btn btn-outline-secondary" type="button" style="display:none">Shuffle</button>
                 <button id="pause"      class="btn btn-outline-secondary" type="button">Pause</button>
+                <button id="renderNow"  class="btn" type="button" style="display:none">⟳ Render</button>
                 <button id="saveToQueue" class="btn" type="button">Save</button>
                 <button id="sendToQueue" class="btn" type="button">→ Plot</button>
+                <button id="refineEstBtn" type="button">Refine Estimate</button>
             </div>
             <div id="queueStatus"></div>
             <div id="queue-strip">
@@ -170,11 +183,11 @@
                         <a href="http://pl0tb0tpi5:5001/mobile" id="mobile-link" target="_blank">&#128241; pl0tb0tpi5:5001/mobile</a>
                     </div>
                     <div style="display:flex;gap:2px;align-items:center;">
-                        <button id="queueCollapseBtn" title="Collapse">&#9662;</button>
+                        <button id="queueCollapseBtn" title="Collapse">&#9656;</button>
                         <button id="queueRefreshBtn" title="Refresh">&#8635;</button>
                     </div>
                 </div>
-                <div id="queueCards"><span id="queueEmpty">No jobs queued.</span></div>
+                <div id="queueCards" style="display:none"><span id="queueEmpty">No jobs queued.</span></div>
             </div>
         </div>
     </div>
@@ -193,7 +206,9 @@
 
     // ── Button wiring ─────────────────────────────────────────────────────────
     document.getElementById('reseed').addEventListener('click', function() {
+        window._pl0tSigSeed = Math.floor(Math.random() * 1e9) + 1;
         if (window.sketchAPI && typeof window.sketchAPI.reseed === 'function') window.sketchAPI.reseed();
+        else if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
     });
     document.getElementById('shuffleLayout').addEventListener('click', function() {
         if (window.sketchAPI && typeof window.sketchAPI.shuffleLayout === 'function') window.sketchAPI.shuffleLayout();
@@ -208,6 +223,15 @@
         var paused = window.sketchAPI.togglePause();
         e.target.textContent = paused ? 'Resume' : 'Pause';
     });
+    document.getElementById('renderNow').addEventListener('click', function() {
+        this.classList.remove('dirty');
+        if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
+    });
+    // Called by makeSketch when an edit is deferred (Delay render on).
+    window._pl0tMarkDirty = function() {
+        var b = document.getElementById('renderNow');
+        if (b) b.classList.add('dirty');
+    };
 
     // ── Queue helpers ─────────────────────────────────────────────────────────
     function queueStatus(msg, color) {
@@ -255,10 +279,47 @@
         });
     }
 
+    // Plot horizontal: rotate the finished portrait SVG 90° (content + signature)
+    // into a landscape page, so it fits a machine whose Y axis is shorter than X.
+    function rotateSvgForPlot(svgStr) {
+        try {
+            var doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml');
+            var svg = doc.documentElement;
+            if (!svg || svg.nodeName.toLowerCase() !== 'svg') return svgStr;
+            var W = parseFloat(svg.getAttribute('width'));
+            var H = parseFloat(svg.getAttribute('height'));
+            if (!(W > 0 && H > 0)) {
+                var vb = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
+                if (vb.length === 4) { W = vb[2]; H = vb[3]; }
+            }
+            if (!(W > 0 && H > 0)) return svgStr;
+            var g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.setAttribute('transform', 'translate(' + H + ',0) rotate(90)');
+            while (svg.firstChild) g.appendChild(svg.firstChild);
+            svg.appendChild(g);
+            svg.setAttribute('width', H);
+            svg.setAttribute('height', W);
+            svg.setAttribute('viewBox', '0 0 ' + H + ' ' + W);
+            return new XMLSerializer().serializeToString(svg);
+        } catch (e) { return svgStr; }
+    }
+
     function getSvgString() {
         var svgEl = document.querySelector('#make-sketch svg');
-        if (svgEl) return Promise.resolve(new XMLSerializer().serializeToString(svgEl));
-        return captureSvgFromSaveSVG();
+        var p = svgEl ? Promise.resolve(new XMLSerializer().serializeToString(svgEl))
+                      : captureSvgFromSaveSVG();
+        return p.then(function(svgStr) {
+            try {
+                // skip if signature already embedded by the sketch's own saveSVG
+                if (!svgStr.includes('id="signature"') &&
+                    window.makeSketchApp && typeof window.makeSketchApp.getSignatureSvgForQueue === 'function') {
+                    var sigSvg = window.makeSketchApp.getSignatureSvgForQueue(svgEl);
+                    if (sigSvg) svgStr = svgStr.replace(/<\/svg>\s*$/, sigSvg + '</svg>');
+                }
+            } catch(e) { /* signature injection failed — proceed without it */ }
+            if (window._pl0tPlotHorizontal) svgStr = rotateSvgForPlot(svgStr);
+            return svgStr;
+        });
     }
 
     function embedSnapshot(svgStr, sketchId, params) {
@@ -326,6 +387,17 @@
             palette = (paletteParam && Array.isArray(paletteParam.value) && paletteParam.value.length) ? paletteParam.value : ['#000000'];
         }
         var paperSize = (document.getElementById('paperSize') || {}).value || '9x12';
+        // Append signature as a labeled slot if it will be injected into the SVG
+        if (window._signatureConfig && window._signatureConfig.enabled) {
+            var _sigColor = '#000000';
+            var _artHasSig = palette.some(function(e) {
+                return (typeof e === 'string' ? e : e.color).toLowerCase() === _sigColor;
+            });
+            if (!_artHasSig) {
+                palette = palette.slice();
+                palette.push({ color: _sigColor, label: 'Signature Layer' });
+            }
+        }
         showPenConfirmDialog(palette, paperSize, function() {
             btn.disabled = true;
             var banner = document.getElementById('busy-banner');
@@ -461,10 +533,12 @@
         overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.45);z-index:9999;display:flex;align-items:center;justify-content:center;';
         var dlg = document.createElement('div');
         dlg.style.cssText = 'background:#fff;border-radius:8px;padding:20px 24px;min-width:280px;box-shadow:0 4px 24px rgba(0,0,0,0.25);font-family:inherit;';
-        var rows = palette.map(function(c, i) {
+        var rows = palette.map(function(entry, i) {
+            var c   = typeof entry === 'string' ? entry : entry.color;
+            var lbl = (typeof entry === 'object' && entry.label) ? entry.label : c;
             return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
                 + '<div style="width:22px;height:22px;border-radius:3px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
-                + '<span style="font-size:13px;">' + c + ' &rarr; Slot ' + (i+1) + '</span>'
+                + '<span style="font-size:13px;">' + lbl + ' &rarr; Slot ' + (i+1) + '</span>'
                 + '</div>';
         }).join('');
         dlg.innerHTML = '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">Confirm Pen Assignments</div>'
@@ -554,8 +628,363 @@
     document.getElementById('sketch-header').appendChild(chips);
 })();
 </script>
+
+<script>
+(function() {
+    var wrap   = document.getElementById('make-sketch');
+    var pctLbl = document.getElementById('zoom-pct');
+    if (!wrap) return;
+    var zoom = 1.0;
+    var STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+
+    function getCanvas() { return wrap.querySelector('canvas') || wrap.querySelector('svg'); }
+
+    // Intrinsic px size of the zoom target (canvas dims, or svg viewBox/width-height).
+    function targetDims(c) {
+        if (c && c.tagName && c.tagName.toLowerCase() === 'svg') {
+            var vb = (c.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
+            if (vb.length === 4 && vb[2] && vb[3]) return { w: vb[2], h: vb[3] };
+            return { w: parseFloat(c.getAttribute('width')) || 648, h: parseFloat(c.getAttribute('height')) || 864 };
+        }
+        return { w: (c && c.width) || 648, h: (c && c.height) || 864 };
+    }
+
+    // ensure canvas is inside a sizing wrapper so overflow scroll works
+    function getWrapper() {
+        var w = document.getElementById('sketch-scroll-wrapper');
+        if (!w) {
+            var c = getCanvas();
+            if (!c) return null;
+            w = document.createElement('div');
+            w.id = 'sketch-scroll-wrapper';
+            w.style.flexShrink = '0';
+            w.style.overflow = 'visible';
+            c.parentNode.insertBefore(w, c);
+            w.appendChild(c);
+        }
+        return w;
+    }
+
+    function applyZoom(z) {
+        zoom = Math.max(0.1, Math.min(8, z));
+        if (pctLbl) pctLbl.textContent = Math.round(zoom * 100) + '%';
+        var c = getCanvas();
+        if (!c) return;
+        var w = getWrapper();
+        var rot = !!window._pl0tPlotHorizontal;
+        // Reset any prior transform styling before re-applying.
+        c.style.transform = '';
+        c.style.transformOrigin = '';
+        c.style.position = '';
+        c.style.top = '';
+        c.style.left = '';
+        c.style.maxWidth = '';
+        c.style.maxHeight = '';
+        c.style.pointerEvents = '';
+        if (w) { w.style.position = ''; w.style.width = ''; w.style.height = ''; }
+        wrap.style.cursor = '';
+        if (zoom === 1.0 && !rot) return;   // default: CSS fits it
+
+        var _d = targetDims(c);
+        var cw = _d.w, ch = _d.h;
+        c.style.pointerEvents = 'none';     // let drags hit wrap
+        if (rot) {
+            // Portrait artboard shown rotated 90\u00b0 (matches Plot horizontal export).
+            var availW = Math.max(40, wrap.clientWidth - 8);
+            var availH = Math.max(40, wrap.clientHeight - 8);
+            var fit = Math.min(availW / ch, availH / cw);   // rotated footprint = ch wide x cw tall
+            if (!isFinite(fit) || fit <= 0) fit = 1;
+            var s = fit * zoom;
+            if (w) {
+                w.style.position = 'relative';
+                w.style.width  = (ch * s) + 'px';
+                w.style.height = (cw * s) + 'px';
+            }
+            c.style.position = 'absolute';
+            c.style.top = '50%';
+            c.style.left = '50%';
+            c.style.maxWidth = 'none';
+            c.style.maxHeight = 'none';
+            c.style.transformOrigin = 'center center';
+            c.style.transform = 'translate(-50%, -50%) rotate(90deg) scale(' + s + ')';
+            if (zoom !== 1.0) wrap.style.cursor = 'grab';
+        } else {
+            c.style.transformOrigin = 'top left';
+            c.style.transform = 'scale(' + zoom + ')';
+            if (w) {
+                w.style.width  = (cw * zoom) + 'px';
+                w.style.height = (ch * zoom) + 'px';
+            }
+            wrap.style.cursor = 'grab';
+        }
+    }
+
+    // Let the Plot-horizontal toggle re-apply the rotated display.
+    window._pl0tApplyOrientation = function () { try { applyZoom(zoom); } catch (e) {} };
+
+    function stepZoom(dir) {
+        var best = 0, bd = Infinity;
+        for (var i = 0; i < STEPS.length; i++) {
+            var d = Math.abs(STEPS[i] - zoom);
+            if (d < bd) { bd = d; best = i; }
+        }
+        applyZoom(STEPS[Math.max(0, Math.min(STEPS.length - 1, best + dir))]);
+    }
+
+    var zi = document.getElementById('zoom-in');
+    var zo = document.getElementById('zoom-out');
+    var zf = document.getElementById('zoom-fit');
+    if (zi) zi.addEventListener('click', function(e) { e.stopPropagation(); stepZoom(1);  });
+    if (zo) zo.addEventListener('click', function(e) { e.stopPropagation(); stepZoom(-1); });
+    if (zf) zf.addEventListener('click', function(e) { e.stopPropagation(); applyZoom(1); });
+
+    // scroll-wheel zoom
+    wrap.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        stepZoom(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+
+    // pan: left-click drag on wrap when zoomed (canvas has pointer-events:none so clicks land here)
+    // also support middle-click as fallback
+    var panOn = false, px, py, sx, sy;
+    function startPan(e) {
+        panOn = true; px = e.clientX; py = e.clientY;
+        sx = wrap.scrollLeft; sy = wrap.scrollTop;
+        wrap.style.cursor = 'grabbing';
+        e.preventDefault();
+    }
+    wrap.addEventListener('mousedown', function(e) {
+        if (zoom === 1.0) return;          // no pan at native scale
+        if (e.button === 0 || e.button === 1) startPan(e);
+    });
+    window.addEventListener('mousemove', function(e) {
+        if (!panOn) return;
+        wrap.scrollLeft = sx - (e.clientX - px);
+        wrap.scrollTop  = sy - (e.clientY - py);
+    });
+    window.addEventListener('mouseup', function(e) {
+        if (!panOn) return;
+        panOn = false;
+        wrap.style.cursor = zoom !== 1.0 ? 'grab' : '';
+    });
+
+    // re-apply zoom after sketch reloads (canvas element replaced)
+    new MutationObserver(function() {
+        if (zoom !== 1.0 || window._pl0tPlotHorizontal) setTimeout(function() { applyZoom(zoom); }, 60);
+    }).observe(wrap, { childList: true, subtree: true });
+})();
+</script>
+
 </body>
 </html>
+<script>
+(function() {
+    function svgPathLen(d) {
+        var tokens = (d || '').match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g) || [];
+        var total = 0, lifts = 0, px = 0, py = 0, sx = 0, sy = 0, cmd = 'L';
+        var COUNTS = {M:2,L:2,H:1,V:1,C:6,S:4,Q:4,T:2,A:7};
+        var i = 0, N = tokens.length;
+        while (i < N) {
+            var t = tokens[i];
+            if (/[a-zA-Z]/.test(t)) {
+                cmd = t;
+                if (t.toUpperCase() === 'Z') { total += Math.hypot(sx - px, sy - py); px = sx; py = sy; }
+                i++; continue;
+            }
+            var c = cmd.toUpperCase(), rel = (cmd !== cmd.toUpperCase() && cmd === cmd.toLowerCase());
+            var nc = COUNTS[c] || 0;
+            if (!nc || i + nc > N) { i++; continue; }
+            var a = [];
+            for (var k = 0; k < nc; k++) a.push(parseFloat(tokens[i + k]));
+            i += nc;
+            var ex, ey;
+            if (c === 'M') {
+                px = rel ? px + a[0] : a[0]; py = rel ? py + a[1] : a[1];
+                sx = px; sy = py; lifts++;
+                cmd = rel ? 'l' : 'L';
+            } else if (c === 'L') {
+                ex = rel ? px + a[0] : a[0]; ey = rel ? py + a[1] : a[1];
+                total += Math.hypot(ex - px, ey - py); px = ex; py = ey;
+            } else if (c === 'H') {
+                ex = rel ? px + a[0] : a[0];
+                total += Math.abs(ex - px); px = ex;
+            } else if (c === 'V') {
+                ey = rel ? py + a[0] : a[0];
+                total += Math.abs(ey - py); py = ey;
+            } else if (c === 'C' || c === 'S') {
+                ex = rel ? px + a[a.length-2] : a[a.length-2];
+                ey = rel ? py + a[a.length-1] : a[a.length-1];
+                total += Math.hypot(ex - px, ey - py) * 1.15; px = ex; py = ey;
+            } else if (c === 'Q' || c === 'T') {
+                ex = rel ? px + a[a.length-2] : a[a.length-2];
+                ey = rel ? py + a[a.length-1] : a[a.length-1];
+                total += Math.hypot(ex - px, ey - py) * 1.1; px = ex; py = ey;
+            } else if (c === 'A') {
+                ex = rel ? px + a[5] : a[5]; ey = rel ? py + a[6] : a[6];
+                var rx = Math.abs(a[0]), chord = Math.hypot(ex - px, ey - py);
+                total += rx > 0 ? rx * 2 * Math.asin(Math.min(chord / (2 * rx), 1)) : chord;
+                px = ex; py = ey;
+            }
+        }
+        return { len: total, lifts: lifts };
+    }
+
+    function estimateSvgEl(svgEl) {
+        if (!svgEl) return 0;
+        var PX_PER_MM = 100.0 / 25.4;
+        var SKIP = ['none','white','#fff','#ffffff','transparent','inherit'];
+        var totalMm = 0, totalLifts = 0;
+        var colorSet = {};
+        var drawSpeedMmpm = (window._pl0tDrawSpeed) || 3000;
+        var travelSpeedMmpm = (window._pl0tTravelSpeed) || 6000;
+        svgEl.querySelectorAll('path,line,circle,polyline,polygon').forEach(function(el) {
+            var style = el.getAttribute('style') || '';
+            var sm = style.match(/stroke\s*:\s*([^;]+)/);
+            var sc = ((sm && sm[1]) || el.getAttribute('stroke') || '').trim().toLowerCase();
+            if (sc && SKIP.indexOf(sc) === -1) colorSet[sc] = 1;
+            var tag = el.tagName.toLowerCase();
+            if (tag === 'path') {
+                var r = svgPathLen(el.getAttribute('d') || '');
+                totalMm += r.len / PX_PER_MM; totalLifts += r.lifts;
+            } else if (tag === 'line') {
+                var x1 = parseFloat(el.getAttribute('x1')||0), y1 = parseFloat(el.getAttribute('y1')||0);
+                var x2 = parseFloat(el.getAttribute('x2')||0), y2 = parseFloat(el.getAttribute('y2')||0);
+                totalMm += Math.hypot(x2-x1, y2-y1) / PX_PER_MM; totalLifts++;
+            } else if (tag === 'circle') {
+                totalMm += 2 * Math.PI * parseFloat(el.getAttribute('r')||0) / PX_PER_MM; totalLifts++;
+            } else if (tag === 'polyline' || tag === 'polygon') {
+                var pts = (el.getAttribute('points')||'').match(/[-+]?\d*\.?\d+/g) || [];
+                for (var k = 0; k + 3 < pts.length; k += 2)
+                    totalMm += Math.hypot(parseFloat(pts[k+2])-parseFloat(pts[k]),
+                                          parseFloat(pts[k+3])-parseFloat(pts[k+1])) / PX_PER_MM;
+                totalLifts++;
+            }
+        });
+        if (totalMm <= 0) return { est: 0, high: 0 };
+        var drawS    = (totalMm / Math.max(drawSpeedMmpm, 1)) * 60;
+        var perLift  = (40 / Math.max(travelSpeedMmpm, 1)) * 60 + 0.5;
+        var travelS  = Math.min(totalLifts * perLift, drawS * 0.25);
+        var tcS      = Math.max(0, Object.keys(colorSet).length - 1) * 30;
+        var estS     = drawS + travelS + tcS;
+        var liftDensity = totalLifts / Math.max(totalMm, 1);
+        var upperMult = liftDensity < 0.25 ? 5 : liftDensity < 0.5 ? 9 : 18;
+        return { est: estS, high: estS * upperMult };
+    }
+
+    function fmtDur(s) {
+        s = Math.round(s);
+        if (s < 60)  return '~' + s + 's';
+        var m = Math.floor(s / 60);
+        if (m < 60)  return '~' + m + ' min';
+        var h = Math.floor(m / 60), rm = m % 60;
+        return '~' + h + 'h' + (rm ? ' ' + rm + 'm' : '');
+    }
+    function _fmtNum(s) {
+        s = Math.round(s);
+        if (s < 60) return s + 's';
+        var m = Math.floor(s / 60);
+        if (m < 60) return m + ' min';
+        var h = Math.floor(m / 60), rm = m % 60;
+        return h + 'h' + (rm ? ' ' + rm + 'm' : '');
+    }
+    function _fmtRange(low, high) {
+        if (high <= low * 1.3) return '~' + _fmtNum(low);
+        return '~' + _fmtNum(low) + ' – ' + _fmtNum(high);
+    }
+
+    var _estTimer = null;
+    var _refined  = false;
+    function _resetRefine() {
+        _refined = false;
+        var rb = document.getElementById('refineEstBtn');
+        if (rb) { rb.disabled = false; rb.textContent = 'Refine Estimate'; }
+    }
+    function scheduleEstimate() {
+        clearTimeout(_estTimer);
+        _resetRefine();
+        _estTimer = setTimeout(function() {
+            var btn = document.getElementById('sendToQueue');
+            if (!btn) return;
+            function setRange(r) {
+                if (!r || r.est <= 5) { btn.textContent = '\u2192 Plot'; return; }
+                btn.textContent = '\u2192 Plot (' + _fmtRange(r.est, r.high) + ')';
+            }
+            var liveSvg = document.querySelector('#make-sketch svg');
+            if (liveSvg) {
+                setRange(estimateSvgEl(liveSvg));
+                return;
+            }
+            if (typeof getSvgString !== 'function') return;
+            btn.textContent = '\u2192 Plot (…)';
+            getSvgString().then(function(svgStr) {
+                try {
+                    var doc = new DOMParser().parseFromString(svgStr, 'image/svg+xml');
+                    setRange(estimateSvgEl(doc.documentElement));
+                } catch(e) { btn.textContent = '\u2192 Plot'; }
+            }).catch(function() { btn.textContent = '\u2192 Plot'; });
+        }, 2000);
+    }
+
+    function patchRegen(api) {
+        if (!api || api._estPatched) return;
+        api._estPatched = true;
+        var orig = api.regenerate;
+        api.regenerate = function() {
+            var r = orig.apply(this, arguments);
+            scheduleEstimate();
+            return r;
+        };
+    }
+
+    window.addEventListener('load', function() {
+        patchRegen(window.sketchAPI);
+        var _prev = window.sketchAPI;
+        setInterval(function() {
+            if (window.sketchAPI !== _prev) {
+                _prev = window.sketchAPI;
+                patchRegen(window.sketchAPI);
+            }
+        }, 500);
+        // Re-estimate whenever the sketch changes
+        var sel = document.getElementById('sketchSelector');
+        if (sel) sel.addEventListener('change', function() { scheduleEstimate(); });
+        scheduleEstimate();
+
+        // Refine Estimate button
+        var refBtn = document.getElementById('refineEstBtn');
+        if (refBtn) {
+            refBtn.addEventListener('click', function() {
+                if (_refined) return;
+                var rb = this;
+                var plotBtn = document.getElementById('sendToQueue');
+                rb.disabled = true;
+                rb.textContent = 'Running vpype…';
+                if (plotBtn) plotBtn.textContent = '\u2192 Plot (…)';
+                getSvgString().then(function(svgStr) {
+                    return fetch(QUEUE_URL + '/refine_estimate', {
+                        method: 'POST',
+                        headers: queueHeaders(),
+                        body: JSON.stringify({ svg: svgStr })
+                    });
+                }).then(function(r) {
+                    if (!r.ok) throw new Error('server ' + r.status);
+                    return r.json();
+                }).then(function(d) {
+                    _refined = true;
+                    if (plotBtn) plotBtn.textContent = '\u2192 Plot (' + fmtDur(d.est_s || 0) + ' ✓)';
+                    rb.textContent = 'Refine Estimate';
+                    rb.disabled = false;
+                }).catch(function(err) {
+                    if (plotBtn) plotBtn.textContent = '\u2192 Plot';
+                    rb.textContent = 'Refine failed';
+                    rb.disabled = false;
+                    console.error('refine:', err);
+                });
+            });
+        }
+    });
+})();
+</script>
 <script>
 window.addEventListener('error', function(e) {
     console.error('ERROR:', e.message, e.filename, e.lineno);
@@ -565,3 +994,4 @@ window.addEventListener('error', function(e) {
     document.body.appendChild(msg);
 });
 </script>
+</body>

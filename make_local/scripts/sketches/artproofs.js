@@ -7,28 +7,25 @@ window.sketches['artproofs'] = function(p) {
         paperSize: '9x12',
         margin: 1,
         instanceCount: 1,
+        borderProb: 100,
         penWidthMm: 0.4,
         viewMode: 'multiply'
     };
     // Shared defaults — each instance inherits these unless it has a per-instance override
     var DEFAULTS = {
         palette: ['#000000', '#e63946'],
-        fillStyles: ['arcs'],
+        fillStyles: ['contour'],
         compositeMode: 'arcTrim',
         layerWidthMean: 0.3,
         layerWidthSD: 0.15,
         eltsPerLayerMean: 0.4,
         eltsPerLayerSD: 0.2,
-        fillFactor: 0.5,
         sliceProb: 0.8,
-        fillBlackProb: 0.5,
         wedgeCount: 0.3,
         wedgeThetaSize: 0.3,
         wedgeRadius: 0.5,
         ringConcentricity: 0,
-        arcConcentricity: 0,
-        fillAngle: 45,
-        fillJitter: 0
+        arcConcentricity: 0
     };
 
     var instances = [];
@@ -112,7 +109,7 @@ window.sketches['artproofs'] = function(p) {
         inst.elements = [];
         var maxRadius = baseRadius;
         var pal = P.palette.length ? P.palette : ['#000000'];
-        var jitterFrac   = P.fillJitter / 100;
+        var jitterFrac   = plotFills.getFillImperfection();
         var ringCFrac    = P.ringConcentricity / 100;
         var arcCFrac     = P.arcConcentricity  / 100;
 
@@ -126,11 +123,11 @@ window.sketches['artproofs'] = function(p) {
             var ringDy = ringCFrac > 0 ? (fillRng() * 2 - 1) * ringCFrac * maxRadius * 0.35 : fillRng() * 0;
             for (var j = 0; j < numElts; j++) {
                 if (P.sliceProb > rng()) {
-                    var fillFact = rng() < P.fillBlackProb ? P.fillFactor : 0;
+                    var fillFact = rng() < plotFills.getFillProb() ? 1.0 : 0;
                     var strokeIdx = Math.floor(rng() * pal.length);
                     var strokeCol = pal[strokeIdx];
                     var fillCol   = pal.length > 1 ? pal[(strokeIdx + 1) % pal.length] : strokeCol;
-                    var elFillAngle    = P.fillAngle + (jitterFrac > 0 ? (fillRng() * 2 - 1) * jitterFrac * 60 : fillRng() * 0);
+                    var elFillAngle    = plotFills.getFillAngle() + (jitterFrac > 0 ? (fillRng() * 2 - 1) * jitterFrac * 60 : fillRng() * 0);
                     var elFillPhase    = fillRng() * Math.PI * 2;
                     var elSpacingScale = 1 + (jitterFrac > 0 ? (fillRng() * 2 - 1) * jitterFrac * 0.4 : fillRng() * 0);
                     var arcDx = arcCFrac > 0 ? (fillRng() * 2 - 1) * arcCFrac * maxRadius * 0.18 : fillRng() * 0;
@@ -140,7 +137,8 @@ window.sketches['artproofs'] = function(p) {
                         r0: currRadius, r1: currRadius + layerWidth,
                         fillFact: fillFact, color: strokeCol, fillColor: fillCol,
                         fillAngle: elFillAngle, fillPhase: elFillPhase, spacingScale: elSpacingScale,
-                        fillStyle: P.fillStyles[Math.floor(fillRng() * P.fillStyles.length)] };
+                        fillStyle: P.fillStyles.concat(plotFills.getScatterStyles())[Math.floor(fillRng() * (P.fillStyles.length + plotFills.getScatterStyles().length) || 1)] };
+                    _el._bord = bordHash(j * eltSize, currRadius, ringDx + arcDx, layerWidth);
                     cacheElementGeometry(_el);
                     inst.elements.push(_el);
                 }
@@ -156,8 +154,10 @@ window.sketches['artproofs'] = function(p) {
             var wedgeIdx = Math.floor(rng() * pal.length);
             var wDx = arcCFrac > 0 ? (fillRng() * 2 - 1) * arcCFrac * maxRadius * 0.25 : fillRng() * 0;
             var wDy = arcCFrac > 0 ? (fillRng() * 2 - 1) * arcCFrac * maxRadius * 0.25 : fillRng() * 0;
-            inst.elements.push({ type: 'wedge', cx: wDx, cy: wDy, r: radius,
-                t0: startTheta, t1: startTheta + thetaSize, color: pal[wedgeIdx] });
+            var _wel = { type: 'wedge', cx: wDx, cy: wDy, r: radius,
+                t0: startTheta, t1: startTheta + thetaSize, color: pal[wedgeIdx] };
+            _wel._bord = bordHash(startTheta, radius, wDx, thetaSize);
+            inst.elements.push(_wel);
         }
     }
 
@@ -200,43 +200,62 @@ window.sketches['artproofs'] = function(p) {
         p.arc(cx, cy, r * 2, r * 2, -t1, -t0, p.OPEN);
     }
 
+    function effectiveHatchDensity() {
+        return plotFills.getEffectiveDensity();
+    }
+
     function cacheElementGeometry(el) {
         if (el.type === 'wedge' || el.fillFact <= 0) { el._cache = null; return; }
-        var style = el.fillStyle || 'arcs';
-        if (style === 'none') { el._cache = null; return; }
-        var sp = fillSpacing(el);
-        if (style === 'arcs') {
-            var width = el.r1 - el.r0, numLines = fillLineCount(width, el.fillFact), ls = width / (numLines + 1);
-            var rings = [];
-            for (var i = 0; i < numLines; i++) rings.push(el.r0 + ls * (i + 1));
-            el._cache = { type: 'arcs', rings: rings }; return;
+        var style = el.fillStyle || 'contour';
+        var sp = paper.mmToPixels(1 / effectiveHatchDensity()) * (el.spacingScale || 1);
+        if (style === 'contour') {
+            var _cpoly = wedgePoly(el, 14);
+            el._cache = { type: 'contour', rows: concentricArcRows(el, sp), poly: _cpoly }; return;
         }
         var poly = wedgePoly(el, 14);
+        if (window._pl0tMode === 'fast') {
+            el._cache = { type: 'pattern', poly: poly, angle: el.fillAngle || 0,
+                          spacing: sp, crosshatch: style === 'crosshatch' };
+            return;
+        }
+        var ph = el.fillPhase || 0;
+        if (style === 'hatch') {
+            el._cache = { type: 'rows', rowSets: [plotFills.hatchPolyRows(poly, el.fillAngle, sp)] }; return;
+        } else if (style === 'crosshatch') {
+            el._cache = { type: 'rows', rowSets: [plotFills.hatchPolyRows(poly, el.fillAngle, sp), plotFills.hatchPolyRows(poly, el.fillAngle + 90, sp)] }; return;
+        } else if (style === 'sketchHatch') {
+            el._cache = { type: 'rows', rowSets: [plotFills.sketchHatchRows(plotFills.hatchPolyRows(poly, el.fillAngle, sp), ph, sp * (0.6 + plotFills.getFillImperfection() * 1.4))] }; return;
+        } else if (style === 'zigzagHatch') {
+            el._cache = { type: 'rows', rowSets: [plotFills.zigzagPolyRows(poly, el.fillAngle, sp * 1.2, ph)] }; return;
+        } else if (style === 'waves') {
+            el._cache = { type: 'path2d', d: plotFills.waveConnectedPathD(poly, el.fillAngle, sp, ph) }; return;
+        }
         var segs;
-        if (style === 'hatch')           { segs = hatchSegs(poly, el.fillAngle, sp); }
-        else if (style === 'crosshatch') { segs = hatchSegs(poly, el.fillAngle, sp).concat(hatchSegs(poly, el.fillAngle + 90, sp)); }
-        else if (style === 'sketchHatch'){ segs = noisyHatchSegs(poly, el.fillAngle, sp, el.fillPhase||0, sp*0.18, false); }
-        else if (style === 'streakHatch'){ segs = noisyHatchSegs(poly, el.fillAngle, sp, el.fillPhase||0, sp*0.38, true); }
-        else if (style === 'zigzagHatch'){ segs = zigzagSegs(poly, el.fillAngle, sp*1.2, el.fillPhase||0); }
-        else if (style === 'waves')      { segs = waveSegs(poly, el.fillAngle, sp, el.fillPhase||0); }
-        else if (style === 'tileSprigs') { segs = tilePatternSegs(poly, el.fillAngle, sp, el.fillPhase||0, 'sprigs'); }
-        else if (style === 'tileRibbons'){ segs = tilePatternSegs(poly, el.fillAngle, sp, el.fillPhase||0, 'ribbons'); }
+        if (style === 'squiggleHatch') {
+            el._cache = { type: 'squiggle', rows: plotFills.squiggleRows(plotFills.hatchPolyRows(poly, el.fillAngle, sp), sp, ph, sp * 0.55) }; return;
+        }
+        else if (style === 'sprigFill')    { segs = plotFills.scatterPolyFill(poly, 'sprig',    sp, 1.0, Math.round((el.fillPhase || 0) * 1e6)); }
+        else if (style === 'ribbonFill')   { segs = plotFills.scatterPolyFill(poly, 'ribbon',   sp, 1.0, Math.round((el.fillPhase || 0) * 1e6)); }
+        else if (style === 'crossFill')    { segs = plotFills.scatterPolyFill(poly, 'cross',    sp, 1.0, Math.round((el.fillPhase || 0) * 1e6)); }
+        else if (style === 'asteriskFill') { segs = plotFills.scatterPolyFill(poly, 'asterisk', sp, 1.0, Math.round((el.fillPhase || 0) * 1e6)); }
+        else if (style === 'tileSprigs') { segs = tilePatternSegs(poly, el.fillAngle, sp, ph, 'sprigs'); }
+        else if (style === 'tileRibbons'){ segs = tilePatternSegs(poly, el.fillAngle, sp, ph, 'ribbons'); }
         else if (style === 'dots' || style === 'bigDots' || style === 'mixedDots') {
             var sizeMode = style === 'mixedDots' ? 'mixed' : (style === 'bigDots' ? 'big' : 'normal');
             var dotSpacing = style === 'bigDots' ? sp * 1.65 : sp;
-            el._cache = { type: 'dots', pts: dotPoints(poly, dotSpacing, el.fillPhase||0, sizeMode), sp: dotSpacing }; return;
+            el._cache = { type: 'dots', pts: dotPoints(poly, dotSpacing, ph, sizeMode), sp: dotSpacing }; return;
         } else { el._cache = null; return; }
         el._cache = { type: 'segs', segs: segs };
     }
 
     function fillLineCount(width, fillFact) {
-        var penPx = Math.max(0.5, paper.mmToPixels(PARAMS.penWidthMm));
+        var penPx = Math.max(0.5, paper.mmToPixels(Number(window._pl0tPenWidthMm) || PARAMS.penWidthMm));
         var maxLines = Math.max(1, Math.floor(width / penPx));
         return Math.max(1, Math.round(fillFact * maxLines));
     }
 
     function fillSpacing(el) {
-        var penPx = Math.max(0.5, paper.mmToPixels(PARAMS.penWidthMm));
+        var penPx = Math.max(0.5, paper.mmToPixels(Number(window._pl0tPenWidthMm) || PARAMS.penWidthMm));
         var width = el.r1 - el.r0;
         var numLines = fillLineCount(width, el.fillFact);
         return Math.max(penPx, width / (numLines + 1)) * (el.spacingScale || 1);
@@ -253,6 +272,56 @@ window.sketches['artproofs'] = function(p) {
             pts.push({ x: el.cx + el.r0 * Math.cos(-t), y: el.cy + el.r0 * Math.sin(-t) });
         }
         return pts;
+    }
+
+    // Concentric arcs that repeat the element's curve (true contour fill for
+    // arc slices): step the radius outer->inner, each arc spanning the angle.
+    function concentricArcRows(el, sp) {
+        var rows = [];
+        var rOuter = Math.max(el.r0, el.r1), rInner = Math.min(el.r0, el.r1);
+        if (!(sp > 0.2)) sp = 0.2;
+        var span = Math.abs(el.t1 - el.t0);
+        var n = Math.max(6, Math.min(160, Math.ceil(span / (Math.PI / 90))));
+        var guard = 0;
+        for (var r = rOuter; r >= rInner + 0.5 && guard < 400; r -= sp, guard++) {
+            var arc = [];
+            for (var i = 0; i <= n; i++) {
+                var t = el.t0 + (el.t1 - el.t0) * i / n;
+                arc.push({ x: el.cx + r * Math.cos(-t), y: el.cy + r * Math.sin(-t) });
+            }
+            rows.push(arc);
+        }
+        return rows;
+    }
+
+    // Connect open arc rows boustrophedon (alternate direction) into one stroke.
+    // Pen-down: arcs connected boustrophedon into one stroke.
+    // Pen-up (global Pen lifts during fills): each arc is a separate stroke.
+    function openContourPathD(rows) {
+        var lift = plotFills.isPenLift();
+        var d = '';
+        for (var i = 0; i < rows.length; i++) {
+            var poly = (!lift && (i % 2 === 1)) ? rows[i].slice().reverse() : rows[i];
+            for (var j = 0; j < poly.length; j++) {
+                var startCmd = lift ? (j === 0) : (d === '');
+                d += (d ? ' ' : '') + (startCmd ? 'M' : 'L') + poly[j].x.toFixed(2) + ' ' + poly[j].y.toFixed(2);
+            }
+        }
+        return d;
+    }
+
+    function drawOpenContour(ctx, rows) {
+        var lift = plotFills.isPenLift();
+        ctx.beginPath();
+        var started = false;
+        for (var i = 0; i < rows.length; i++) {
+            var poly = (!lift && (i % 2 === 1)) ? rows[i].slice().reverse() : rows[i];
+            for (var j = 0; j < poly.length; j++) {
+                if ((lift && j === 0) || !started) { ctx.moveTo(poly[j].x, poly[j].y); started = true; }
+                else ctx.lineTo(poly[j].x, poly[j].y);
+            }
+        }
+        ctx.stroke();
     }
 
     function wedgeElementPoly(el, n) {
@@ -423,8 +492,28 @@ window.sketches['artproofs'] = function(p) {
         var cache = el._cache;
         var ctx = p.drawingContext;
         p.stroke(inkColor(el.fillColor || el.color));
-        if (cache.type === 'arcs') {
-            for (var i = 0; i < cache.rings.length; i++) drawArc(el.cx, el.cy, cache.rings[i], el.t0, el.t1);
+        if (cache.type === 'contour') {
+            ctx.save();
+            if (cache.poly && cache.poly.length) {
+                ctx.beginPath();
+                ctx.moveTo(cache.poly[0].x, cache.poly[0].y);
+                for (var _ci = 1; _ci < cache.poly.length; _ci++) ctx.lineTo(cache.poly[_ci].x, cache.poly[_ci].y);
+                ctx.closePath();
+                ctx.clip();
+            }
+            ctx.strokeStyle = inkColor(el.fillColor || el.color);
+            drawOpenContour(ctx, cache.rows);
+            ctx.restore();
+        } else if (cache.type === 'rows') {
+            var col = inkColor(el.fillColor || el.color);
+            ctx.strokeStyle = col;
+            cache.rowSets.forEach(function(rows) { plotFills.drawConnectedRows(ctx, rows); });
+        } else if (cache.type === 'squiggle') {
+            ctx.strokeStyle = inkColor(el.fillColor || el.color);
+            plotFills.drawSquiggle(ctx, cache.rows);
+        } else if (cache.type === 'path2d') {
+            ctx.strokeStyle = inkColor(el.fillColor || el.color);
+            ctx.stroke(new Path2D(cache.d));
         } else if (cache.type === 'segs') {
             var segs = cache.segs, col = inkColor(el.fillColor || el.color);
             ctx.beginPath();
@@ -439,46 +528,113 @@ window.sketches['artproofs'] = function(p) {
             var pts = cache.pts, sp = cache.sp;
             for (var d = 0; d < pts.length; d++) p.circle(pts[d].x, pts[d].y, sp * pts[d].radiusScale * 2);
             p.noFill();
+        } else if (cache.type === 'pattern') {
+            var _col = inkColor(el.fillColor || el.color);
+            var _ts = Math.max(2, Math.ceil(cache.spacing));
+            var _makeTile = function(ang) {
+                var oc = document.createElement('canvas');
+                oc.width = 1; oc.height = _ts;
+                var octx = oc.getContext('2d');
+                octx.strokeStyle = _col; octx.lineWidth = 1;
+                octx.beginPath(); octx.moveTo(0, 0.5); octx.lineTo(1, 0.5); octx.stroke();
+                var _pat = ctx.createPattern(oc, 'repeat');
+                _pat.setTransform(new DOMMatrix().rotate(ang));
+                return _pat;
+            };
+            var _poly = cache.poly;
+            var _clipPoly = function() {
+                ctx.beginPath();
+                if (_poly && _poly.length) {
+                    ctx.moveTo(_poly[0].x, _poly[0].y);
+                    for (var _pi = 1; _pi < _poly.length; _pi++) ctx.lineTo(_poly[_pi].x, _poly[_pi].y);
+                    ctx.closePath();
+                }
+            };
+            ctx.save();
+            _clipPoly(); ctx.fillStyle = _makeTile(cache.angle || 0); ctx.fill();
+            if (cache.crosshatch) {
+                _clipPoly(); ctx.fillStyle = _makeTile((cache.angle || 0) + 90); ctx.fill();
+            }
+            ctx.restore();
         }
     }
 
     function fillToSVG(el, fc, swStr) {
         if (el.fillFact <= 0) return [];
-        var style = el.fillStyle || DEFAULTS.fillStyles[0] || 'arcs';
-        var sp = fillSpacing(el);
+        var style = el.fillStyle || DEFAULTS.fillStyles[0] || 'contour';
+        var sp = paper.mmToPixels(1 / effectiveHatchDensity()) * (el.spacingScale || 1);
         var lines = [];
-        if (style === 'arcs' || !style) {
-            var width = el.r1 - el.r0, numLines = fillLineCount(width, el.fillFact), lineSpacing = width / (numLines + 1);
-            for (var i = 0; i < numLines; i++) lines.push('<path d="' + svgArcPath(el.cx, el.cy, el.r0 + lineSpacing*(i+1), el.t0, el.t1) + '" fill="none" stroke="' + fc + '" stroke-width="' + swStr + '"/>');
+        if (style === 'contour' || !style) {
+            var connD = openContourPathD(concentricArcRows(el, sp));
+            if (connD) lines.push('<path d="' + connD + '" fill="none" stroke="' + fc + '" stroke-width="' + swStr + '" stroke-linecap="round" stroke-linejoin="round"/>');
             return lines;
         }
-        if (style === 'none') return [];
-        var poly = wedgePoly(el, 14), segs = [];
-        if (style === 'hatch' || style === 'crosshatch') {
-            segs = hatchSegs(poly, el.fillAngle, sp);
-            if (style === 'crosshatch') segs = segs.concat(hatchSegs(poly, el.fillAngle + 90, sp));
-        } else if (style === 'sketchHatch' || style === 'streakHatch') {
-            segs = noisyHatchSegs(poly, el.fillAngle, sp, el.fillPhase||0, style==='streakHatch'?sp*0.38:sp*0.18, style==='streakHatch');
-        } else if (style === 'zigzagHatch') { segs = zigzagSegs(poly, el.fillAngle, sp*1.2, el.fillPhase||0);
-        } else if (style === 'waves') { segs = waveSegs(poly, el.fillAngle, sp, el.fillPhase||0);
-        } else if (style === 'tileSprigs' || style === 'tileRibbons') {
-            segs = tilePatternSegs(poly, el.fillAngle, sp, el.fillPhase||0, style==='tileRibbons'?'ribbons':'sprigs');
+        var poly = wedgePoly(el, 14);
+        var ph = el.fillPhase || 0;
+        // Connected-path styles: single <path>, alternating rows, no pen lifts between rows.
+        var connD = '';
+        if (style === 'hatch') {
+            connD = plotFills.connectedPathD(plotFills.hatchPolyRows(poly, el.fillAngle, sp));
+        } else if (style === 'crosshatch') {
+            var d1 = plotFills.connectedPathD(plotFills.hatchPolyRows(poly, el.fillAngle, sp));
+            var d2 = plotFills.connectedPathD(plotFills.hatchPolyRows(poly, el.fillAngle + 90, sp));
+            connD = [d1, d2].filter(Boolean).join(' ');
+        } else if (style === 'sketchHatch') {
+            connD = plotFills.connectedPathD(plotFills.sketchHatchRows(plotFills.hatchPolyRows(poly, el.fillAngle, sp), ph, sp * (0.6 + plotFills.getFillImperfection() * 1.4)));
+        } else if (style === 'squiggleHatch') {
+            connD = plotFills.squiggleConnectedPathD(plotFills.squiggleRows(plotFills.hatchPolyRows(poly, el.fillAngle, sp), sp, ph, sp * 0.55));
+        } else if (style === 'waves') {
+            connD = plotFills.waveConnectedPathD(poly, el.fillAngle, sp, ph);
+        } else if (style === 'zigzagHatch') {
+            connD = plotFills.zigzagConnectedPathD(poly, el.fillAngle, sp * 1.2, ph);
+        }
+        if (connD) {
+            lines.push('<path d="' + connD + '" fill="none" stroke="' + fc + '" stroke-width="' + swStr + '" stroke-linecap="round" stroke-linejoin="round"/>');
+            return lines;
+        }
+        // Remaining: individual segments (tileSprigs, tileRibbons, dots)
+        var segs = [];
+        if (style === 'sprigFill')    { segs = plotFills.scatterPolyFill(poly, 'sprig',    sp, 1.0, Math.round(ph * 1e6)); }
+        else if (style === 'ribbonFill')   { segs = plotFills.scatterPolyFill(poly, 'ribbon',   sp, 1.0, Math.round(ph * 1e6)); }
+        else if (style === 'crossFill')    { segs = plotFills.scatterPolyFill(poly, 'cross',    sp, 1.0, Math.round(ph * 1e6)); }
+        else if (style === 'asteriskFill') { segs = plotFills.scatterPolyFill(poly, 'asterisk', sp, 1.0, Math.round(ph * 1e6)); }
+        else if (style === 'tileSprigs' || style === 'tileRibbons') {
+            segs = tilePatternSegs(poly, el.fillAngle, sp, ph, style === 'tileRibbons' ? 'ribbons' : 'sprigs');
         } else if (style === 'dots' || style === 'bigDots' || style === 'mixedDots') {
-            var sizeMode = style==='mixedDots'?'mixed':(style==='bigDots'?'big':'normal'), dotSpacing = style==='bigDots'?sp*1.65:sp;
-            dotPoints(poly, dotSpacing, el.fillPhase||0, sizeMode).forEach(function(pt) {
-                lines.push('<circle cx="' + pt.x.toFixed(2) + '" cy="' + pt.y.toFixed(2) + '" r="' + (dotSpacing*pt.radiusScale).toFixed(2) + '" fill="none" stroke="' + fc + '" stroke-width="' + swStr + '"/>');
+            var sizeMode = style === 'mixedDots' ? 'mixed' : (style === 'bigDots' ? 'big' : 'normal');
+            var dotSpacing = style === 'bigDots' ? sp * 1.65 : sp;
+            dotPoints(poly, dotSpacing, ph, sizeMode).forEach(function(pt) {
+                lines.push('<circle cx="' + pt.x.toFixed(2) + '" cy="' + pt.y.toFixed(2) + '" r="' + (dotSpacing * pt.radiusScale).toFixed(2) + '" fill="none" stroke="' + fc + '" stroke-width="' + swStr + '"/>');
             });
             return lines;
         }
-        for (var j = 0; j < segs.length; j++) lines.push('<line x1="'+segs[j].x1.toFixed(2)+'" y1="'+segs[j].y1.toFixed(2)+'" x2="'+segs[j].x2.toFixed(2)+'" y2="'+segs[j].y2.toFixed(2)+'" stroke="'+fc+'" stroke-width="'+swStr+'" stroke-linecap="round"/>');
+        for (var j = 0; j < segs.length; j++)
+            lines.push('<line x1="' + segs[j].x1.toFixed(2) + '" y1="' + segs[j].y1.toFixed(2) + '" x2="' + segs[j].x2.toFixed(2) + '" y2="' + segs[j].y2.toFixed(2) + '" stroke="' + fc + '" stroke-width="' + swStr + '" stroke-linecap="round"/>');
         return lines;
     }
 
+    // Stable per-element value (geometry hash, not from the rng stream) so the
+    // Borders % threshold is consistent across preview/export and reseeds.
+    function bordHash() {
+        var v = 0;
+        for (var i = 0; i < arguments.length; i++) v += (arguments[i] || 0) * (i * 97.13 + 12.9898);
+        v = Math.sin(v) * 43758.5453;
+        return v - Math.floor(v);
+    }
+    function showBorder(el) {
+        var prob = (PARAMS.borderProb === undefined ? 100 : PARAMS.borderProb) / 100;
+        if (prob >= 1) return true;
+        if (prob <= 0) return false;
+        return (el._bord || 0) < prob;
+    }
+
     function drawSlice(el) {
-        var p0=ptAt(el.cx,el.cy,el.r0,el.t0),p1=ptAt(el.cx,el.cy,el.r1,el.t0),p2=ptAt(el.cx,el.cy,el.r0,el.t1),p3=ptAt(el.cx,el.cy,el.r1,el.t1);
-        p.stroke(inkColor(el.color)); p.noFill();
-        drawArc(el.cx,el.cy,el.r0,el.t0,el.t1); drawArc(el.cx,el.cy,el.r1,el.t0,el.t1);
-        p.line(p0.x,p0.y,p1.x,p1.y); p.line(p2.x,p2.y,p3.x,p3.y);
+        if (showBorder(el)) {
+            var p0=ptAt(el.cx,el.cy,el.r0,el.t0),p1=ptAt(el.cx,el.cy,el.r1,el.t0),p2=ptAt(el.cx,el.cy,el.r0,el.t1),p3=ptAt(el.cx,el.cy,el.r1,el.t1);
+            p.stroke(inkColor(el.color)); p.noFill();
+            drawArc(el.cx,el.cy,el.r0,el.t0,el.t1); drawArc(el.cx,el.cy,el.r1,el.t0,el.t1);
+            p.line(p0.x,p0.y,p1.x,p1.y); p.line(p2.x,p2.y,p3.x,p3.y);
+        }
         drawFill(el); p.noFill();
     }
 
@@ -492,6 +648,7 @@ window.sketches['artproofs'] = function(p) {
     }
 
     function drawWedge(el) {
+        if (!showBorder(el)) return;
         var p0=ptAt(el.cx,el.cy,el.r,el.t0),p1=ptAt(el.cx,el.cy,el.r,el.t1);
         p.stroke(inkColor(el.color)); p.noFill();
         drawArc(el.cx,el.cy,el.r,el.t0,el.t1); p.line(el.cx,el.cy,p0.x,p0.y); p.line(el.cx,el.cy,p1.x,p1.y);
@@ -511,11 +668,11 @@ window.sketches['artproofs'] = function(p) {
     function sliceToSVG(el, sw) {
         var p0=ptAt(el.cx,el.cy,el.r0,el.t0),p1=ptAt(el.cx,el.cy,el.r1,el.t0),p2=ptAt(el.cx,el.cy,el.r0,el.t1),p3=ptAt(el.cx,el.cy,el.r1,el.t1);
         var sc=el.color,fc=el.fillColor||el.color,sw2=sw.toFixed(2);
-        return ['<path d="'+svgArcPath(el.cx,el.cy,el.r0,el.t0,el.t1)+'" fill="none" stroke="'+sc+'" stroke-width="'+sw2+'"/>',
+        var border = showBorder(el) ? ['<path d="'+svgArcPath(el.cx,el.cy,el.r0,el.t0,el.t1)+'" fill="none" stroke="'+sc+'" stroke-width="'+sw2+'"/>',
                 '<path d="'+svgArcPath(el.cx,el.cy,el.r1,el.t0,el.t1)+'" fill="none" stroke="'+sc+'" stroke-width="'+sw2+'"/>',
                 '<line x1="'+p0.x.toFixed(2)+'" y1="'+p0.y.toFixed(2)+'" x2="'+p1.x.toFixed(2)+'" y2="'+p1.y.toFixed(2)+'" stroke="'+sc+'" stroke-width="'+sw2+'"/>',
-                '<line x1="'+p2.x.toFixed(2)+'" y1="'+p2.y.toFixed(2)+'" x2="'+p3.x.toFixed(2)+'" y2="'+p3.y.toFixed(2)+'" stroke="'+sc+'" stroke-width="'+sw2+'"/>']
-               .concat(fillToSVG(el,fc,sw2)).join('\n');
+                '<line x1="'+p2.x.toFixed(2)+'" y1="'+p2.y.toFixed(2)+'" x2="'+p3.x.toFixed(2)+'" y2="'+p3.y.toFixed(2)+'" stroke="'+sc+'" stroke-width="'+sw2+'"/>'] : [];
+        return border.concat(fillToSVG(el,fc,sw2)).join('\n');
     }
 
     function maskToSVG(el) {
@@ -524,6 +681,7 @@ window.sketches['artproofs'] = function(p) {
     }
 
     function wedgeToSVG(el, sw) {
+        if (!showBorder(el)) return '';
         var p0=ptAt(el.cx,el.cy,el.r,el.t0),p1=ptAt(el.cx,el.cy,el.r,el.t1),c=el.color,sw2=sw.toFixed(2);
         return ['<path d="'+svgArcPath(el.cx,el.cy,el.r,el.t0,el.t1)+'" fill="none" stroke="'+c+'" stroke-width="'+sw2+'"/>',
                 '<line x1="'+el.cx.toFixed(2)+'" y1="'+el.cy.toFixed(2)+'" x2="'+p0.x.toFixed(2)+'" y2="'+p0.y.toFixed(2)+'" stroke="'+c+'" stroke-width="'+sw2+'"/>',
@@ -600,7 +758,8 @@ window.sketches['artproofs'] = function(p) {
         var blob = new Blob([svg], { type: 'image/svg+xml' });
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
-        a.href = url; a.download = 'artproofs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.svg';
+        var _slug = (window.makeSketchApp && window.makeSketchApp.getSeedSlug) ? window.makeSketchApp.getSeedSlug() : '';
+        a.href = url; a.download = '90percentart-artproofs-' + (_slug || new Date().toISOString().replace(/[:.]/g, '-')) + '.svg';
         a.click(); URL.revokeObjectURL(url);
     }
 
@@ -631,16 +790,12 @@ window.sketches['artproofs'] = function(p) {
         syncRange('layerWidthSD',      s100(P.layerWidthSD));
         syncRange('eltsPerLayerMean',  s100(P.eltsPerLayerMean));
         syncRange('eltsPerLayerSD',    s100(P.eltsPerLayerSD));
-        syncRange('fillFactor',        s100(P.fillFactor));
         syncRange('sliceProb',         s100(P.sliceProb));
-        syncRange('fillBlackProb',     s100(P.fillBlackProb));
         syncRange('wedgeCount',        s100(P.wedgeCount));
         syncRange('wedgeThetaSize',    s100(P.wedgeThetaSize));
         syncRange('wedgeRadius',       s100(P.wedgeRadius));
         syncRange('ringConcentricity', P.ringConcentricity);
         syncRange('arcConcentricity',  P.arcConcentricity);
-        syncRange('fillAngle',         P.fillAngle);
-        syncRange('fillJitter',        P.fillJitter);
         syncChips('compositeMode', P.compositeMode);
         syncChips('fillStyle',     P.fillStyles);
         var palPdef = api.params.find(function(x) { return x.id === 'palette'; });
@@ -658,15 +813,13 @@ window.sketches['artproofs'] = function(p) {
         s.eltsPerLayerMean = rnd(10, 80) / 100;
         s.eltsPerLayerSD   = rnd(5,  40) / 100;
         s.sliceProb        = rnd(50, 100) / 100;
-        s.fillBlackProb    = rnd(20, 80) / 100;
         s.wedgeCount       = rnd(0,  60) / 100;
         s.wedgeThetaSize   = rnd(10, 60) / 100;
         s.wedgeRadius      = rnd(20, 80) / 100;
         s.ringConcentricity = rnd(0, 50);
         s.arcConcentricity  = rnd(0, 50);
-        s.fillAngle        = rnd(0, 180);
         s.compositeMode    = ['xray', 'arcTrim', 'trim'][Math.floor(Math.random() * 3)];
-        var fillOpts = ['arcs','hatch','sketchHatch','streakHatch','zigzagHatch','crosshatch','waves','tileSprigs','tileRibbons','dots'];
+        var fillOpts = ['contour','hatch','sketchHatch','squiggleHatch','zigzagHatch','crosshatch','waves'];
         var fp = fillOpts.slice(), fills = [];
         var fcount = 1 + Math.floor(Math.random() * 3);
         while (fills.length < fcount && fp.length) fills.push(fp.splice(Math.floor(Math.random() * fp.length), 1)[0]);
@@ -758,6 +911,12 @@ window.sketches['artproofs'] = function(p) {
 
     var api = {
         hasPause: false,
+        stylePresets: [
+            { label: 'Concentric proof', values: { fillStyle:['contour'], compositeMode:'arcTrim', sliceProb:80, borderProb:100, instanceCount:1 } },
+            { label: 'Hatched rings', values: { fillStyle:['hatch'], compositeMode:'xray', sliceProb:90, borderProb:100 } },
+            { label: 'Chaotic stack', values: { fillStyle:['sketchHatch'], compositeMode:'arcTrim', sliceProb:80, borderProb:60, instanceCount:3 } },
+            { label: 'Borderless fills', values: { fillStyle:['hatch'], borderProb:0, compositeMode:'trim', sliceProb:85 } }
+        ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'instanceCount', label: 'Instances', type: 'range', min: 1, max: 8, step: 1, value: 1 },
             { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6,
@@ -771,32 +930,24 @@ window.sketches['artproofs'] = function(p) {
               ]},
             { id: 'compositeMode', label: 'Compositing', type: 'select', value: 'arcTrim',
               options: [{ value: 'xray', label: 'Xray' }, { value: 'arcTrim', label: 'Arcs trim, wedges xray' }, { value: 'trim', label: 'Trim all' }] },
+            { id: 'borderProb', label: 'Borders %', type: 'range', min: 0, max: 100, step: 5, value: 100 },
             { id: 'layerWidthMean',    label: 'Layer width',        type: 'range', min: 1,   max: 100, step: 1,   value: 30,  group: 'arcs', _toInternal: function(v){return v/100;} },
             { id: 'layerWidthSD',      label: 'Width variation',    type: 'range', min: 0,   max: 100, step: 1,   value: 15,  group: 'arcs', _toInternal: function(v){return v/100;} },
             { id: 'eltsPerLayerMean',  label: 'Segments per ring',  type: 'range', min: 1,   max: 100, step: 1,   value: 40,  group: 'arcs', _toInternal: function(v){return v/100;} },
             { id: 'eltsPerLayerSD',    label: 'Segment variation',  type: 'range', min: 0,   max: 100, step: 1,   value: 20,  group: 'arcs', _toInternal: function(v){return v/100;} },
-            { id: 'fillFactor',        label: '% arcs filled',      type: 'range', min: 0,   max: 100, step: 1,   value: 50,  group: 'textures', _toInternal: function(v){return v/100;} },
             { id: 'sliceProb',         label: 'Slice probability',  type: 'range', min: 0,   max: 100, step: 1,   value: 80,  group: 'arcs', _toInternal: function(v){return v/100;} },
-            { id: 'fillBlackProb',     label: 'Fill density',       type: 'range', min: 0,   max: 100, step: 1,   value: 50,  group: 'textures', _toInternal: function(v){return v/100;} },
             { id: 'wedgeCount',        label: 'Wedge amount',       type: 'range', min: 0,   max: 100, step: 1,   value: 30,  group: 'wedges', _toInternal: function(v){return v/100;} },
             { id: 'wedgeThetaSize',    label: 'Wedge width',        type: 'range', min: 0,   max: 100, step: 1,   value: 30,  group: 'wedges', _toInternal: function(v){return v/100;} },
             { id: 'wedgeRadius',       label: 'Wedge reach',        type: 'range', min: 0,   max: 100, step: 1,   value: 50,  group: 'wedges', _toInternal: function(v){return v/100;} },
             { id: 'ringConcentricity', label: 'Ring concentricity', type: 'range', min: 0,   max: 100, step: 1,   value: 0,   group: 'arcs' },
             { id: 'arcConcentricity',  label: 'Arc concentricity',  type: 'range', min: 0,   max: 100, step: 1,   value: 0,   group: 'arcs' },
-            { id: 'fillStyle', label: 'Fill textures', type: 'select', multiSelect: true, value: ['arcs'], group: 'textures',
+            { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['contour'], group: 'textures',
               options: [
-                { value: 'arcs',        label: 'Arcs (default)' }, { value: 'hatch',       label: 'Hatch' },
-                { value: 'sketchHatch', label: 'Sketch hatch' },   { value: 'streakHatch', label: 'Streak hatch' },
+                { value: 'contour',     label: 'Contour' },         { value: 'hatch',       label: 'Hatch' },
+                { value: 'sketchHatch', label: 'Chaotic hatch' },   { value: 'squiggleHatch', label: 'Squiggle hatch' },
                 { value: 'zigzagHatch', label: 'Zigzag hatch' },   { value: 'crosshatch',  label: 'Crosshatch' },
-                { value: 'waves',       label: 'Waves' },          { value: 'tileSprigs',  label: 'Sprig tile' },
-                { value: 'tileRibbons', label: 'Ribbon tile' },    { value: 'dots',        label: 'Dots' },
-                { value: 'bigDots',     label: 'Big dots' },       { value: 'mixedDots',   label: 'Mixed dots' },
-                { value: 'none',        label: 'None' }
+                { value: 'waves',       label: 'Waves' }
               ]},
-            { id: 'fillAngle',  label: 'Fill angle°', type: 'range', min: 0, max: 180, step: 1, value: 45,  group: 'textures',
-              visibleWhen: { param: 'fillStyle', values: ['hatch','sketchHatch','streakHatch','zigzagHatch','crosshatch','waves','tileSprigs','tileRibbons'] } },
-            { id: 'fillJitter', label: 'Fill jitter', type: 'range', min: 0, max: 100, step: 1, value: 0,   group: 'textures' },
-            { id: 'penWidthMm', label: 'Pen width (mm)', type: 'range', min: 0.1, max: 2.0, step: 0.1, value: 0.4 },
             { id: 'viewMode',   label: 'View mode', type: 'select', value: 'multiply',
               options: [{ value: 'normal', label: 'Normal' }, { value: 'multiply', label: 'Multiply' }] }
         ]),
@@ -877,13 +1028,14 @@ window.sketches['artproofs'] = function(p) {
             var val = (pdef && pdef._toInternal) ? pdef._toInternal(Number(rawVal)) : rawVal;
 
             // Global-only params
+            if (name === 'borderProb') { PARAMS.borderProb = Number(val); try { p.redraw(); } catch(e) {} return; }
             if (name === 'paperSize')  { PARAMS.paperSize = val; resizeIfNeeded(); resetInstLayout(); try { p.redraw(); } catch(e) {} return; }
             if (name === 'margin')     { PARAMS.margin = Number(val); buildAllInstances(); try { p.redraw(); } catch(e) {} return; }
             if (name === 'instanceCount') {
                 PARAMS.instanceCount = Math.max(1, Math.min(8, Math.round(Number(rawVal))));
                 selectedInst = -1; resetInstLayout(); try { p.redraw(); } catch(e) {} return;
             }
-            if (name === 'penWidthMm') { PARAMS.penWidthMm = Number(rawVal); try { p.redraw(); } catch(e) {} return; }
+            if (name === 'penWidthMm') { PARAMS.penWidthMm = Number(rawVal); buildAllInstances(); try { p.redraw(); } catch(e) {} return; }
             if (name === 'viewMode')   { PARAMS.viewMode = val; try { p.redraw(); } catch(e) {} return; }
 
             // Scopable params — write to selected instance or DEFAULTS
@@ -897,14 +1049,12 @@ window.sketches['artproofs'] = function(p) {
                 if (typeof _fv === 'string') { try { _fv = JSON.parse(_fv); } catch(e) { _fv = [_fv]; } }
                 if (!Array.isArray(_fv)) _fv = [String(_fv)];
                 _fv = _fv.filter(function(v) { return v && v !== 'random'; });
-                store.fillStyles = _fv.length ? _fv : ['arcs'];
+                store.fillStyles = _fv.length ? _fv : ['contour'];
             }
-            else if (name === 'fillAngle')         store.fillAngle = Number(rawVal);
-            else if (name === 'fillJitter')        store.fillJitter = Number(rawVal);
             else if (name === 'ringConcentricity') store.ringConcentricity = Number(rawVal);
             else if (name === 'arcConcentricity')  store.arcConcentricity  = Number(rawVal);
             else if (['layerWidthMean','layerWidthSD','eltsPerLayerMean','eltsPerLayerSD',
-                      'fillFactor','sliceProb','fillBlackProb','wedgeCount','wedgeThetaSize','wedgeRadius'].indexOf(name) !== -1)
+                      'sliceProb','wedgeCount','wedgeThetaSize','wedgeRadius'].indexOf(name) !== -1)
                 store[name] = val;
 
             if (target) { buildInstElements(target); }

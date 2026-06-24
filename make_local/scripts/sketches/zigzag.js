@@ -29,6 +29,12 @@ window.sketches['zigzag'] = function(p) {
     var selectedRect = -1;
 
     var api = {
+        stylePresets: [
+            { label: 'Loose sketch', values: { zigzagMode:'random', zigzagLength:120, hatchSpacing:4, hatchJitter:6, curveMag:14, squiggleMag:4 } },
+            { label: 'Crisp 45s', values: { zigzagMode:'snap45', zigzagLength:100, hatchSpacing:3, hatchJitter:0, curveMag:0, squiggleMag:0 } },
+            { label: 'Tight 30/60', values: { zigzagMode:'snap3060', zigzagLength:80, hatchSpacing:2, hatchJitter:1, curveMag:4 } },
+            { label: 'Wavy squiggle', values: { squiggleMag:14, curveMag:20, zigzagLength:160, hatchSpacing:5, zigzagMode:'random' } }
+        ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6,
               value: ['#ff3333', '#3366ff', '#ff8800', '#33cc66', '#8833cc'],
@@ -101,7 +107,8 @@ window.sketches['zigzag'] = function(p) {
         saveSVG: function() {
             var dims = paper.getPaperPixels(PARAMS.paperSize);
             var strokeWidth = Math.max(0.5, paper.mmToPixels(PARAMS.HATCH_WEIGHT_MM));
-            var ts = new Date().toISOString().replace(/[:.]/g,'-');
+            var _slug = (window.makeSketchApp && window.makeSketchApp.getSeedSlug) ? window.makeSketchApp.getSeedSlug() : '';
+            var ts = _slug || new Date().toISOString().replace(/[:.]/g,'-');
             var filename = '90percentart-zigzag-' + ts + '.svg';
             var parts = [];
 
@@ -227,14 +234,7 @@ window.sketches['zigzag'] = function(p) {
     // ---- geometry helpers ----
     function normal2(dx, dy) { var L = Math.hypot(dx,dy)||1; return {x:-dy/L, y:dx/L}; }
 
-    function segIntersectT(P,Q,A,B) {
-        var rx=Q.x-P.x, ry=Q.y-P.y, sx=B.x-A.x, sy=B.y-A.y;
-        var den = rx*sy - ry*sx;
-        if (Math.abs(den) < 1e-12) return null;
-        var t = ((A.x-P.x)*sy - (A.y-P.y)*sx) / den;
-        var u = ((A.x-P.x)*ry - (A.y-P.y)*rx) / den;
-        return (t>=0 && t<=1 && u>=0 && u<=1) ? t : null;
-    }
+    function segIntersectT(P, Q, A, B) { return plotFills.segIntersectT(P, Q, A, B); }
 
     function hatchPolygon(poly, angle, spacing, jitter, weight) {
         var dir = {x:Math.cos(angle), y:Math.sin(angle)};
@@ -494,35 +494,11 @@ window.sketches['zigzag'] = function(p) {
     }
 
     function exportHatchPolygon(parts, poly, angle, spacing, jitter, strokeWidth, color) {
-        var dir = {x:Math.cos(angle), y:Math.sin(angle)};
-        var nrm = {x:-dir.y, y:dir.x};
-        var proj = function(pt){ return nrm.x*pt.x + nrm.y*pt.y; };
-        var minP = Infinity, maxP = -Infinity;
-        poly.forEach(function(pt){ var pr = proj(pt); if (pr < minP) minP = pr; if (pr > maxP) maxP = pr; });
-        var pad = 2 * spacing;
-        var minK = Math.floor((minP - pad) / spacing);
-        var maxK = Math.ceil((maxP + pad) / spacing);
+        var angleDeg = angle * 180 / Math.PI;
         var stroke = colorToSvg(color);
-
-        for (var k = minK; k <= maxK; k++) {
-            var off = k * spacing;
-            var p0 = {x:-5000*dir.x + off*nrm.x, y:-5000*dir.y + off*nrm.y};
-            var p1 = {x: 5000*dir.x + off*nrm.x, y: 5000*dir.y + off*nrm.y};
-            var ts = [];
-            for (var i = 0; i < poly.length; i++) {
-                var A = poly[i], B = poly[(i+1)%poly.length];
-                var t = segIntersectT(p0,p1,A,B);
-                if (t !== null) ts.push(t);
-            }
-            ts.sort(function(a,b){ return a-b; });
-            for (var j = 0; j + 1 < ts.length; j += 2) {
-                var AA = {x:p0.x + (p1.x-p0.x)*ts[j],   y:p0.y + (p1.y-p0.y)*ts[j]};
-                var BB = {x:p0.x + (p1.x-p0.x)*ts[j+1], y:p0.y + (p1.y-p0.y)*ts[j+1]};
-                var jx = jitter ? p.randomGaussian(0, jitter) : 0;
-                var jy = jitter ? p.randomGaussian(0, jitter) : 0;
-                appendZigHatch(parts, {x:AA.x + jx, y:AA.y + jy}, {x:BB.x + jx, y:BB.y + jy}, stroke, strokeWidth);
-            }
-        }
+        var rows = plotFills.hatchPolyRows(poly, angleDeg, spacing);
+        var d = plotFills.connectedPathD(rows);
+        if (d) parts.push('<path d="' + d + '" fill="none" stroke="' + stroke + '" stroke-width="' + fmt(strokeWidth) + '" stroke-linecap="round" stroke-linejoin="round"/>');
     }
 
     function drawHatchLineG(g, A, B) {

@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.41"
+__version__ = "0.5.61"
 import os
 import sys
 import time
@@ -1301,7 +1301,7 @@ if has_display:
                 ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
                 ("Machine Settings",   self._scrolled(self._build_settings_panel()),   True, 1),
-                ("Make Tab Settings",  self._scrolled(self._build_make_tab_settings_panel()), True, 1),
+                ("Make Tab Settings",  self._scrolled(self._build_make_tab_settings_panel()), False, 1),
             ])
             middle_col = self._panel_column([
                 ("Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
@@ -1437,7 +1437,7 @@ if has_display:
             inject.setName("pl0tb0t_inject")
             inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
             inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-            inject.setSourceCode(f"window.QUEUE_API_KEY = '{api_key}';")
+            inject.setSourceCode(f"window.QUEUE_API_KEY = '{api_key}'; window._pl0tMode = 'full';")
             view.page().scripts().insert(inject)
             # DocumentReady: force ctrl-col width via inline style so it wins
             # regardless of whatever CSS the webview ends up serving.
@@ -1538,8 +1538,8 @@ if has_display:
             layout.setSpacing(8)
 
             # Render mode toggle — first in panel
-            self._render_mode = 'fast'
-            self._render_mode_btn = QPushButton('Mode: Show ► (fast hatch)')
+            self._render_mode = 'full'
+            self._render_mode_btn = QPushButton('Mode: Home ■ (full hatch)')
             self._render_mode_btn.setToolTip(
                 'Show Mode: canvas-tile fills, fast for live use\n'
                 'Home Mode: full geometry fills, higher quality'
