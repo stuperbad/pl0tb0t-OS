@@ -898,6 +898,59 @@ window.plotFills = (function () {
         return paths;
     }
 
+    // Labeled fill styles for sketch param dropdowns.
+    var FILL_STYLE_OPTIONS = [
+        { value: 'contour',      label: 'Contour' },
+        { value: 'hatch',        label: 'Hatch' },
+        { value: 'sketchHatch',  label: 'Chaotic hatch' },
+        { value: 'squiggleHatch',label: 'Squiggle' },
+        { value: 'zigzagHatch',  label: 'Zigzag' },
+        { value: 'crosshatch',   label: 'Crosshatch' },
+        { value: 'waves',        label: 'Waves' },
+        { value: 'sprigFill',    label: 'Scatter sprig' },
+        { value: 'ribbonFill',   label: 'Scatter ribbon' },
+        { value: 'crossFill',    label: 'Scatter cross' },
+        { value: 'asteriskFill', label: 'Scatter asterisk' }
+    ];
+
+    function _segsToD(segs) {
+        var d = '';
+        for (var i = 0; i < segs.length; i++) { var sg = segs[i]; d += 'M' + fmt(sg.x1) + ' ' + fmt(sg.y1) + 'L' + fmt(sg.x2) + ' ' + fmt(sg.y2); }
+        return d;
+    }
+
+    // Fill one polygon with any shared style. Returns an array of SVG path-d
+    // strings (crosshatch/cross styles return two). Honors global Stroke
+    // imperfection. 'none' returns []. style defaults to 'hatch'.
+    function fillPolyD(poly, style, angleDeg, spacing, seed) {
+        if (!poly || poly.length < 3 || !(spacing > 0)) return [];
+        var imp = getFillImperfection();
+        var ph = ((seed || 0) % 1000) * 0.013;
+        var out = [];
+        function pushRows(rows) { var d = connectedPathD(rows); if (d) out.push(d); }
+        if (style === 'none') return [];
+        if (style === 'contour') { var dc = contourConnectedPathD(contourPolyRows(poly, spacing)); if (dc) out.push(dc); }
+        else if (style === 'waves') { var dw = waveConnectedPathD(poly, angleDeg, spacing, ph); if (dw) out.push(dw); }
+        else if (style === 'zigzagHatch') { pushRows(zigzagPolyRows(poly, angleDeg, spacing, ph)); }
+        else if (style === 'squiggleHatch') { pushRows(squiggleRows(hatchPolyRows(poly, angleDeg, spacing), spacing * 0.8, ph, spacing * (0.4 + imp))); }
+        else if (style === 'crosshatch') {
+            var r1 = hatchPolyRows(poly, angleDeg, spacing);
+            if (imp > 0) r1 = sketchHatchRows(r1, ph, spacing * imp * 0.6);
+            pushRows(r1);
+            pushRows(hatchPolyRows(poly, angleDeg + 90, spacing));
+        }
+        else if (style === 'sketchHatch') { pushRows(sketchHatchRows(hatchPolyRows(poly, angleDeg, spacing), ph, spacing * (0.6 + imp * 1.4))); }
+        else if (style === 'sprigFill' || style === 'ribbonFill' || style === 'crossFill' || style === 'asteriskFill') {
+            var dsc = _segsToD(scatterPolyFill(poly, style.replace('Fill', ''), spacing * 1.4, 1.0, (seed || 1) >>> 0)); if (dsc) out.push(dsc);
+        }
+        else {
+            var hr = hatchPolyRows(poly, angleDeg, spacing);
+            if (imp > 0) hr = sketchHatchRows(hr, ph, spacing * imp * 0.6);
+            pushRows(hr);
+        }
+        return out.filter(Boolean);
+    }
+
     return {
         fmt:                    fmt,
         segIntersectT:          segIntersectT,
@@ -935,6 +988,8 @@ window.plotFills = (function () {
         drawSquiggle:           drawSquiggle,
         drawSquiggleSeparate:   drawSquiggleSeparate,
         connectedPathD:         connectedPathD,
+        fillPolyD:              fillPolyD,
+        FILL_STYLE_OPTIONS:     FILL_STYLE_OPTIONS,
         drawConnectedRows:      drawConnectedRows,
         drawSeparateRows:       drawSeparateRows,
         waveConnectedPathD:     waveConnectedPathD,
