@@ -22,6 +22,40 @@
         { value: '#2d2416', label: 'Sepia' }, { value: 'custom', label: 'Custom' }
     ];
 
+    function arcPts(ccx, ccy, R, a0, a1, n) {
+        var pts = [];
+        for (var i = 0; i <= n; i++) { var a = a0 + (a1 - a0) * i / n; pts.push({ x: ccx + R * Math.cos(a), y: ccy + R * Math.sin(a) }); }
+        return pts;
+    }
+
+    // The closed regions an arc/diagonal tile carves from its cell: quarter-disk
+    // corners (arcs) or cut-corner triangles (diagonals). THESE are the shapes to
+    // fill — not the whole cell square (which would fill the entire page).
+    function cellRegions(cx, cy, cellPx, R, mode, typeA) {
+        var HP = Math.PI / 2, regions = [];
+        var topMid = { x: cx + R, y: cy }, rgtMid = { x: cx + cellPx, y: cy + R },
+            botMid = { x: cx + R, y: cy + cellPx }, lftMid = { x: cx, y: cy + R };
+        if (mode === 'diagonals') {
+            if (typeA) {
+                regions.push([{ x: cx + cellPx, y: cy }, topMid, rgtMid]);
+                regions.push([{ x: cx, y: cy + cellPx }, botMid, lftMid]);
+            } else {
+                regions.push([{ x: cx, y: cy }, topMid, lftMid]);
+                regions.push([{ x: cx + cellPx, y: cy + cellPx }, botMid, rgtMid]);
+            }
+        } else {
+            var n = 12;
+            if (typeA) {
+                regions.push([{ x: cx + cellPx, y: cy }].concat(arcPts(cx + cellPx, cy, R, Math.PI, HP, n)));
+                regions.push([{ x: cx, y: cy + cellPx }].concat(arcPts(cx, cy + cellPx, R, 0, -HP, n)));
+            } else {
+                regions.push([{ x: cx, y: cy }].concat(arcPts(cx, cy, R, 0, HP, n)));
+                regions.push([{ x: cx + cellPx, y: cy + cellPx }].concat(arcPts(cx + cellPx, cy + cellPx, R, Math.PI, 3 * HP, n)));
+            }
+        }
+        return regions;
+    }
+
     var PRESETS = {
         maze:      { palette: ['#1a1a1a'], cellSize: 7,  curviness: 'arcs' },
         circuit:   { palette: ['#1b9e5a'], cellSize: 9,  curviness: 'mixed' },
@@ -122,10 +156,11 @@
                 }
 
                 if (fillStyles.length && rng() < fillProb) {
-                    var cellPoly = [{ x: cx, y: cy }, { x: cx + cellPx, y: cy }, { x: cx + cellPx, y: cy + cellPx }, { x: cx, y: cy + cellPx }];
                     var fSeed = (seed ^ (row * 73856093) ^ (col * 19349663)) >>> 0;
-                    fills.fillPolyMultiD(cellPoly, fillStyles, fillAngle, fillSpacing, fSeed).forEach(function (fd) {
-                        parts.push('<path d="' + fd + '" fill="none" stroke="' + color + '" stroke-width="' + sw.toFixed(2) + '" stroke-linecap="round"/>');
+                    cellRegions(cx, cy, cellPx, R, mode, typeA).forEach(function (reg) {
+                        fills.fillPolyMultiD(reg, fillStyles, fillAngle, fillSpacing, fSeed).forEach(function (fd) {
+                            parts.push('<path d="' + fd + '" fill="none" stroke="' + color + '" stroke-width="' + sw.toFixed(2) + '" stroke-linecap="round"/>');
+                        });
                     });
                 }
                 parts.push('<path d="' + d + '" fill="none" stroke="' + color +

@@ -295,10 +295,10 @@ window.plotFills = (function () {
             var n1x =  sign * e1y / l1, n1y = -sign * e1x / l1;
             var n2x =  sign * e2y / l2, n2y = -sign * e2x / l2;
             var bx = n1x + n2x, by = n1y + n2y, bl = Math.hypot(bx, by);
-            if (bl < 1e-6) { result.push({ x: curr.x + n1x * amount, y: curr.y + n1y * amount }); continue; }
+            if (bl < 1e-6) { result.push({ x: curr.x - n1x * amount, y: curr.y - n1y * amount }); continue; }
             var cos_a = (n1x * bx + n1y * by) / bl;
             var scale = cos_a > 0.1 ? amount / cos_a : amount * 10;
-            result.push({ x: curr.x + (bx / bl) * scale, y: curr.y + (by / bl) * scale });
+            result.push({ x: curr.x - (bx / bl) * scale, y: curr.y - (by / bl) * scale });
         }
         var newArea = 0;
         for (var i = 0; i < result.length; i++) {
@@ -313,11 +313,15 @@ window.plotFills = (function () {
     function contourPolyRows(poly, spacing) {
         var rows = [];
         var current = poly;
+        function _pa(p) { var a = 0; for (var i = 0; i < p.length; i++) { var j = (i + 1) % p.length; a += p[i].x * p[j].y - p[j].x * p[i].y; } return Math.abs(a / 2); }
+        var prev = _pa(current);
         for (var iter = 0; iter < 200; iter++) {
             var inset = insetPoly(current, spacing);
             if (!inset) break;
+            var ar = _pa(inset);
+            if (ar >= prev - 0.5) break;
             rows.push(inset);
-            current = inset;
+            current = inset; prev = ar;
         }
         return rows;
     }
