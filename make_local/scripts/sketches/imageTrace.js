@@ -586,6 +586,99 @@ window.sketches['imageTrace'] = function (p) {
     }
     // Bounded via: hard cap on occupancy mark radius (8 cells) regardless of
     // Max Spacing / Min Separation ratio, and maxSteps caps per-line length.
+    // Real evenly-spaced streamline placement (Jobard & Lefebvre, 1997,
+    // "Creating Evenly-Spaced Streamlines of Arbitrary Density"). New seeds
+    // are cast PERPENDICULAR to existing streamlines at the target separation,
+    // and both growth and seeding use a true DISTANCE test against every prior
+    // sample point (via a spatial hash) rather than a coarse occupancy grid.
+    // This is what gives the clean, uniform spacing with no clumping. Density
+    // modulates the separation (denser image -> tighter lines). Bounded by hard
+    // caps on line count and total stored points, and an O(1) 3x3 cell query.
+    function traceStreamlinesJL(weightMap, angleFn, w, h, opts) {
+        var dsepMin = Math.max(1, opts.dsepMin);
+        var dsepMax = Math.max(dsepMin, opts.dsepMax);
+        var stepLen = Math.max(0.5, opts.stepLen);
+        var maxSteps = Math.max(2, Math.round(opts.maxSteps));
+        var minPts = 2, GATE = 0.03, dtestFactor = 0.5;
+        var MAX_LINES = 5000, MAX_POINTS = 250000;
+
+        var cell = Math.max(2, Math.round(dsepMax));   // cell ~ max sep => dtest query stays 3x3
+        var gw = Math.max(1, Math.ceil(w / cell)), gh = Math.max(1, Math.ceil(h / cell));
+        var grid = new Array(gw * gh);
+        var totalPoints = 0;
+
+        function densityAt(x, y) { var xi = x | 0, yi = y | 0; if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0; return weightMap[yi * w + xi] || 0; }
+        function sepAt(x, y) { return dsepMin + (dsepMax - dsepMin) * (1 - densityAt(x, y)); }
+        function addPoint(x, y) {
+            var cx = (x / cell) | 0, cy = (y / cell) | 0;
+            if (cx < 0 || cy < 0 || cx >= gw || cy >= gh) return;
+            var k = cy * gw + cx, a = grid[k]; if (!a) { a = []; grid[k] = a; }
+            a.push(x, y); totalPoints++;
+        }
+        function tooClose(x, y, minDist) {
+            var r = Math.max(1, Math.ceil(minDist / cell));
+            var cx = (x / cell) | 0, cy = (y / cell) | 0, md2 = minDist * minDist;
+            for (var dy = -r; dy <= r; dy++) {
+                var yy = cy + dy; if (yy < 0 || yy >= gh) continue;
+                var ro = yy * gw;
+                for (var dx = -r; dx <= r; dx++) {
+                    var xx = cx + dx; if (xx < 0 || xx >= gw) continue;
+                    var a = grid[ro + xx]; if (!a) continue;
+                    for (var i = 0; i < a.length; i += 2) { var ex = a[i] - x, ey = a[i + 1] - y; if (ex * ex + ey * ey < md2) return true; }
+                }
+            }
+            return false;
+        }
+        function integrate(sx, sy, sign) {
+            var pts = [], x = sx, y = sy;
+            for (var s = 0; s < maxSteps; s++) {
+                var theta = angleFn(x, y);
+                var nx = x + Math.cos(theta) * stepLen * sign, ny = y + Math.sin(theta) * stepLen * sign;
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h) break;
+                if (densityAt(nx, ny) <= GATE) break;
+                if (tooClose(nx, ny, sepAt(nx, ny) * dtestFactor)) break;
+                pts.push(nx, ny); x = nx; y = ny;
+            }
+            return pts;
+        }
+        function makeLine(sx, sy) {
+            var fwd = integrate(sx, sy, 1), back = integrate(sx, sy, -1), poly = [];
+            for (var i = back.length - 2; i >= 0; i -= 2) poly.push({ x: back[i], y: back[i + 1] });
+            poly.push({ x: sx, y: sy });
+            for (var j = 0; j < fwd.length; j += 2) poly.push({ x: fwd[j], y: fwd[j + 1] });
+            return poly;
+        }
+        function commit(poly) { for (var i = 0; i < poly.length; i++) addPoint(poly[i].x, poly[i].y); }
+
+        var streamlines = [], queue = [], firstSeed = null;
+        for (var yy = cell; yy < h && !firstSeed; yy += cell) for (var xx = cell; xx < w; xx += cell) if (densityAt(xx, yy) > 0.3) { firstSeed = { x: xx, y: yy }; break; }
+        if (!firstSeed) for (var y2 = cell; y2 < h && !firstSeed; y2 += cell) for (var x2 = cell; x2 < w; x2 += cell) if (densityAt(x2, y2) > GATE) { firstSeed = { x: x2, y: y2 }; break; }
+        if (firstSeed) { var l0 = makeLine(firstSeed.x, firstSeed.y); if (l0.length >= minPts) { streamlines.push(l0); queue.push(l0); commit(l0); } }
+
+        var qi = 0;
+        while (qi < queue.length && streamlines.length < MAX_LINES && totalPoints < MAX_POINTS) {
+            var sl = queue[qi++], acc = 0;
+            for (var pi = 1; pi < sl.length; pi++) {
+                var bx = sl[pi].x, by = sl[pi].y;
+                acc += Math.hypot(bx - sl[pi - 1].x, by - sl[pi - 1].y);
+                var dsep = sepAt(bx, by);
+                if (acc < dsep) continue;
+                acc = 0;
+                var perp = angleFn(bx, by) + Math.PI / 2;
+                for (var side = -1; side <= 1; side += 2) {
+                    var candX = bx + Math.cos(perp) * dsep * side, candY = by + Math.sin(perp) * dsep * side;
+                    if (candX < 0 || candY < 0 || candX >= w || candY >= h) continue;
+                    if (densityAt(candX, candY) <= GATE) continue;
+                    if (tooClose(candX, candY, dsep * 0.9)) continue;
+                    var nl = makeLine(candX, candY);
+                    if (nl.length >= minPts) { streamlines.push(nl); queue.push(nl); commit(nl); }
+                    if (streamlines.length >= MAX_LINES || totalPoints >= MAX_POINTS) break;
+                }
+                if (streamlines.length >= MAX_LINES || totalPoints >= MAX_POINTS) break;
+            }
+        }
+        return streamlines;
+    }
     function traceFlowLines(weightMap, angleFn, w, h, opts) {
         var cellSize = Math.max(1, opts.minSep);
         var occW = Math.max(1, Math.ceil(w / cellSize)), occH = Math.max(1, Math.ceil(h / cellSize));
@@ -792,8 +885,8 @@ window.sketches['imageTrace'] = function (p) {
                     // wedge centred on that direction so lines flow ALONG the
                     // field, instead of sweeping all 360 deg like lines mode.
                     var waveDir = opts.waveStartAngle
-                        + (waveFieldFn(opts.waveTypeX, (curX + opts.waveOffsetX) / opts.waveDivisorX)
-                         + waveFieldFn(opts.waveTypeY, (curY + opts.waveOffsetY) / opts.waveDivisorY)) * 180 / Math.PI;
+                        + (waveFieldFn(opts.waveTypeX, ((curX / w * 100) + opts.waveOffsetX) / opts.waveDivisorX)
+                         + waveFieldFn(opts.waveTypeY, ((curY / h * 100) + opts.waveOffsetY) / opts.waveDivisorY)) * 180 / Math.PI;
                     searchDelta = opts.waveDelta;
                     startAngleDeg = waveDir - searchDelta / 2;
                 } else {
@@ -1231,9 +1324,9 @@ window.sketches['imageTrace'] = function (p) {
                         result[pens[i]] = applySketchStyle(sketchRaw, PARAMS.sketchStyle);
                     } else {
                         var toned = applyTone(wMap, PARAMS.tone);
-                        result[pens[i]] = traceFlowLines(toned, streamAngleFn, workW, workH, {
-                            seedSpacing: Math.max(2, PARAMS.seedSpacing), maxSpacing: Math.max(0, PARAMS.maxSpacing), stepLen: Math.max(1, PARAMS.stepLen),
-                            maxSteps: Math.max(4, PARAMS.maxSteps), minSep: Math.max(1, PARAMS.minSep)
+                        result[pens[i]] = traceStreamlinesJL(toned, streamAngleFn, workW, workH, {
+                            dsepMin: Math.max(1, PARAMS.seedSpacing), dsepMax: Math.max(1, PARAMS.maxSpacing),
+                            stepLen: Math.max(1, PARAMS.stepLen), maxSteps: Math.max(4, PARAMS.maxSteps)
                         });
                     }
                 }
@@ -1315,18 +1408,22 @@ window.sketches['imageTrace'] = function (p) {
               values: { sfFrequency: 4, sfCosFactor: 1, sfSineFactor: 1, sfCurvature: 1, seedSpacing: 1, maxSpacing: 10, maxSteps: 17, distortion: 50, tone: 75 } },
             { label: 'Distorted Tunnel', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['superformula'] }],
               values: { sfFrequency: 4, sfCosFactor: 15, sfSineFactor: 30, sfCurvature: 30, seedSpacing: 1, maxSpacing: 10, maxSteps: 17, distortion: 50, tone: 75 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
-              values: { sketchAngleMin: -180, sketchAngleMax: 180, sketchMinLineLength: 8, sketchMaxLineLength: 40, sketchLineTests: 16, sketchSquiggleMax: 40, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
-            { label: 'Fine Detail', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
-              values: { sketchAngleMin: -180, sketchAngleMax: 180, sketchMinLineLength: 2, sketchMaxLineLength: 10, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 50 } },
+            { label: 'Digital (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
+              values: { sketchAngleMin: 90, sketchAngleMax: 90, sketchMinLineLength: 12, sketchMaxLineLength: 72, sketchLineTests: 5, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 100 } },
+            { label: 'Sharp Lines (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
+              values: { sketchAngleMin: -360, sketchAngleMax: 360, sketchMinLineLength: 2, sketchMaxLineLength: 150, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 50 } },
+            { label: 'Micro Detail (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
+              values: { sketchAngleMin: -360, sketchAngleMax: 360, sketchMinLineLength: 2, sketchMaxLineLength: 10, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 50 } },
+            { label: 'Sketchy (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines'] }],
+              values: { sketchAngleMin: 50, sketchAngleMax: 130, sketchMinLineLength: 8, sketchMaxLineLength: 30, sketchLineTests: 30, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['squares'] }],
               values: { sketchSquareAngle: 0, sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 16, sketchSquiggleMax: 40, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['curves'] }],
-              values: { sketchAngleMin: -180, sketchAngleMax: 180, sketchMinLineLength: 8, sketchMaxLineLength: 40, sketchLineTests: 16, sketchSquiggleMax: 40, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
+            { label: 'Sweeping (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['curves'] }],
+              values: { sketchAngleMin: -180, sketchAngleMax: 180, sketchMinLineLength: 20, sketchMaxLineLength: 80, sketchLineTests: 16, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 50 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
-              values: { sketchWaveStartAngle: 0, sketchWaveOffsetX: 0, sketchWaveOffsetY: 0, sketchWaveDivisorX: 30, sketchWaveDivisorY: 30, sketchWaveTypeX: 'sin', sketchWaveTypeY: 'cos', sketchMinLineLength: 6, sketchMaxLineLength: 30, sketchLineTests: 16, sketchSquiggleMax: 60, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
-            { label: 'Wavy', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
-              values: { sketchWaveStartAngle: 0, sketchWaveOffsetX: 0, sketchWaveOffsetY: 0, sketchWaveDivisorX: 45, sketchWaveDivisorY: 18, sketchWaveTypeX: 'sin', sketchWaveTypeY: 'sin', sketchMinLineLength: 8, sketchMaxLineLength: 50, sketchLineTests: 20, sketchSquiggleMax: 120, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 2, sketchEraseMin: 30, sketchEraseMax: 110, sketchTone: 60 } },
+              values: { sketchWaveStartAngle: 0, sketchWaveOffsetX: 0, sketchWaveOffsetY: 0, sketchWaveDivisorX: 20, sketchWaveDivisorY: 20, sketchWaveTypeX: 'sin', sketchWaveTypeY: 'cos', sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 100 } },
+            { label: 'Distorted Waves (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
+              values: { sketchWaveStartAngle: 45, sketchWaveOffsetX: 45, sketchWaveOffsetY: 45, sketchWaveDivisorX: 9, sketchWaveDivisorY: 9, sketchWaveTypeX: 'tan', sketchWaveTypeY: 'cos', sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 5, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 100 } },
             { label: 'Classic Crosshatch', scope: [{ param: 'mode', values: ['hatch'] }, { param: 'hatchStyle', values: ['straight'] }],
               values: { hatchSpacing: 4, hatchAngle: 45, crosshatch: 'on', linkEnds: 'on' } },
             { label: 'Default', scope: [{ param: 'mode', values: ['hatch'] }, { param: 'hatchStyle', values: ['sawtooth'] }],
