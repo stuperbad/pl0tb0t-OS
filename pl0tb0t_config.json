@@ -1,57 +1,116 @@
 {
   "baud": 115200,
+  "draw_order": "lightest_to_darkest",
   "draw_speed": 2500,
   "pen_contact_z": 0.0,
+  "pen_diameters": {
+    "micron": 10.0,
+    "pilot": 12.0,
+    "posca": 16.5,
+    "sharpie": 0.0,
+    "stabilo": 8.0
+  },
   "pen_lift_z": 3.5,
+  "pen_offsets": {
+    "micron": [
+      0.0,
+      0.0,
+      31.15
+    ],
+    "pilot": [
+      0.0,
+      0.0,
+      20.2
+    ],
+    "posca": [
+      0.0,
+      0.0,
+      36.2
+    ],
+    "sharpie": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "stabilo": [
+      0.0,
+      0.0,
+      19.9
+    ]
+  },
+  "pen_tip_widths": {},
+  "pen_types": [
+    "stabilo",
+    "pilot",
+    "micron",
+    "sharpie",
+    "custom",
+    "posca"
+  ],
+  "pen_width_mm": 0.4,
+  "pens": [],
   "planner_path": "pl0tb0t_toolplan.json",
   "port": "/dev/ttyUSB0",
-  "sig_custom_msg": "",
+  "sig_custom_msg": "Lake Test",
   "sig_enabled": true,
   "sig_font": "ef",
+  "sig_from_margin_mm": 4.0,
   "sig_h_pad_mm": 0.0,
   "sig_height_mm": 4.0,
-  "sig_show_logo": true,
+  "sig_logo_scale": 4.0,
+  "sig_pen_width_mm": 0.4,
+  "sig_scale": 1.0,
+  "sig_sep_pad": 1.0,
+  "sig_sep_scale": 2.5,
+  "sig_show_logo": false,
   "sig_show_preview": true,
+  "sig_show_seed_name": false,
   "sig_suppress_export": false,
-  "sig_y_offset_mm": 0.0,
+  "sig_y_offset_mm": -10.0,
   "tc_approach": 450,
   "tc_rapid": 2500,
-  "tc_unplug_mm": 25.0,
+  "tc_unplug_mm": 60.0,
   "tools": [
     {
       "color": "cyan",
       "name": "Test Pen 1",
+      "pen_type": "stabilo",
       "safe_z": -5.0,
-      "x": -255.7,
-      "y": -585.47,
-      "z": -43.9
+      "x": -203.109,
+      "y": -582.488,
+      "z": -43.022
     },
     {
       "color": "magenta",
       "name": "Test Pen 2",
+      "pen_type": "micron",
       "safe_z": -5.0,
-      "x": -211.77,
-      "y": -585.9,
-      "z": -43.9
+      "x": -163.756,
+      "y": -582.488,
+      "z": -43.022
     },
     {
       "color": "yellow",
       "name": "Test Pen 3",
+      "pen_type": "pilot",
       "safe_z": -5.0,
-      "x": -167.99,
-      "y": -586.0,
-      "z": -43.9
+      "x": -123.905,
+      "y": -582.463,
+      "z": -43.022
     },
     {
       "color": "black",
       "name": "Test Pen 4",
+      "pen_type": "posca",
       "safe_z": -5.0,
-      "x": -126.3,
-      "y": -585.6,
-      "z": -43.9
+      "x": -84.751,
+      "y": -582.463,
+      "z": -43.022
     }
   ],
   "tools_path": "pl0tb0t_tools.json",
+  "travel_speed": 6000,
   "vpype_config": "pl0tb0t_0x0_config.cfg",
-  "vpype_profile": "pl0tb0t_0x0"
+  "vpype_profile": "pl0tb0t_0x0",
+  "zero_pen_type": "stabilo"
 }

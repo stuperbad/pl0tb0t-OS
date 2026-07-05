@@ -1566,6 +1566,10 @@ window.sketches['lineArrays'] = function(p) {
         p.stroke(0);
         // Selection handles (outside clip — always visible, touch-friendly)
         if (selectedUnit >= 0 && PARAMS.showGuides === 'on') drawRowSelectionHandles(selectedUnit);
+        // Redraw on top: 0" margin or full-bleed content can paint
+        // edge-to-edge and cover the border drawn at the top of this
+        // function -- keep it visible as the top layer.
+        paper.drawPaperBorder(p);
     };
 
     p.mousePressed = function(event) {

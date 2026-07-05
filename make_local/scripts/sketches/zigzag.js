@@ -200,6 +200,10 @@ window.sketches['zigzag'] = function(p) {
                 drawSelectionHandles(blocks[selectedBlock]);
             }
         }
+        // Redraw on top: 0" margin or full-bleed content can paint
+        // edge-to-edge and cover the border drawn at the top of this
+        // function -- keep it visible as the top layer.
+        paper.drawPaperBorder(p);
     };
 
     // ---- color helpers ----

@@ -11,7 +11,7 @@ Usage:
 
 __version__ = "0.1.06"
 
-import os, sqlite3, uuid, time, json, threading, random
+import os, sqlite3, uuid, time, json, threading, random, subprocess, tempfile, math, re
 from pathlib import Path
 
 # ── Word-pair job IDs ─────────────────────────────────────────────────────────
@@ -47,6 +47,35 @@ API_KEY   = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
 PORT      = int(os.environ.get("QUEUE_PORT", "5001"))
 
 QUEUE_DIR.mkdir(exist_ok=True)
+
+# ── Refine-estimate helpers ───────────────────────────────────────────────────
+_refine_cache: dict = {}   # token → gcode_text
+
+def _estimate_gcode_time(gcode_text: str, draw_speed_mmpm: float,
+                          travel_speed_mmpm: float) -> float:
+    """Estimate plot time in seconds by replaying G-code feed rates."""
+    cur_f   = float(draw_speed_mmpm)
+    rapid_f = float(max(travel_speed_mmpm, 100))
+    total_s = 0.0
+    px, py  = 0.0, 0.0
+    for raw in gcode_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"): continue
+        upper = line.upper()
+        fm = re.search(r'F([\d.]+)', upper)
+        if fm: cur_f = float(fm.group(1))
+        xm = re.search(r'X([\d.+-]+)', upper)
+        ym = re.search(r'Y([\d.+-]+)', upper)
+        nx = float(xm.group(1)) if xm else px
+        ny = float(ym.group(1)) if ym else py
+        dist = math.hypot(nx - px, ny - py)
+        if upper.startswith("G0"):
+            total_s += dist / max(rapid_f, 1) * 60.0
+        elif upper.startswith("G1"):
+            total_s += dist / max(cur_f, 1) * 60.0
+        if xm or ym: px, py = nx, ny
+    return total_s
+
 
 app = Flask(__name__)
 
@@ -225,8 +254,9 @@ def init_db():
             )
         """)
         for col, typedef in [
-            ("cloud_id", "TEXT DEFAULT NULL"),
-            ("recipe",   "TEXT DEFAULT NULL"),
+            ("cloud_id",    "TEXT DEFAULT NULL"),
+            ("recipe",      "TEXT DEFAULT NULL"),
+            ("plot_count",  "INTEGER DEFAULT 0"),
         ]:
             try:
                 db.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
@@ -276,6 +306,43 @@ def create_job():
         )
     return jsonify({"job_id": job_id, "status": "queued", "cloud_id": cloud_id,
                     "has_recipe": recipe_str is not None}), 201
+
+
+@app.route("/rasterize", methods=["POST"])
+def rasterize_svg():
+    """Render an SVG to PNG with rsvg-convert (native). Body: {svg}. ?w=px width."""
+    check_auth()
+    import shutil
+    data = request.get_json(silent=True) or {}
+    svg = data.get("svg") or request.form.get("svg")
+    if not svg:
+        f = request.files.get("svg")
+        svg = f.read().decode("utf-8", "ignore") if f else None
+    if not svg:
+        return jsonify({"error": "svg field required"}), 400
+    try:
+        w = max(100, min(2400, int(request.args.get("w", 900))))
+    except Exception:
+        w = 900
+    tmp_dir = tempfile.mkdtemp(prefix="pl0traster_")
+    src = os.path.join(tmp_dir, "in.svg")
+    out = os.path.join(tmp_dir, "out.png")
+    try:
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write(svg)
+        r = subprocess.run(["rsvg-convert", "-w", str(w), "-b", "white", src, "-o", out],
+                           capture_output=True, timeout=240)
+        if r.returncode != 0 or not os.path.exists(out):
+            return jsonify({"error": "rasterize failed",
+                            "detail": (r.stderr or b"").decode("utf-8", "ignore")[:400]}), 500
+        with open(out, "rb") as fh:
+            png = fh.read()
+        return png, 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "rasterize timed out"}), 504
+    finally:
+        try: shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception: pass
 
 
 @app.route("/jobs", methods=["GET"])
@@ -334,10 +401,14 @@ def update_status(job_id):
     check_auth()
     data = request.get_json(silent=True) or {}
     new_status = data.get("status")
-    if not new_status:
-        return jsonify({"error": "status required"}), 400
+    inc = data.get("increment_plot_count", False)
+    if not new_status and not inc:
+        return jsonify({"error": "status or increment_plot_count required"}), 400
     with get_db() as db:
-        db.execute("UPDATE jobs SET status=? WHERE id=?", (new_status, job_id))
+        if new_status:
+            db.execute("UPDATE jobs SET status=? WHERE id=?", (new_status, job_id))
+        if inc:
+            db.execute("UPDATE jobs SET plot_count = plot_count + 1 WHERE id=?", (job_id,))
     return jsonify({"job_id": job_id, "status": new_status})
 
 
@@ -356,6 +427,49 @@ def delete_job(job_id):
 
 
 # ── Machine status ────────────────────────────────────────────────────────────
+
+@app.route("/refine_estimate", methods=["POST"])
+def refine_estimate():
+    check_auth()
+    data = request.get_json(silent=True) or {}
+    svg  = data.get("svg", "")
+    if not svg:
+        return jsonify({"ok": False, "error": "svg required"}), 400
+
+    # Read draw/travel speeds from config
+    try:
+        cfg = json.loads((BASE_DIR / "pl0tb0t_config.json").read_text())
+    except Exception:
+        cfg = {}
+    draw_speed   = float(cfg.get("draw_speed",   2500))
+    travel_speed = float(cfg.get("travel_speed", 6000))
+    vpype_bin    = str(Path.home() / ".local/bin/vpype")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        svg_p   = os.path.join(tmp, "in.svg")
+        gc_p    = os.path.join(tmp, "out.gcode")
+        with open(svg_p, "w", encoding="utf-8") as f:
+            f.write(svg)
+        cmd = [vpype_bin, "read", svg_p,
+               "linemerge", "-t", "0.5mm",
+               "linesort",
+               "linesimplify", "-t", "0.1mm",
+               "gwrite", gc_p]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return jsonify({"ok": False, "error": "vpype timed out"}), 504
+        except FileNotFoundError:
+            return jsonify({"ok": False, "error": "vpype not found"}), 500
+        if res.returncode != 0:
+            return jsonify({"ok": False, "error": res.stderr.strip() or "vpype failed"}), 500
+        gcode = open(gc_p, encoding="utf-8", errors="ignore").read()
+
+    est_s = _estimate_gcode_time(gcode, draw_speed, travel_speed)
+    token = str(uuid.uuid4())[:8]
+    _refine_cache[token] = gcode
+    return jsonify({"ok": True, "est_s": est_s, "token": token})
+
 
 @app.route("/status", methods=["GET"])
 def get_status():

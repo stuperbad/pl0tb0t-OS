@@ -454,5 +454,9 @@ window.sketches['circlesFromLines'] = function(p) {
         p.strokeWeight(Math.max(0.5, paper.mmToPixels(PARAMS.penWidthMm)));
         runLayout(paper.getMarginPixels(PARAMS.margin));
         p.blendMode(p.BLEND);
+        // Redraw on top: 0" margin or full-bleed content can paint
+        // edge-to-edge and cover the border drawn at the top of this
+        // function -- keep it visible as the top layer.
+        paper.drawPaperBorder(p);
     };
 };

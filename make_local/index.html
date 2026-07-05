@@ -21,6 +21,9 @@
     <script src="scripts/sketches/artproofs.js"></script>
     <script src="scripts/sketches/patternTest.js"></script>
     <script src="scripts/sketches/unbuiltSculptures.js"></script>
+    <script src="scripts/sketches/calibration.js"></script>
+    <script src="scripts/sketches/svgUpload.js"></script>
+    <script src="scripts/sketches/imageTrace.js"></script>
     <style>
         html, body { height: 100%; margin: 0; padding: 0; background: #fff; overflow: hidden; }
         * { user-select: none; -webkit-user-select: none; }
@@ -150,6 +153,9 @@
                     <option value="artproofs"          data-script="scripts/sketches/artproofs.js">Artproofs</option>
                     <option value="patternTest"        data-script="scripts/sketches/patternTest.js">Pattern Test</option>
                     <option value="unbuiltSculptures"  data-script="scripts/sketches/unbuiltSculptures.js">Unbuilt Sculptures</option>
+                    <option value="calibration"        data-script="scripts/sketches/calibration.js">Calibration</option>
+                    <option value="svgUpload"          data-script="scripts/sketches/svgUpload.js">SVG Upload</option>
+                    <option value="imageTrace"         data-script="scripts/sketches/imageTrace.js">Image Trace</option>
                 </select>
             </div>
             <div id="make-sketch"></div>
@@ -198,6 +204,7 @@
     var QUEUE_URL = 'http://localhost:5001';
     var QUEUE_API_KEY = window.QUEUE_API_KEY || 'pl0tb0t-secret';
     function queueHeaders() { return { 'Content-Type': 'application/json', 'X-API-Key': QUEUE_API_KEY }; }
+    window.QUEUE_URL = QUEUE_URL; window.QUEUE_API_KEY = QUEUE_API_KEY;
 
     // placeholder API until sketch loads
     window.sketchAPI = { regenerate: function(){}, togglePause: function(){ return false; } };
@@ -345,7 +352,7 @@
             return fetch(QUEUE_URL + '/jobs', {
                 method: 'POST',
                 headers: queueHeaders(),
-                body: JSON.stringify({ svg: svgStr, recipe: recipe, sketch_name: sketchId, paper_size: paperSize, orientation: 'portrait' })
+                body: JSON.stringify({ svg: svgStr, recipe: recipe, sketch_name: sketchId, paper_size: paperSize, orientation: (window._pl0tLandscape ? 'landscape' : 'portrait') })
             });
         }).then(function(r) {
             if (!r.ok) return r.json().catch(function(){ return {}; }).then(function(d){ throw new Error((d && d.error) ? d.error : 'Server ' + r.status); });
@@ -378,6 +385,15 @@
 
     document.getElementById('sendToQueue').addEventListener('click', function() {
         var btn = this;
+        // Up-front connection gate: don't march the user through pen
+        // confirmation + gcode generation only to dead-end because the machine
+        // isn't connected. Only block when we KNOW it's disconnected (=== false);
+        // if the state was never pushed (undefined) we fail open.
+        if (window._pl0tMachineConnected === false) {
+            queueStatus('Machine not connected — click Connect on the Machine tab first.', '#c00');
+            setTimeout(function(){ queueStatus(''); }, 6000);
+            return;
+        }
         var palette;
         if (window.sketchAPI && window.sketchAPI.getPlotColors) {
             palette = window.sketchAPI.getPlotColors();
@@ -389,9 +405,9 @@
         var paperSize = (document.getElementById('paperSize') || {}).value || '9x12';
         // Append signature as a labeled slot if it will be injected into the SVG
         if (window._signatureConfig && window._signatureConfig.enabled) {
-            var _sigColor = '#000000';
+            var _sigColor = (window.Signature && window.Signature.pickSignatureColor) ? window.Signature.pickSignatureColor(palette) : '#000000';
             var _artHasSig = palette.some(function(e) {
-                return (typeof e === 'string' ? e : e.color).toLowerCase() === _sigColor;
+                return (typeof e === 'string' ? e : e.color).toLowerCase() === _sigColor.toLowerCase();
             });
             if (!_artHasSig) {
                 palette = palette.slice();
@@ -527,24 +543,102 @@
     setInterval(fetchMachineStatus, 3000);
     fetchMachineStatus();
 
+    // ── Skip Layers (session-only; resets on app restart) ─────────────────────
+    window._pl0tSkippedLayers = window._pl0tSkippedLayers || [];
+
+    function _pl0tCurrentPalette() {
+        var palette;
+        if (window.sketchAPI && window.sketchAPI.getPlotColors) {
+            palette = window.sketchAPI.getPlotColors();
+        } else {
+            var snapshot = window.sketchAPI && window.sketchAPI.getParamsSnapshot ? window.sketchAPI.getParamsSnapshot() : [];
+            var paletteParam = snapshot.find ? snapshot.find(function(p){ return p.id === 'palette'; }) : null;
+            palette = (paletteParam && Array.isArray(paletteParam.value) && paletteParam.value.length) ? paletteParam.value : ['#000000'];
+        }
+        if (window._signatureConfig && window._signatureConfig.enabled) {
+            var _sigColor = (window.Signature && window.Signature.pickSignatureColor) ? window.Signature.pickSignatureColor(palette) : '#000000';
+            var _artHasSig = palette.some(function(e) {
+                return (typeof e === 'string' ? e : e.color).toLowerCase() === _sigColor.toLowerCase();
+            });
+            if (!_artHasSig) {
+                palette = palette.slice();
+                palette.push({ color: _sigColor, label: 'Signature Layer' });
+            }
+        }
+        return palette;
+    }
+
+    function _pl0tRenderSkipPanel() {
+        var grid = document.getElementById('skipLayersGrid');
+        if (!grid) return;
+        var palette = _pl0tCurrentPalette();
+        grid.innerHTML = palette.map(function(entry) {
+            var c   = typeof entry === 'string' ? entry : entry.color;
+            var lbl = (typeof entry === 'object' && entry.label) ? entry.label : c;
+            var cl  = c.toLowerCase();
+            var skipped = window._pl0tSkippedLayers.indexOf(cl) !== -1;
+            return '<div class="palette-item skip-item" data-color="' + cl + '" title="' + lbl + (skipped ? ' (skipped)' : '') + '">'
+                + '<div class="palette-swatch" style="background:' + c + ';position:relative;' + (skipped ? 'opacity:0.35;' : '') + '">'
+                + (skipped ? '<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#c00;font-weight:900;font-size:18px;text-shadow:0 0 2px #fff;">&times;</span>' : '')
+                + '</div><span class="palette-label">' + lbl + '</span></div>';
+        }).join('');
+        Array.prototype.forEach.call(grid.querySelectorAll('.skip-item'), function(el) {
+            el.addEventListener('click', function() {
+                var c = el.getAttribute('data-color');
+                var idx = window._pl0tSkippedLayers.indexOf(c);
+                if (idx === -1) window._pl0tSkippedLayers.push(c);
+                else window._pl0tSkippedLayers.splice(idx, 1);
+                _pl0tRenderSkipPanel();
+                if (typeof window._pl0tOnSkipLayersChanged === 'function') window._pl0tOnSkipLayersChanged();
+            });
+        });
+    }
+
+    // Rendered into the sketch's own "Advanced" params group by makeSketch.js
+    // (buildSkipLayersUI), which calls window._pl0tRenderSkipPanel() on every
+    // param-UI rebuild so the swatches stay in sync with the active sketch.
+    window._pl0tRenderSkipPanel = _pl0tRenderSkipPanel;
+
     function showPenConfirmDialog(palette, paperSize, onConfirm, onCancel) {
+
         var overlay = document.createElement('div');
         overlay.id = 'pen-confirm-overlay';
         overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.45);z-index:9999;display:flex;align-items:center;justify-content:center;';
         var dlg = document.createElement('div');
         dlg.style.cssText = 'background:#fff;border-radius:8px;padding:20px 24px;min-width:280px;box-shadow:0 4px 24px rgba(0,0,0,0.25);font-family:inherit;';
+        // Look up each colour's loaded pen type + the exact draw-Z it will use,
+        // so this dialog is the single safety gate (pen type + tip-length Z).
+        var _penList = (window.plotPens && window.plotPens.pens) ? window.plotPens.pens() : [];
+        var _zoff = window._pl0tPenZOffsets || {};
+        var _contactZ = (typeof window._pl0tPenContactZ === 'number') ? window._pl0tPenContactZ : 0;
+        function _penTypeForColor(col) {
+            col = (col || '').toLowerCase();
+            for (var k = 0; k < _penList.length; k++) { if ((_penList[k].color || '').toLowerCase() === col) return _penList[k].pen_type || ''; }
+            return '';
+        }
         var rows = palette.map(function(entry, i) {
             var c   = typeof entry === 'string' ? entry : entry.color;
             var lbl = (typeof entry === 'object' && entry.label) ? entry.label : c;
-            return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
-                + '<div style="width:22px;height:22px;border-radius:3px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
-                + '<span style="font-size:13px;">' + lbl + ' &rarr; Slot ' + (i+1) + '</span>'
+            var isSkipped = (window._pl0tSkippedLayers || []).indexOf(c.toLowerCase()) !== -1;
+            var pt = _penTypeForColor(c);
+            var info;
+            if (isSkipped) {
+                info = '<b style="color:#c00;">skipped</b><br>will not plot';
+            } else if (pt) {
+                var z = (Number(_zoff[pt]) || 0) + _contactZ;
+                info = '<b>' + pt + '</b><br>Z ' + (z >= 0 ? '+' : '') + z.toFixed(2) + ' mm';
+            } else {
+                info = '<span style="color:#c0392b;">pen type not set</span>';
+            }
+            return '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:76px;' + (isSkipped ? 'opacity:0.45;' : '') + '">'
+                + '<div style="width:28px;height:28px;border-radius:4px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
+                + '<div style="font-size:12px;text-align:center;line-height:1.4;">' + lbl + '<br>Slot ' + (i+1) + '<br>' + info + '</div>'
                 + '</div>';
         }).join('');
         dlg.innerHTML = '<div style="font-weight:700;font-size:14px;margin-bottom:8px;">Confirm Pen Assignments</div>'
-            + '<div style="font-size:12px;color:#555;margin-bottom:12px;">SVG colors will be plotted in this order.<br>Make sure each slot has the correct pen loaded.</div>'
+            + '<div style="font-size:12px;color:#555;margin-bottom:12px;">SVG colors will be plotted in this order, left to right &mdash; matching the holder slots on the machine.<br>Make sure each slot has the correct pen loaded.</div>'
             + '<div style="font-size:12px;color:#555;margin-bottom:12px;">Paper: ' + paperSize + '</div>'
-            + rows
+            + '<div style="display:flex;flex-direction:row-reverse;flex-wrap:wrap;gap:14px;justify-content:flex-start;margin-bottom:4px;">' + rows + '</div>'
             + '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;">'
             + '<button id="jspca-cancel" style="padding:7px 16px;border:1px solid #ccc;border-radius:5px;background:#f5f5f5;cursor:pointer;font-size:13px;">Cancel</button>'
             + '<button id="jspca-plot" style="padding:7px 16px;border:none;border-radius:5px;background:#4caf50;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">Plot</button>'
@@ -565,9 +659,34 @@
         b.dataset.pyStep = text;
         b.classList.add('visible');
     }
+
+    // Rich live plot progress: color swatch of the drawing layer + % complete,
+    // keeping the "continue making art" note. Called ~4Hz from Python during a plot.
+    function setPlotProgress(info) {
+        var b = document.getElementById('busy-banner');
+        if (!b) return;
+        var pct = (info && typeof info.pct === 'number') ? info.pct : 0;
+        // Uniform typography across all three banner lines.
+        var _ln = 'font-size:12px;font-weight:600;line-height:1.65;';
+        var layerLine = '';
+        if (info && info.color) {
+            var swatch = '<span style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid #ccc;background:'
+                + info.color + ';vertical-align:middle;margin-right:6px;"></span>';
+            var lbl = info.label ? (' \u2014 ' + info.label) : '';
+            var ofN = info.layers ? ' &nbsp;(' + info.layer + ' of ' + info.layers + ')' : '';
+            layerLine = '<div style="' + _ln + '">Current layer: ' + swatch
+                + '<b>' + info.color + '</b>' + lbl + ofN + '</div>';
+        }
+        b.innerHTML = '<div style="' + _ln + '">\u25cf Plot in progress \u2014 ' + pct.toFixed(0) + '% complete</div>'
+            + layerLine
+            + '<div style="' + _ln + 'opacity:0.75;">You may continue making art.</div>';
+        b.dataset.pyStep = 'plotting';
+        b.classList.add('visible');
+    }
 </script>
 <script src="scripts/ef_script_font.js"></script>
 <script src="scripts/signature.js"></script>
+<script src="scripts/plotPens.js"></script>
 <script src="scripts/makeSketch.js"></script>
 <script>
 (function() {

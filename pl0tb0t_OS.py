@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.65"
+__version__ = "0.5.140"
 import os
 import sys
 import time
@@ -19,7 +19,7 @@ import socket
 import queue as _queue
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Tuple
 
 # Debug logging
@@ -55,6 +55,7 @@ if has_display:
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
         QDialog, QDialogButtonBox, QStackedWidget, QProgressDialog,
+        QRadioButton, QButtonGroup, QColorDialog,
     )
     from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
@@ -74,6 +75,11 @@ if has_display:
 CONFIG_PATH = "pl0tb0t_config.json"   # unified config + tools file
 
 
+PEN_TYPES = ["stabilo", "pilot", "micron", "sharpie"]
+# 120-deg V-groove: pen center shifts 1/(2*sin60) = 0.577 mm per mm of barrel diameter.
+VGROOVE_K = 0.57735
+
+
 @dataclass
 class Tool:
     name: str
@@ -82,6 +88,7 @@ class Tool:
     y: float
     z: float
     safe_z: float
+    pen_type: str = ""
 
 
 @dataclass
@@ -98,12 +105,20 @@ class OSConfig:
     draw_speed: int = 3000        # mm/min — G1 feed rate while drawing
     travel_speed: int = 6000      # mm/min — G0 rapid speed (used for time estimation)
     vpype_config: str = "pl0tb0t_0x0_config.cfg"
+    pen_offsets: dict = field(default_factory=dict)
+    pen_diameters: dict = field(default_factory=dict)
+    zero_pen_type: str = "stabilo"
+    pen_types: list = field(default_factory=list)
+    pen_tip_widths: dict = field(default_factory=dict)
     vpype_profile: str = "pl0tb0t_0x0"
     # Signature / attribution band
     sig_enabled: bool = False
     sig_show_preview: bool = True
     sig_suppress_export: bool = False
     sig_show_logo: bool = True
+    sig_show_seed_name: bool = True
+    draw_order: str = "lightest_to_darkest"   # "left_to_right" | "lightest_to_darkest"
+    show_palette: list = field(default_factory=list)   # per-holder Show-mode colours
     sig_font: str = "ef"
     sig_custom_msg: str = ""
     sig_height_mm: float = 2.0
@@ -142,11 +157,19 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         draw_speed=int(data.get("draw_speed", 3000)),
         travel_speed=int(data.get("travel_speed", 6000)),
         vpype_config=data.get("vpype_config", "pl0tb0t_0x0_config.cfg"),
+        pen_offsets=data.get("pen_offsets", {}),
+        pen_diameters=data.get("pen_diameters", {}),
+        zero_pen_type=str(data.get("zero_pen_type", "stabilo")),
+        pen_types=list(data.get("pen_types", []) or []),
+        pen_tip_widths=data.get("pen_tip_widths", {}),
         vpype_profile=data.get("vpype_profile", "pl0tb0t_0x0"),
         sig_enabled=bool(data.get("sig_enabled", False)),
         sig_show_preview=bool(data.get("sig_show_preview", True)),
         sig_suppress_export=bool(data.get("sig_suppress_export", False)),
         sig_show_logo=bool(data.get("sig_show_logo", True)),
+        sig_show_seed_name=bool(data.get("sig_show_seed_name", True)),
+        draw_order=str(data.get("draw_order", "lightest_to_darkest")),
+        show_palette=list(data.get("show_palette", []) or []),
         sig_font=str(data.get("sig_font", "ef")),
         sig_custom_msg=str(data.get("sig_custom_msg", "")),
         sig_height_mm=float(data.get("sig_height_mm", 2.0)),
@@ -326,6 +349,7 @@ def load_tools(path: str = CONFIG_PATH) -> List[Tool]:
             y=float(item.get("y", 0)),
             z=float(item.get("z", 0)),
             safe_z=float(item.get("safe_z", 0)),
+            pen_type=("" if item.get("pen_type", "") == "custom" else item.get("pen_type", "")),
         )
         for item in data.get("tools", [])
     ]
@@ -622,6 +646,7 @@ if has_display:
         queue_jobs_ready = pyqtSignal(list)
         queue_pen_assign = pyqtSignal(object)  # carries ctx dict from _queue_plot_selected
         update_banner  = pyqtSignal(str)    # update Make tab banner text
+        plot_progress  = pyqtSignal(str)    # rich plot progress (JSON) -> setPlotProgress
         daemon_indicator = pyqtSignal()   # refresh daemon status dot (thread-safe)
 
     class AspectSvgPreviewWidget(QWidget):
@@ -1065,6 +1090,8 @@ if has_display:
             self.signals.queue_pen_assign.connect(self._queue_on_pen_assign)
             self.signals.update_banner.connect(
                 lambda t: self._make_webview.page().runJavaScript(f"setBannerText({repr(t)})"))
+            self.signals.plot_progress.connect(
+                lambda j: self._make_webview.page().runJavaScript(f"setPlotProgress({j})"))
 
             self.signals.daemon_indicator.connect(self._update_daemon_indicator)
 
@@ -1302,9 +1329,11 @@ if has_display:
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
                 ("Machine Settings",   self._scrolled(self._build_settings_panel()),   True, 1),
                 ("Make Tab Settings",  self._scrolled(self._build_make_tab_settings_panel()), False, 1),
+                ("Show Mode Palette",  self._scrolled(self._build_show_palette_panel()), False, 1),
             ])
             middle_col = self._panel_column([
-                ("Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
+                ("Pen Type Offsets",   self._scrolled(self._build_pen_offsets_panel()), False, 0),
+                ("Pen Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
                 ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), True,  1),
                 ("Signature Settings", self._scrolled(self._build_signature_panel()),  True, 0),
             ])
@@ -1419,15 +1448,21 @@ if has_display:
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(0)
             view = QWebEngineView()
-            # Off-the-record profile: no persistent disk cache, so file edits
-            # always land on the next reload instead of being served stale.
-            profile = QWebEngineProfile(view)
+            # Named (persistent) profile so localStorage -- and therefore the
+            # whole Pens registry (window.plotPens) -- survives app restarts
+            # instead of silently resetting to the hardcoded CMYK Stabilo
+            # default every time. The disk HTTP cache (the actual cause of
+            # the old "stale file after edit" problem this used to dodge by
+            # going off-the-record) is disabled explicitly below instead, so
+            # edited JS/HTML still always reload fresh.
+            profile = QWebEngineProfile("pl0tb0t_persistent", view)
+            profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
             page = QWebEnginePage(profile, view)
             view.setPage(page)
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
             view.page().loadFinished.connect(
-                lambda ok: (self._push_signature_config(), self._push_pen_width(), self._push_make_tab_settings()) if ok else None)
+                lambda ok: (self._push_signature_config(), self._push_pen_width(), self._push_make_tab_settings(), self._push_pen_types_to_make(), self._push_draw_order(), self._push_machine_connected(), self._push_show_palette()) if ok else None)
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -1581,7 +1616,7 @@ if has_display:
             margin_lbl.setFixedWidth(80)
             margin_row.addWidget(margin_lbl)
             self._make_margin_combo = QComboBox()
-            for val, lbl in [('0.5','½ inch'), ('0.75','¾ inch'), ('1','1 inch')]:
+            for val, lbl in [('0','0 (none)'), ('0.5','½ inch'), ('0.75','¾ inch'), ('1','1 inch')]:
                 self._make_margin_combo.addItem(lbl, val)
             idx = self._make_margin_combo.findData('1')
             if idx >= 0: self._make_margin_combo.setCurrentIndex(idx)
@@ -1818,6 +1853,7 @@ if has_display:
                 + 'showPreview:' + ('true' if cfg.sig_show_preview else 'false') + ','
                 + 'suppressExport:' + ('true' if cfg.sig_suppress_export else 'false') + ','
                 + 'showLogo:' + ('true' if cfg.sig_show_logo else 'false') + ','
+                + 'showSeedName:' + ('true' if cfg.sig_show_seed_name else 'false') + ','
                 + 'font:"' + cfg.sig_font + '",'
                 + 'customMsg:"' + cfg.sig_custom_msg.replace('"', '\\"') + '",'
                 + 'heightMm:' + str(cfg.sig_height_mm) + ','
@@ -1847,6 +1883,87 @@ if has_display:
                   f'try{{if(window.makeSketch&&window.makeSketch.setParam)'
                   f'window.makeSketch.setParam("penWidthMm",{val});}}catch(e){{}}')
             try:
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
+        def _build_show_palette_panel(self):
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+            info = QLabel("Show-mode colour palette \u2014 one swatch per holder. Click a swatch to set the colour used for that slot in Show mode. This palette drives every Show-mode colour picker across sketches.")
+            info.setWordWrap(True)
+            info.setStyleSheet("color:#666; font-size:11px;")
+            layout.addWidget(info)
+            self._show_palette_row = QWidget()
+            self._show_palette_layout = QHBoxLayout(self._show_palette_row)
+            self._show_palette_layout.setContentsMargins(0, 0, 0, 0)
+            self._show_palette_layout.setSpacing(6)
+            layout.addWidget(self._show_palette_row)
+            refresh = QPushButton("\u21bb Match holders")
+            refresh.setToolTip("Rebuild the swatch row to match the current number of holders")
+            refresh.clicked.connect(self._rebuild_show_palette_swatches)
+            layout.addWidget(refresh)
+            layout.addStretch()
+            self._rebuild_show_palette_swatches()
+            return w
+
+        def _style_show_swatch(self, btn, col):
+            if col:
+                btn.setStyleSheet("background:%s; border:1px solid #888; border-radius:5px;" % col)
+                btn.setText("")
+            else:
+                btn.setStyleSheet("background:#eee; border:1px dashed #aaa; border-radius:5px; color:#999; font-size:16px;")
+                btn.setText("+")
+
+        def _rebuild_show_palette_swatches(self):
+            lay = getattr(self, "_show_palette_layout", None)
+            if lay is None:
+                return
+            while lay.count():
+                it = lay.takeAt(0)
+                wdg = it.widget()
+                if wdg:
+                    wdg.deleteLater()
+            n = max(1, len(self.tools))
+            pal = list(self.config.show_palette or [])
+            while len(pal) < n:
+                pal.append("")
+            self.config.show_palette = pal[:max(n, len(pal))]
+            for i in range(n):
+                col = self.config.show_palette[i] if i < len(self.config.show_palette) else ""
+                btn = QPushButton()
+                btn.setFixedSize(34, 34)
+                nm = self.tools[i].name if i < len(self.tools) else ("Slot %d" % (i + 1))
+                btn.setToolTip("%s \u2014 click to set Show-mode colour" % nm)
+                self._style_show_swatch(btn, col)
+                btn.clicked.connect(lambda checked=False, idx=i: self._pick_show_color(idx))
+                lay.addWidget(btn)
+            lay.addStretch()
+
+        def _pick_show_color(self, idx):
+            from PyQt6.QtGui import QColor
+            while len(self.config.show_palette) <= idx:
+                self.config.show_palette.append("")
+            cur = self.config.show_palette[idx]
+            initial = QColor(cur) if cur else QColor("#888888")
+            c = QColorDialog.getColor(initial, self, "Pick Show-mode colour")
+            if c.isValid():
+                self.config.show_palette[idx] = c.name()
+                save_config(self.config)
+                item = self._show_palette_layout.itemAt(idx)
+                btn = item.widget() if item else None
+                if btn:
+                    self._style_show_swatch(btn, c.name())
+                self._push_show_palette()
+
+        def _push_show_palette(self):
+            try:
+                import json as _json
+                cols = [c for c in (self.config.show_palette or []) if c]
+                js = ("window._pl0tShowPalette = " + _json.dumps(cols) + ";"
+                      "if (window.makeSketchApp && window.makeSketchApp.onPensChanged) window.makeSketchApp.onPensChanged();")
                 self._make_webview.page().runJavaScript(js)
             except Exception:
                 pass
@@ -1893,6 +2010,7 @@ if has_display:
             self._sig_preview_cb  = _sig_check('Show preview on canvas',    'sig_show_preview', tip='Render the band in the Make tab canvas (does not affect SVG export)')
             self._sig_suppress_cb = _sig_check('Suppress from SVG export',  'sig_suppress_export', tip='Omit the signature band from SVG files sent to the plotter')
             self._sig_logo_cb     = _sig_check('Include 90% logo',          'sig_show_logo',  tip='Add the 90percent art logo flush with the right margin')
+            self._sig_seed_cb     = _sig_check('Include random seed name',   'sig_show_seed_name', tip='Print the auto-generated seed name (e.g. "rust lace") in the signature band')
 
             # Font selector
             font_row = QHBoxLayout()
@@ -1934,6 +2052,314 @@ if has_display:
             layout.addStretch()
             return w
 
+        def _push_pen_types_to_make(self):
+            try:
+                import json as _json
+                js = ("window._pl0tPenTypes = " + _json.dumps(self._pen_types()) + ";"
+                      "window._pl0tPenTipWidths = " + _json.dumps({pt: self._pen_tip_width(pt) for pt in self._pen_types()}) + ";"
+                      "window._pl0tPenZOffsets = " + _json.dumps({pt: round(self._pen_tip_delta(pt)[2], 4) for pt in self._pen_types()}) + ";"
+                      "window._pl0tPenContactZ = " + _json.dumps(float(self.config.pen_contact_z)) + ";"
+                      "if (window.makeSketchApp && window.makeSketchApp.onPensChanged) window.makeSketchApp.onPensChanged();")
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
+        def _pen_offset(self, ptype):
+            o = (self.config.pen_offsets or {}).get(ptype)
+            if isinstance(o, (list, tuple)) and len(o) >= 3:
+                try: return [float(o[0]), float(o[1]), float(o[2])]
+                except (TypeError, ValueError): return [0.0, 0.0, 0.0]
+            return [0.0, 0.0, 0.0]
+
+        def _read_js_pen_map(self):
+            # MAIN THREAD ONLY. Reads the loaded-pen registry (window.plotPens)
+            # from the Make webview and returns {colour_lower: pen_type}. Used to
+            # drive the plot's Z/Y offset from the pen the user says is loaded.
+            from PyQt6.QtCore import QEventLoop
+            import json as _json
+            result = ['[]']
+            loop = QEventLoop()
+            js = ('(function(){try{if(window.plotPens&&window.plotPens.pens){'
+                  'return JSON.stringify(window.plotPens.pens().map(function(p){'
+                  'return {c:(p.color||"").toLowerCase(),t:p.pen_type||""};}));}}'
+                  'catch(e){}return "[]";})()')
+            def _cb(val):
+                result[0] = val or '[]'
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                return {}
+            out = {}
+            try:
+                for e in _json.loads(result[0]):
+                    c = (e.get('c') or '').lower(); t = e.get('t') or ''
+                    if c and t:
+                        out[c] = t
+            except Exception:
+                pass
+            return out
+
+        def _read_js_skip_set(self):
+            # MAIN THREAD ONLY. Reads the session-only Skip Layers panel
+            # (window._pl0tSkippedLayers) from the Make webview and returns a
+            # set of lowercase hex colours to exclude from this plot's
+            # per-layer vpype/tool-change generation.
+            from PyQt6.QtCore import QEventLoop
+            import json as _json
+            result = ['[]']
+            loop = QEventLoop()
+            js = ('(function(){try{return JSON.stringify((window._pl0tSkippedLayers||[])'
+                  '.map(function(c){return (c||"").toLowerCase();}));}'
+                  'catch(e){}return "[]";})()')
+            def _cb(val):
+                result[0] = val or '[]'
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                return set()
+            try:
+                return set(_json.loads(result[0]))
+            except Exception:
+                return set()
+
+        def _read_js_pen_slot_map(self):
+            # MAIN THREAD ONLY. Returns {colour_lower: index} from the JS Pens
+            # registry's own order (index 0 = slot 1 = rightmost chip in the
+            # editor). This is the user-declared holder position for each
+            # colour and should drive which physical tool a colour's tool
+            # change goes to -- NOT whichever order colours happen to appear
+            # in this particular file (the old behaviour, which meant the
+            # same colour could land on a different holder plot to plot).
+            from PyQt6.QtCore import QEventLoop
+            import json as _json
+            result = ['[]']
+            loop = QEventLoop()
+            js = ('(function(){try{if(window.plotPens&&window.plotPens.pens){'
+                  'return JSON.stringify(window.plotPens.pens().map(function(p){'
+                  'return (p.color||"").toLowerCase();}));}}'
+                  'catch(e){}return "[]";})()')
+            def _cb(val):
+                result[0] = val or '[]'
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                return {}
+            out = {}
+            try:
+                for i, c in enumerate(_json.loads(result[0])):
+                    if c and c not in out:
+                        out[c] = i
+            except Exception:
+                pass
+            return out
+
+        def _read_js_draw_order(self):
+            # MAIN THREAD ONLY. Reads window._pl0tDrawOrder (set by the Make
+            # tab's Advanced > Draw order select) if present, else falls back
+            # to the persisted config value.
+            from PyQt6.QtCore import QEventLoop
+            result = [None]
+            loop = QEventLoop()
+            js = '(function(){try{return window._pl0tDrawOrder||"";}catch(e){}return "";})()'
+            def _cb(val):
+                result[0] = val or None
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                return self.config.draw_order
+            return result[0] or self.config.draw_order
+
+        def _push_draw_order(self):
+            try:
+                import json as _json
+                js = "window._pl0tDrawOrder = " + _json.dumps(self.config.draw_order) + ";"
+                self._make_webview.page().runJavaScript(js)
+            except Exception:
+                pass
+
+        def _apply_draw_order(self, assignments, order_mode=None):
+            # Re-sequence an already-built (layer, tool) assignments list so
+            # the FIRST tool picked up matches the chosen convention, instead
+            # of whatever order colours happened to appear in the file.
+            mode = order_mode or self.config.draw_order
+            if mode == "left_to_right":
+                # Ascending physical X = leftmost holder first. If a machine's
+                # X axis runs the other way, this is the one line to flip.
+                return sorted(assignments, key=lambda pair: pair[1].x)
+            # default: lightest to darkest
+            return sorted(assignments, key=lambda pair: -self._luminance(pair[0].get("color") or ""))
+
+        def _effective_pen_type(self, color, tool):
+            # The loaded-pen type for this colour (from the JS pen panel) if it's
+            # a known pen type, else fall back to the holder's own pen_type. This
+            # is what drives the Z tip-length and V-groove Y offsets, so it must
+            # reflect the pen PHYSICALLY loaded, which the user declares in the
+            # Make-tab pen panel.
+            pm = getattr(self, '_active_pen_map', None) or {}
+            c = (color or '').lower()
+            pt = pm.get(c)
+            if pt and pt in self._pen_types():
+                return pt
+            return getattr(tool, 'pen_type', 'custom')
+
+        def _pen_tip_delta(self, ptype):
+            if not ptype or ptype not in self._pen_types():
+                return (0.0, 0.0, 0.0)
+            a = self._pen_offset(ptype)
+            b = self._pen_offset(getattr(self.config, 'zero_pen_type', 'stabilo'))
+            return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+        def _pen_diameter(self, ptype):
+            try: return float((self.config.pen_diameters or {}).get(ptype, 0) or 0)
+            except (TypeError, ValueError): return 0.0
+
+        def _pen_tip_width(self, ptype):
+            try: return float((self.config.pen_tip_widths or {}).get(ptype, 0) or 0)
+            except (TypeError, ValueError): return 0.0
+
+        def _pen_xy_delta(self, ptype):
+            # V-groove technique shifts the pen center along Y only; X never moves.
+            if not ptype or ptype not in self._pen_types():
+                return (0.0, 0.0)
+            zt = getattr(self.config, 'zero_pen_type', 'stabilo')
+            dy = VGROOVE_K * (self._pen_diameter(ptype) - self._pen_diameter(zt))
+            # manual per-pen Y trim (pen_offsets Y slot), relative to the zero pen
+            dy += self._pen_offset(ptype)[1] - self._pen_offset(zt)[1]
+            return (0.0, dy)
+
+        def _save_pen_offsets(self):
+            offs = {}; dias = {}; tips = {}
+            for pt, eds in self._pen_offset_edits.items():
+                try: dias[pt] = float(eds[0].text())
+                except ValueError: dias[pt] = self._pen_diameter(pt)
+                try: tips[pt] = float(eds[1].text())
+                except ValueError: tips[pt] = self._pen_tip_width(pt)
+                try: offs[pt] = [0.0, float(eds[2].text()), float(eds[3].text())]
+                except ValueError: offs[pt] = self._pen_offset(pt)
+            self.config.pen_offsets = offs
+            self.config.pen_diameters = dias
+            self.config.pen_tip_widths = tips
+            self.config.zero_pen_type = self._zero_pen_combo.currentData()
+            save_config(self.config)
+            self._push_pen_types_to_make()
+
+        def _pen_types(self):
+            pts = [str(p).strip() for p in (self.config.pen_types or []) if str(p).strip() and str(p).strip() != "custom"]
+            if not pts:
+                pts = list(PEN_TYPES)
+            return pts
+
+        def _add_pen_type(self):
+            name = (self._new_pen_edit.text() or "").strip().lower()
+            if not name:
+                return
+            pts = self._pen_types()
+            if name in pts:
+                self._new_pen_edit.clear(); return
+            pts.append(name)
+            self.config.pen_types = pts
+            save_config(self.config)
+            self._new_pen_edit.clear()
+            self._rebuild_pen_dyn()
+            self._refresh_tool_pen_combo()
+            self._push_pen_types_to_make()
+
+        def _delete_pen_type(self, name):
+            self._save_pen_offsets()
+            pts = [p for p in self._pen_types() if p != name]
+            self.config.pen_types = pts
+            if isinstance(self.config.pen_offsets, dict): self.config.pen_offsets.pop(name, None)
+            if isinstance(self.config.pen_diameters, dict): self.config.pen_diameters.pop(name, None)
+            if getattr(self.config, 'zero_pen_type', '') == name:
+                _eff = pts or list(PEN_TYPES)
+                self.config.zero_pen_type = _eff[0] if _eff else ""
+            save_config(self.config)
+            self._rebuild_pen_dyn()
+            self._refresh_tool_pen_combo()
+            self._push_pen_types_to_make()
+
+        def _refresh_tool_pen_combo(self):
+            cb = getattr(self, 'tool_pen_type_combo', None)
+            if cb is None:
+                return
+            cur = cb.currentData()
+            cb.blockSignals(True)
+            cb.clear()
+            for pt in self._pen_types():
+                cb.addItem(pt.capitalize(), pt)
+            i = cb.findData(cur)
+            if i < 0: i = 0
+            if i >= 0 and cb.count(): cb.setCurrentIndex(i)
+            cb.blockSignals(False)
+
+        def _rebuild_pen_dyn(self):
+            old = getattr(self, '_pen_dyn', None)
+            if old is not None:
+                old.setParent(None); old.deleteLater()
+            dyn = QWidget()
+            v = QVBoxLayout(dyn); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+            zrow = QHBoxLayout()
+            zlbl = QLabel("Zeroed with:"); zlbl.setFixedWidth(90); zrow.addWidget(zlbl)
+            self._zero_pen_combo = QComboBox()
+            for pt in self._pen_types(): self._zero_pen_combo.addItem(pt.capitalize(), pt)
+            _zi = self._zero_pen_combo.findData(getattr(self.config, 'zero_pen_type', 'stabilo'))
+            if _zi >= 0: self._zero_pen_combo.setCurrentIndex(_zi)
+            self._zero_pen_combo.currentIndexChanged.connect(self._save_pen_offsets)
+            zrow.addWidget(self._zero_pen_combo, 1); v.addLayout(zrow)
+            grid = QGridLayout(); grid.setSpacing(4)
+            grid.addWidget(QLabel("Pen type"), 0, 0)
+            for _c, _h in enumerate(["Ø mm", "Tip mm", "Y trim", "Z off"], start=1):
+                _hl = QLabel(_h); _hl.setAlignment(Qt.AlignmentFlag.AlignCenter); grid.addWidget(_hl, 0, _c)
+            self._pen_offset_edits = {}
+            for _r, pt in enumerate(self._pen_types(), start=1):
+                grid.addWidget(QLabel(pt.capitalize()), _r, 0)
+                _off = self._pen_offset(pt)
+                _vals = [self._pen_diameter(pt), self._pen_tip_width(pt), _off[1], _off[2]]
+                _eds = []
+                for _c in range(4):
+                    _e = QLineEdit(str(_vals[_c])); _e.setFixedWidth(58)
+                    _e.editingFinished.connect(self._save_pen_offsets)
+                    grid.addWidget(_e, _r, _c + 1); _eds.append(_e)
+                self._pen_offset_edits[pt] = _eds
+                if pt:
+                    _del = QPushButton("✕"); _del.setFixedWidth(24); _del.setToolTip("Remove " + pt)
+                    _del.clicked.connect(lambda _checked=False, _n=pt: self._delete_pen_type(_n))
+                    grid.addWidget(_del, _r, 5)
+            grid.setColumnStretch(0, 1)
+            v.addLayout(grid); v.addStretch()
+            self._pen_dyn = dyn
+            self._pen_outer.addWidget(dyn)
+
+        def _build_pen_offsets_panel(self):
+            w = QWidget()
+            self._pen_outer = QVBoxLayout(w)
+            self._pen_outer.setContentsMargins(8, 8, 8, 8)
+            self._pen_outer.setSpacing(8)
+            info = QLabel("Per pen type: Ø (mm) drives the V-groove Y correction (0.577 mm per mm of Ø); "
+                          "Y trim (mm) is a manual calibration offset added on top — measure it with the "
+                          "Calibration sketch's vernier gauge. Z = tip length. All values apply relative "
+                          "to the 'Zeroed with' pen. Add your own brands below.")
+            info.setWordWrap(True); info.setStyleSheet("color:#667085;font-size:11px;")
+            self._pen_outer.addWidget(info)
+            arow = QHBoxLayout()
+            self._new_pen_edit = QLineEdit(); self._new_pen_edit.setPlaceholderText("New pen type (e.g. posca)")
+            self._new_pen_edit.returnPressed.connect(self._add_pen_type)
+            arow.addWidget(self._new_pen_edit, 1)
+            _addbtn = QPushButton("➕ Add"); _addbtn.clicked.connect(self._add_pen_type)
+            arow.addWidget(_addbtn)
+            self._pen_outer.addLayout(arow)
+            self._pen_dyn = None
+            self._rebuild_pen_dyn()
+            return w
+
         def _build_tool_panel(self):
             splitter = QSplitter(Qt.Orientation.Vertical)
             splitter.setChildrenCollapsible(False)
@@ -1962,6 +2388,32 @@ if has_display:
             cl.setContentsMargins(0, 0, 0, 0)
             cl.setSpacing(6)
 
+            order_grp = QGroupBox("Draw Order (multi-color plots)")
+            order_v = QVBoxLayout(order_grp)
+            order_v.setSpacing(2)
+            self.draw_order_ltr_rb = QRadioButton("Left to right (by holder X position)")
+            self.draw_order_ltr_rb.setToolTip("Pick up pens in order of increasing physical X \u2014 leftmost holder first.")
+            self.draw_order_ldk_rb = QRadioButton("Lightest to darkest")
+            self.draw_order_ldk_rb.setToolTip("Pick up pens in order of ink luminance, lightest first, so darker passes go down last.")
+            order_v.addWidget(self.draw_order_ltr_rb)
+            order_v.addWidget(self.draw_order_ldk_rb)
+            self.draw_order_group = QButtonGroup(order_grp)
+            self.draw_order_group.addButton(self.draw_order_ltr_rb)
+            self.draw_order_group.addButton(self.draw_order_ldk_rb)
+            if self.config.draw_order == "left_to_right":
+                self.draw_order_ltr_rb.setChecked(True)
+            else:
+                self.draw_order_ldk_rb.setChecked(True)
+            def _on_draw_order_change(checked, mode="left_to_right"):
+                if not checked:
+                    return
+                self.config.draw_order = mode
+                save_config(self.config)
+                self._push_draw_order()
+            self.draw_order_ltr_rb.toggled.connect(lambda c: _on_draw_order_change(c, "left_to_right"))
+            self.draw_order_ldk_rb.toggled.connect(lambda c: _on_draw_order_change(c, "lightest_to_darkest"))
+            cl.addWidget(order_grp)
+
             edit_grp = QGroupBox("Edit Tool")
             eg = QGridLayout(edit_grp)
             eg.setSpacing(4)
@@ -1982,6 +2434,10 @@ if has_display:
                 ey = QLineEdit("0.0" if ay != "tool_safe_z_edit" else "50")
                 setattr(self, ay, ey)
                 eg.addWidget(ey, row, 3)
+            eg.addWidget(QLabel("Pen type:"), 3, 0)
+            self.tool_pen_type_combo = QComboBox()
+            for _pt in self._pen_types(): self.tool_pen_type_combo.addItem(_pt.capitalize(), _pt)
+            eg.addWidget(self.tool_pen_type_combo, 3, 1, 1, 3)
             eg.setColumnStretch(1, 1)
             eg.setColumnStretch(3, 1)
             cl.addWidget(edit_grp)
@@ -1991,6 +2447,7 @@ if has_display:
             for text, cmd in [
                 ("➕ Add", self.add_tool),
                 ("💾 Save", self.save_tool),
+                ("📍 From Pos", self._save_tool_from_position),
                 ("🎯 Go To", self.go_to_tool),
                 ("🗑️ Delete", self.delete_tool),
                 ("🔄 Refresh", self.refresh_tool_list),
@@ -2344,7 +2801,20 @@ if has_display:
             self.gcode_sent_lines = sent
             self.signals.gcode_highlight.emit(max(0, sent - 1))
             if total > 0:
-                self.signals.update_progress.emit((sent / total) * 100.0)
+                pct = (sent / total) * 100.0
+                self.signals.update_progress.emit(pct)
+                try:
+                    import json as _json
+                    payload = {"pct": round(pct, 1)}
+                    info = self._current_plot_layer(sent)
+                    if info:
+                        payload["color"] = info[0]
+                        payload["label"] = info[1]
+                        payload["layer"] = info[2]
+                        payload["layers"] = info[3]
+                    self.signals.plot_progress.emit(_json.dumps(payload))
+                except Exception:
+                    pass
 
         def _on_daemon_gcode_done(self):
             tmp = getattr(self, "_gcode_tmp_path", None)
@@ -2560,7 +3030,19 @@ if has_display:
             self._daemon_status_label.setText(txt)
             self._daemon_status_label.setStyleSheet(f"color: {col}; font-size: 11px;")
             self._daemon_stop_btn.setVisible(alive)
+            self._push_machine_connected()
             QTimer.singleShot(0, self._repack_all_columns)
+
+        def _push_machine_connected(self):
+            # Mirror the machine-connected state into the Make webview so the
+            # Plot button can refuse (with a clear message) BEFORE running the
+            # whole pen-confirm + gcode-generation flow only to dead-end.
+            try:
+                val = 'true' if self.port else 'false'
+                self._make_webview.page().runJavaScript(
+                    f"window._pl0tMachineConnected = {val};")
+            except Exception:
+                pass
 
         def _stop_daemon(self):
             if QMessageBox.question(self, "Stop Daemon",
@@ -2907,8 +3389,9 @@ if has_display:
         def refresh_tool_list(self):
             self.tools_list.clear()
             for idx, t in enumerate(self.tools, start=1):
+                _pt = getattr(t, 'pen_type', '') or '-'
                 self.tools_list.addItem(
-                    f"{idx}. {t.name} - X:{t.x:.1f} Y:{t.y:.1f} Z:{t.z:.1f}")
+                    f"{idx}. {t.name} [{_pt}] - X:{t.x:.1f} Y:{t.y:.1f} Z:{t.z:.1f}")
 
         def on_tool_select(self, idx):
             if idx < 0 or idx >= len(self.tools):
@@ -2920,6 +3403,9 @@ if has_display:
             self.tool_y_edit.setText(str(t.y))
             self.tool_z_edit.setText(str(t.z))
             self.tool_safe_z_edit.setText(str(t.safe_z))
+            _pi = self.tool_pen_type_combo.findData(getattr(t, 'pen_type', ''))
+            if _pi < 0: _pi = 0
+            if _pi >= 0 and self.tool_pen_type_combo.count(): self.tool_pen_type_combo.setCurrentIndex(_pi)
 
         def _read_tool_form(self) -> Tool:
             return Tool(
@@ -2929,7 +3415,24 @@ if has_display:
                 y=float(self.tool_y_edit.text()),
                 z=float(self.tool_z_edit.text()),
                 safe_z=float(self.tool_safe_z_edit.text()),
+                pen_type=self.tool_pen_type_combo.currentData() or '',
             )
+
+        def _save_tool_from_position(self):
+            mp = getattr(self, 'machine_pos', None) or {"x": 0.0, "y": 0.0, "z": 0.0}
+            self.tool_x_edit.setText(f"{mp['x']:.3f}")
+            self.tool_y_edit.setText(f"{mp['y']:.3f}")
+            self.tool_z_edit.setText(f"{mp['z']:.3f}")
+            idx = self.tools_list.currentRow()
+            if 0 <= idx < len(self.tools):
+                t = self.tools[idx]
+                t.x = float(mp['x']); t.y = float(mp['y']); t.z = float(mp['z'])
+                save_tools(tools=self.tools)
+                self.refresh_tool_list()
+                self.tools_list.setCurrentRow(idx)
+                QMessageBox.information(self, "Saved", f"Machine position written to '{t.name}'  (X{t.x:.2f} Y{t.y:.2f} Z{t.z:.2f})")
+            else:
+                QMessageBox.information(self, "Position captured", "Filled X/Y/Z from the machine. Set name + pen type, then Add.")
 
         def add_tool(self):
             try:
@@ -3071,13 +3574,14 @@ if has_display:
                 return
             rapid, approach = self._pen_speeds()
             offset_y = tool.y + self.config.tc_unplug_mm
-            target_z = tool.safe_z if use_safe_z else tool.z
-            speed    = approach if not use_safe_z else rapid
             try:
                 self._pen_send(
+                    # SafeY^: raise to safe Z FIRST so the approach-lane move is
+                    # collision-free from any starting height. SafeY_v: stay put, drop last.
+                    *([f"G53 G1 Z{tool.safe_z:.3f} F{rapid}"] if use_safe_z else []),
                     f"G53 G1 Y{offset_y:.3f} F{rapid}",
                     f"G53 G1 X{tool.x:.3f} F{rapid}",
-                    *([] if use_safe_z else [f"G53 G1 Z{target_z:.3f} F{approach}"]),
+                    *([] if use_safe_z else [f"G53 G1 Z{tool.z:.3f} F{approach}"]),
                 )
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Move failed: {e}")
@@ -3288,23 +3792,90 @@ if has_display:
                 return drawable
             return self._sort_layers_light_to_dark(drawable)
 
+        _NAME_RGB = {
+            "black": (0, 0, 0), "white": (255, 255, 255),
+            "red": (255, 0, 0), "green": (0, 128, 0), "blue": (0, 0, 255),
+            "yellow": (255, 255, 0), "cyan": (0, 255, 255), "magenta": (255, 0, 255),
+            "orange": (255, 165, 0), "purple": (128, 0, 128), "gray": (128, 128, 128),
+            "grey": (128, 128, 128),
+        }
+
+        def _color_to_rgb(self, c):
+            # Accepts "#rrggbb", "#rgb", or a CSS-ish colour name; returns an
+            # (r,g,b) tuple or None. Holder colours are stored as names
+            # (e.g. "magenta"); SVG layer colours arrive as hex.
+            if not c:
+                return None
+            c = str(c).strip().lower()
+            if c.startswith("#"):
+                return self._hex_to_rgb(c)
+            return self._NAME_RGB.get(c)
+
+        def _assign_colors_to_holders(self, colors):
+            # Greedy nearest-colour matching of distinct SVG colours onto the
+            # physical holders (self.tools), each holder used at most once.
+            # Best (smallest-distance) colour/holder pairs are matched first so
+            # exact matches win regardless of ordering. Colours with no holder
+            # left over fall back to their nearest already-used holder.
+            # Returns {colour_lower: Tool}.
+            tools = list(self.tools or [])
+            result = {}
+            if not tools:
+                return result
+            seen = []
+            for c in colors:
+                cl = (c or "").lower()
+                if cl and cl not in seen:
+                    seen.append(cl)
+            # Build all (dist, colour, holder_idx) triples with resolvable RGB.
+            pairs = []
+            for cl in seen:
+                crgb = self._color_to_rgb(cl)
+                for ti, t in enumerate(tools):
+                    trgb = self._color_to_rgb(getattr(t, "color", ""))
+                    if crgb is None or trgb is None:
+                        dist = float("inf")
+                    else:
+                        dist = sum((a - b) ** 2 for a, b in zip(crgb, trgb))
+                    pairs.append((dist, cl, ti))
+            pairs.sort(key=lambda p: p[0])
+            used_idx = set()
+            for dist, cl, ti in pairs:
+                if cl in result or ti in used_idx:
+                    continue
+                if dist == float("inf"):
+                    continue
+                result[cl] = tools[ti]
+                used_idx.add(ti)
+            # Any colour still unmatched (more colours than holders, or
+            # unresolvable RGB): fall back to nearest holder ignoring
+            # uniqueness, so it still plots rather than being dropped.
+            for cl in seen:
+                if cl in result:
+                    continue
+                crgb = self._color_to_rgb(cl)
+                best_t, best_d = tools[-1], float("inf")
+                for t in tools:
+                    trgb = self._color_to_rgb(getattr(t, "color", ""))
+                    if crgb is None or trgb is None:
+                        continue
+                    d = sum((a - b) ** 2 for a, b in zip(crgb, trgb))
+                    if d < best_d:
+                        best_d, best_t = d, t
+                result[cl] = best_t
+            return result
+
         def _assign_layers_to_holder_slots(self, layers: list) -> list:
             ordered = self._ordered_svg_layers_for_plot(layers)
+            color_to_tool = self._assign_colors_to_holders(
+                [(l.get("color") or "").lower() for l in ordered])
             assignments = []
-            color_to_tool = {}
-            tool_idx = 0
             for layer in ordered:
                 color = (layer.get("color") or "").lower()
-                if color and color in color_to_tool:
-                    assignments.append((layer, color_to_tool[color]))
-                else:
-                    if tool_idx >= len(self.tools):
-                        break
-                    tool = self.tools[tool_idx]
-                    if color:
-                        color_to_tool[color] = tool
-                    assignments.append((layer, tool))
-                    tool_idx += 1
+                tool = color_to_tool.get(color)
+                if tool is None:
+                    continue
+                assignments.append((layer, tool))
             return assignments
 
         def _confirm_pen_assignments(self, assignments: list, paper_size_mm=None, colors_exceed_slots=False) -> bool:
@@ -3335,6 +3906,16 @@ if has_display:
                 tool = entry["tool"]
                 slot_label = tool.name if tool else f"Slot {entry['slot']}"
                 extra = f"  ×{entry['count']} layers" if entry["count"] > 1 else ""
+                # Effective pen type + the exact Z it will draw at -- the safety
+                # info that catches a loaded-pen / holder-type mismatch.
+                ept = self._effective_pen_type(color, tool)
+                zoff = self._pen_tip_delta(ept)[2]
+                contact = self.config.pen_contact_z + zoff
+                loaded = ((getattr(self, '_active_pen_map', None) or {}).get((color or '').lower()))
+                if loaded and loaded in self._pen_types():
+                    pen_note = f"{ept} (loaded)"
+                else:
+                    pen_note = f"{ept} (holder default)"
                 row = QWidget()
                 rl = QHBoxLayout(row)
                 rl.setContentsMargins(0, 2, 0, 2)
@@ -3344,7 +3925,7 @@ if has_display:
                 fill = color if (color.startswith("#") and len(color) in (4, 7)) else "#888888"
                 swatch.setStyleSheet(f"background:{fill}; border:1px solid #555;")
                 rl.addWidget(swatch)
-                rl.addWidget(QLabel(f"{color}   →   Slot {entry['slot']}: {slot_label}{extra}"))
+                rl.addWidget(QLabel(f"{color}   →   Slot {entry['slot']}: {slot_label}{extra}   ·   {pen_note}   ·   Z {contact:+.2f} mm"))
                 rl.addStretch()
                 layout.addWidget(row)
             btns = QDialogButtonBox(
@@ -3447,9 +4028,9 @@ if has_display:
                 line, flags=re.IGNORECASE
             )
 
-        def _write_layer_vpype_config(self, path: str, safe_z: float = -5.0) -> None:
-            lift    = self.config.pen_lift_z
-            contact = self.config.pen_contact_z
+        def _write_layer_vpype_config(self, path: str, safe_z: float = -5.0, z_offset: float = 0.0) -> None:
+            lift    = self.config.pen_lift_z + z_offset
+            contact = self.config.pen_contact_z + z_offset
             speed   = self.config.draw_speed
             content = (
                 '[gwrite.pl0tb0t_layer]\n'
@@ -3610,8 +4191,13 @@ if has_display:
                 self.vpype_output_edit.setText(path)
 
         def _run_vpype_cmd(self, svg_path, cfg_path, profile, out_path,
-                           silent=False, _err_out=None) -> bool:
+                           silent=False, _err_out=None, xy_offset=(0.0, 0.0)) -> bool:
             steps = ["read", svg_path]
+            try: _ox, _oy = float(xy_offset[0]), float(xy_offset[1])
+            except (TypeError, ValueError, IndexError): _ox, _oy = 0.0, 0.0
+            # gcode-space offset: +X directly; Y via gwrite vertical_flip (translate -dy => +dy in gcode)
+            if abs(_ox) > 1e-4 or abs(_oy) > 1e-4:
+                steps.extend(["translate", f"{_ox:.4f}mm", f"{-_oy:.4f}mm"])
             if getattr(self, "vpype_splitall_cb", None) and self.vpype_splitall_cb.isChecked():
                 steps.append("splitall")
             if self.vpype_linemerge_cb.isChecked():
@@ -3622,7 +4208,18 @@ if has_display:
                 steps.extend(["linemerge", "-t", f"{lm_tol}mm"])
             if self.vpype_linesort_cb.isChecked():
                 steps.append("linesort")
-                if getattr(self, "vpype_twoopt_cb", None) and self.vpype_twoopt_cb.isChecked():
+                use_twoopt = bool(getattr(self, "vpype_twoopt_cb", None) and self.vpype_twoopt_cb.isChecked())
+                try:
+                    big_file = os.path.getsize(svg_path) > 5_000_000
+                except OSError:
+                    big_file = False
+                if use_twoopt and big_file:
+                    use_twoopt = False
+                    if _err_out is not None:
+                        _err_out.append("(auto) skipped --two-opt: file is large enough that the full "
+                                         "pairwise optimization previously froze the machine; used plain "
+                                         "linesort instead.")
+                if use_twoopt:
                     steps.append("--two-opt")
             if self.vpype_reloop_cb.isChecked():      steps.append("reloop")
             if self.vpype_linesimplify_cb.isChecked():
@@ -3633,25 +4230,149 @@ if has_display:
                 steps.extend(["linesimplify", "-t", f"{tol}mm"])
             # pre_steps can inject scaleto/crop before the optimisation steps
             all_steps = getattr(self, "_vpype_pre_steps", []) + steps
-            vpype_bin = str(__import__("pathlib").Path.home() / ".local/bin/vpype")
-            cmd = [vpype_bin, "-c", cfg_path, *all_steps, "gwrite", "-p", profile, out_path]
+            vpype_bin = str(Path.home() / ".local/bin/vpype")
+            cmd = [vpype_bin, "-v", "-c", cfg_path, *all_steps, "gwrite", "-p", profile, out_path]
+            # Stage list for live progress. vpype emits no %, but with -v it
+            # logs one line per pipeline stage; we know the stages up front.
+            _VPYPE_STAGE_CMDS = ("read", "translate", "splitall", "linemerge",
+                                 "linesort", "reloop", "linesimplify", "scaleto",
+                                 "crop", "layout", "gwrite")
+            _stage_names = [t for t in (list(all_steps) + ["gwrite"]) if t in _VPYPE_STAGE_CMDS]
+            _total_stages = max(1, len(_stage_names))
+            _stage_line_re = re.compile(r"executing (?:global|layer) processor [`']([^`']+)[`']")
+            _stage_label = {"read": "reading SVG", "translate": "positioning",
+                            "splitall": "splitting", "linemerge": "merging lines",
+                            "linesort": "sorting (travel)", "reloop": "relooping",
+                            "linesimplify": "simplifying", "scaleto": "scaling",
+                            "crop": "cropping", "layout": "laying out",
+                            "gwrite": "writing g-code"}
+
+            # Popen + poll (not subprocess.run) so the busy banner can show elapsed
+            # time -- visible proof the process is alive, not frozen -- and so a
+            # runaway can be killed on a hard timeout instead of taking the whole
+            # machine down with it (this is what happened before this fix).
+            TIMEOUT_S = 480
+            log_fd, log_path = tempfile.mkstemp(prefix="pl0tb0t_vpype_", suffix=".log")
+            t0 = time.monotonic()
+
+            def _cap_child_memory():
+                # Runs in the child, before exec. Caps virtual memory so a
+                # runaway vpype stage fails cleanly (MemoryError inside vpype,
+                # reported as a normal vpype-failed error) instead of the
+                # whole Pi swap-thrashing into unresponsiveness -- that's what
+                # happened twice before this cap existed.
+                try:
+                    import resource as _resource
+                    _cap = 5 * 1024 * 1024 * 1024  # 5GB — validated against a real 108K-path file that needs
+                                                    # this much just to parse; leaves ~2.9GB headroom on the
+                                                    # Pi's 7.9GB total for OS/app/webengine (measured ~700MB idle)
+                    _resource.setrlimit(_resource.RLIMIT_AS, (_cap, _cap))
+                except Exception:
+                    pass   # non-POSIX or unsupported — best effort, not fatal
+
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
-            except FileNotFoundError:
-                msg = "vpype not found — install it and ensure it's on PATH"
-                if _err_out is not None:
-                    _err_out[:] = [msg]
-                if not silent:
-                    QMessageBox.critical(self, "Error", msg)
-                return False
-            if result.returncode != 0:
-                msg = result.stderr.strip() or "vpype failed"
-                if _err_out is not None:
-                    _err_out[:] = [msg]
-                if not silent:
-                    QMessageBox.critical(self, "vpype Error", msg)
-                return False
-            return True
+                with os.fdopen(log_fd, "wb") as _logf:
+                    try:
+                        proc = subprocess.Popen(cmd, stdout=_logf, stderr=subprocess.STDOUT, preexec_fn=_cap_child_memory)
+                    except FileNotFoundError:
+                        msg = "vpype not found — install it and ensure it's on PATH"
+                        if _err_out is not None:
+                            _err_out[:] = [msg]
+                        if not silent:
+                            QMessageBox.critical(self, "Error", msg)
+                        return False
+                    timed_out = False
+                    while True:
+                        try:
+                            proc.wait(timeout=1.0)
+                            break
+                        except subprocess.TimeoutExpired:
+                            elapsed = int(time.monotonic() - t0)
+                            _stage_txt = ""
+                            try:
+                                with open(log_path, "r", encoding="utf-8", errors="ignore") as _sf:
+                                    _seen = _stage_line_re.findall(_sf.read())
+                                if _seen:
+                                    _lbl = _stage_label.get(_seen[-1], _seen[-1])
+                                    _stage_txt = f" — step {min(len(_seen), _total_stages)}/{_total_stages}: {_lbl}"
+                            except OSError:
+                                pass
+                            try:
+                                self.signals.update_banner.emit(f"● Plotting… vpype{_stage_txt} ({elapsed}s)")
+                            except Exception:
+                                pass
+                            QApplication.processEvents()
+                            if elapsed > TIMEOUT_S:
+                                timed_out = True
+                                proc.kill()
+                                try:
+                                    proc.wait(timeout=5)
+                                except Exception:
+                                    pass
+                                break
+                if timed_out:
+                    msg = f"vpype timed out after {TIMEOUT_S}s — aborted instead of freezing the machine."
+                    if _err_out is not None:
+                        _err_out[:] = [msg]
+                    if not silent:
+                        QMessageBox.critical(self, "vpype Error", msg)
+                    return False
+                if proc.returncode != 0:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as _rf:
+                            log_text = "\n".join(l for l in _rf.read().splitlines()
+                                                   if not l.startswith("INFO:")).strip()
+                    except OSError:
+                        log_text = ""
+                    msg = log_text or "vpype failed"
+                    if _err_out is not None:
+                        _err_out[:] = [msg]
+                    if not silent:
+                        QMessageBox.critical(self, "vpype Error", msg)
+                    return False
+                # vpype claims success (exit 0) -- verify it actually wrote a
+                # non-empty output. gwrite can exit 0 while writing nothing
+                # (e.g. an empty document after the optimisation steps), which
+                # otherwise surfaces downstream as a baffling FileNotFoundError
+                # AND (because of the finally below) with the vpype log already
+                # deleted. Capture a persistent diagnostic and fail cleanly.
+                try:
+                    _out_ok = os.path.exists(out_path) and os.path.getsize(out_path) > 0
+                except OSError:
+                    _out_ok = False
+                if not _out_ok:
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as _rf:
+                            _vlog = "\n".join(l for l in _rf.read().splitlines()
+                                               if not l.startswith("INFO:")).strip()
+                    except OSError:
+                        _vlog = ""
+                    try:
+                        with open("/tmp/pl0tb0t_vpype_diag.log", "w", encoding="utf-8") as _df:
+                            _df.write("vpype exited 0 but wrote no output file.\n")
+                            _df.write("out_path: %s\n" % out_path)
+                            _df.write("exists: %s\n" % os.path.exists(out_path))
+                            _df.write("cmd: %s\n" % " ".join(cmd))
+                            _df.write("--- vpype stdout/stderr ---\n")
+                            _df.write(_vlog or "(empty)")
+                            _df.write("\n")
+                    except OSError:
+                        pass
+                    msg = ("vpype produced no g-code for this layer: its geometry is "
+                           "positioned outside the page bounds (off-page) and was "
+                           "clipped away, leaving an empty drawing. Check the source "
+                           "SVG's coordinates/transforms. Diagnostic: /tmp/pl0tb0t_vpype_diag.log")
+                    if _err_out is not None:
+                        _err_out[:] = [msg]
+                    if not silent:
+                        QMessageBox.critical(self, "vpype Error", msg)
+                    return False
+                return True
+            finally:
+                try:
+                    os.remove(log_path)
+                except OSError:
+                    pass
 
         def _run_vpype_with_toolchanges(self, svg_path, cfg_path, profile, output_path, matched):
             prog = QProgressDialog("Generating G-code…", None, 0, 0, self)
@@ -3696,8 +4417,11 @@ if has_display:
                         label = layer.get("label", color)
                         tmp_gcode = os.path.join(tmp_dir, f"layer_{orig_i}.gcode")
                         err_out.clear()
+                        _ept = self._effective_pen_type(color, tool)
+                        self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
                         if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
-                                                   tmp_gcode, silent=True, _err_out=err_out):
+                                                   tmp_gcode, silent=True, _err_out=err_out,
+                                                   xy_offset=self._pen_xy_delta(_ept)):
                             msg = err_out[0] if err_out else "vpype failed"
                             result[0] = ("err", f"vpype failed for layer {label}: {msg}")
                             return
@@ -3705,8 +4429,9 @@ if has_display:
                         final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
                         first_xy = self._first_draw_xy(tmp_gcode)
                         if first_xy:
-                            final_lines.append("; pre-position over drawing start at safe height")
-                            final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
+                            final_lines.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
+                            final_lines.append(f"G0 X{first_xy[0]:.4f}")
+                            final_lines.append(f"G0 Y{first_xy[1]:.4f}")
                         final_lines.append(
                             f"; --- Layer {j+1}: {tool.name} holder - {label} ({color}) ---")
                         with open(tmp_gcode, "r", encoding="utf-8", errors="ignore") as f:
@@ -4367,8 +5092,7 @@ if has_display:
             if len(parts) < 2:
                 parts = [9.0, 12.0]
             pw, ph = parts[0], parts[1]
-            if orient == "landscape":
-                pw, ph = ph, pw
+            _ = orient  # orientation is derived from the SVG below, not this field
 
             import re as _re
             def _set_attr(tag: str, name: str, value: str) -> str:
@@ -4394,13 +5118,37 @@ if has_display:
 
             def _replace(match):
                 tag = match.group(0)
+                # Orient the physical page to match how the SVG was actually drawn
+                # (viewBox / width:height aspect). The job orientation field is
+                # unreliable, and a portrait page over a landscape viewBox squishes
+                # the art (non-uniform scale -> distortion + doubled-looking strokes).
+                _pw, _ph = pw, ph
+                _land = None
+                _vb = _attr(tag, "viewBox")
+                if _vb:
+                    try:
+                        _v = [float(x) for x in _vb.replace(",", " ").split()]
+                        if len(_v) == 4 and _v[2] and _v[3]:
+                            _land = _v[2] > _v[3]
+                    except Exception:
+                        _land = None
+                if _land is None:
+                    _ow = _numeric_length(_attr(tag, "width"))
+                    _oh = _numeric_length(_attr(tag, "height"))
+                    if _ow and _oh:
+                        _land = _ow > _oh
+                if _land is not None:
+                    if _land and _pw < _ph:
+                        _pw, _ph = _ph, _pw
+                    elif (not _land) and _pw > _ph:
+                        _pw, _ph = _ph, _pw
                 if not _attr(tag, "viewBox"):
                     old_w = _numeric_length(_attr(tag, "width"))
                     old_h = _numeric_length(_attr(tag, "height"))
                     if old_w and old_h:
                         tag = _set_attr(tag, "viewBox", f"0 0 {old_w:g} {old_h:g}")
-                tag = _set_attr(tag, "width", f"{pw:g}in")
-                tag = _set_attr(tag, "height", f"{ph:g}in")
+                tag = _set_attr(tag, "width", f"{_pw:g}in")
+                tag = _set_attr(tag, "height", f"{_ph:g}in")
                 return tag
 
             return _re.sub(r'<svg\b[^>]*>', _replace, svg_text, count=1, flags=_re.I)
@@ -4498,7 +5246,9 @@ if has_display:
                     svg_path.write_text(_svg_txt, encoding="utf-8")
                     layers   = self._parse_svg_layers(str(svg_path))
                     drawable = [l for l in layers if l.get("color")]
-                    ordered  = self._sort_layers_light_to_dark(drawable) if len(drawable) > 1 else drawable
+                    # Plot in palette/document order so the pen order matches the JS confirm dialog
+                    # (previously re-sorted light-to-dark here, which crossed pen slots vs. the dialog).
+                    ordered  = drawable
                     self.signals.queue_pen_assign.emit({
                         "job_id":   job_id,
                         "job":      job,
@@ -4555,39 +5305,35 @@ if has_display:
             key      = ctx["key"]
             gcode_path = tmp / f"{job_id}.gcode"
 
-            # Map each color layer to a tool slot in order
+            # Map each color layer to a tool slot: prefer the position the
+            # user declared in the Pens editor (stable across files); fall
+            # back to dynamic first-seen assignment only for colours that
+            # aren't in that registry at all.
+            color_to_tool = self._assign_colors_to_holders(
+                [(l.get("color") or "").lower() for l in ordered])
             assignments = []
-            tool_idx = 0
-            color_to_tool = {}
             for layer in ordered:
                 color = (layer.get("color") or "").lower()
-                if color in color_to_tool:
-                    assignments.append((layer, color_to_tool[color]))
-                elif tool_idx < len(self.tools):
-                    tool = self.tools[tool_idx]
-                    color_to_tool[color] = tool
-                    assignments.append((layer, tool))
-                    tool_idx += 1
-                elif self.tools:
-                    # overflow: bundle with darkest assigned tool (last slot)
-                    assignments.append((layer, self.tools[tool_idx - 1]))
+                tool = color_to_tool.get(color)
+                if tool is None:
+                    continue
+                assignments.append((layer, tool))
 
             if assignments:
                 colors_exceed = len(assignments) < len(ordered)
                 paper_mm = self._svg_page_mm(svg_path)
-
-#                 prog = QProgressDialog("Preparing pen assignments\u2026", None, 0, 0, self)
-#                 prog.setWindowTitle("Loading")
-#                 prog.setWindowModality(Qt.WindowModality.ApplicationModal)
-#                 prog.show()
-#                 QApplication.processEvents()
-# 
-#                 if not self._confirm_pen_assignments(assignments, paper_size_mm=paper_mm, colors_exceed_slots=colors_exceed):
-#                     prog.close()
-#                     self._queue_plot_btn.setEnabled(True)
-#                     return
-#                 prog.close()
-# 
+                # Read the loaded-pen panel (main thread) so Z/Y offsets and the
+                # confirm dialog reflect the pens actually loaded, and show the
+                # last-look safety gate before committing a multi-colour plot.
+                # The Make-tab web pen-confirm dialog already gated this plot;
+                # just capture the loaded-pen map (drives the real Z/Y offset).
+                self._active_pen_map = self._read_js_pen_map()
+                self._active_skip_set = self._read_js_skip_set()
+                _draw_order = self._read_js_draw_order()
+                assignments = self._apply_draw_order(assignments, _draw_order)
+                if _draw_order != self.config.draw_order:
+                    self.config.draw_order = _draw_order
+                    save_config(self.config)
             def _mark_plotting():
                 try:
                     self._queue_http(f"/jobs/{job_id}/status",
@@ -4655,8 +5401,12 @@ if has_display:
                         err_out = []
                         # pre-filter: only layers with actual drawable paths
                         active_layers = []
+                        _skip = getattr(self, "_active_skip_set", None) or set()
                         for i, (layer, tool) in enumerate(assignments):
                             color = layer.get("color", "")
+                            if (color or "").lower() in _skip:
+                                final_lines.append(f"; layer {i+1} ({color}) skipped by user (skip-layer toggle)")
+                                continue
                             pre_svg = str(gen_tmp / f"layer_{i}.svg")
                             if self._split_svg_by_color(svg_path, color, pre_svg):
                                 active_layers.append((layer, tool, pre_svg, i))
@@ -4671,8 +5421,11 @@ if has_display:
                             label  = layer.get("label", color)
                             l_gcode = str(gen_tmp / f"layer_{orig_i}.gcode")
                             err_out.clear()
+                            _ept = self._effective_pen_type(color, tool)
+                            self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
                             if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
-                                                       l_gcode, silent=True, _err_out=err_out):
+                                                       l_gcode, silent=True, _err_out=err_out,
+                                                       xy_offset=self._pen_xy_delta(_ept)):
                                 msg = err_out[0] if err_out else "vpype failed"
                                 result[0] = ("err", f"vpype failed for {label}: {msg}")
                                 return
@@ -4680,7 +5433,9 @@ if has_display:
                             final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
                             first_xy = self._first_draw_xy(l_gcode)
                             if first_xy:
-                                final_lines.append(f"G0 X{first_xy[0]:.4f} Y{first_xy[1]:.4f}")
+                                final_lines.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
+                                final_lines.append(f"G0 X{first_xy[0]:.4f}")
+                                final_lines.append(f"G0 Y{first_xy[1]:.4f}")
                             final_lines.append(
                                 f"; --- Layer {j+1}: {tool.name} - {label} ({color}) ---")
                             with open(l_gcode, "r", encoding="utf-8", errors="ignore") as f:
@@ -4735,7 +5490,10 @@ if has_display:
                         self.signals.update_status.emit("__q_autorun__")
                     else:
                         self.signals.show_info.emit(
-                            "Queue", "G-code ready \u2014 press Run to plot.")
+                            "Not Connected",
+                            "The g-code is ready, but the machine isn't connected, "
+                            "so it wasn't sent.\n\nClick Connect on the Machine tab, "
+                            "then press Run to plot.")
                     def _mark_done():
                         try:
                             self._queue_http(f"/jobs/{job_id}/status",
@@ -4756,19 +5514,18 @@ if has_display:
                 try:
                     import subprocess as _sp
                     layer_cfg = tmp / "layer.cfg"
-                    self._write_layer_vpype_config(str(layer_cfg))
+                    _z0 = self._pen_tip_delta(getattr(self.tools[0], 'pen_type', 'custom'))[2] if self.tools else 0.0
+                    self._write_layer_vpype_config(str(layer_cfg), z_offset=_z0)
                     vpype_exe = str(pathlib.Path.home() / ".local/bin/vpype")
                     try:
                         simplify_tol = float(self.vpype_simplify_tol_edit.text())
                     except (ValueError, AttributeError):
                         simplify_tol = 0.1
-                    cmd = (
-                        f"{vpype_exe} -c \"{layer_cfg}\" read \"{svg_path}\""
-                        f" linesimplify -t {simplify_tol}mm linemerge -t 0.5mm linesort --two-opt"
-                        f" gwrite -p pl0tb0t_layer \"{gcode_path}\""
-                    )
-                    if _sp.call(cmd, shell=True) != 0:
-                        raise RuntimeError("vpype returned non-zero exit code")
+                    _xy = self._pen_xy_delta(getattr(self.tools[0], 'pen_type', 'custom')) if self.tools else (0.0, 0.0)
+                    _err_out = []
+                    if not self._run_vpype_cmd(str(svg_path), str(layer_cfg), "pl0tb0t_layer", str(gcode_path),
+                                               silent=True, _err_out=_err_out, xy_offset=_xy):
+                        raise RuntimeError(_err_out[0] if _err_out else "vpype returned non-zero exit code")
                     if self.tools and gcode_path.exists():
                         tool = self.tools[0]
                         raw_lines = pathlib.Path(gcode_path).read_text(encoding='utf-8', errors='ignore').splitlines()
@@ -4780,6 +5537,11 @@ if has_display:
                             f"G1 F{self.config.draw_speed}",
                         ]
                         wrapped.extend(self._tool_pickup_gcode(tool, from_drop=False))
+                        _fxy = self._first_draw_xy(str(gcode_path))
+                        if _fxy:
+                            wrapped.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
+                            wrapped.append(f"G0 X{_fxy[0]:.4f}")
+                            wrapped.append(f"G0 Y{_fxy[1]:.4f}")
                         wrapped.extend(body)
                         wrapped.extend(self._tool_drop_gcode(tool, chain_next=False))
                         wrapped += [
@@ -4840,6 +5602,7 @@ if has_display:
                 assignments = self._assign_layers_to_holder_slots(self._svg_layers)
                 if assignments:
                     colors_exceed = len(assignments) < len(self._ordered_svg_layers_for_plot(self._svg_layers))
+                    self._active_pen_map = self._read_js_pen_map()
                     if not self._confirm_pen_assignments(assignments, colors_exceed_slots=colors_exceed):
                         return
                     self._run_vpype_with_toolchanges(
@@ -4949,6 +5712,7 @@ if has_display:
             self.gcode_path = file_path
             self.gcode_entry.setText(file_path)
             self._load_gcode_lines(file_path)
+            self._build_plot_layer_bounds(file_path)
             self.parse_gcode_for_preview(file_path, artboard_mm=artboard_mm)
             self.refresh_gcode_viewer()
             try:
@@ -4965,6 +5729,41 @@ if has_display:
                     self.gcode_run_btn.setText("\u25b6 Run")
             except Exception:
                 pass
+
+        def _build_plot_layer_bounds(self, file_path: str):
+            # Map each "; --- Layer N: label (color) ---" marker to the number
+            # of CLEANED (streamable) lines before it, so live progress can tell
+            # which colour is currently drawing. Cleaned-line counting mirrors
+            # exactly what run_gcode streams to the daemon.
+            bounds = []
+            clean_count = 0
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for raw in f:
+                        s = raw.strip()
+                        if s.startswith(";"):
+                            m = re.search(r"Layer \d+:\s*(.+?)\s*\((#[0-9a-fA-F]{6})\)", s)
+                            if m:
+                                lbl = m.group(1)
+                                if " - " in lbl:
+                                    lbl = lbl.split(" - ", 1)[1]
+                                bounds.append((clean_count, m.group(2).lower(), lbl))
+                            continue
+                        if self._clean_gcode_line(raw):
+                            clean_count += 1
+            except Exception:
+                bounds = []
+            self._plot_layer_bounds = bounds
+
+        def _current_plot_layer(self, sent: int):
+            bounds = getattr(self, "_plot_layer_bounds", None)
+            if not bounds:
+                return None
+            cur = None
+            for i, (start, color, label) in enumerate(bounds):
+                if start <= sent:
+                    cur = (color, label, i + 1, len(bounds))
+            return cur
 
         def _load_gcode_lines(self, file_path: str):
             self.gcode_lines = []

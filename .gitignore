@@ -18,3 +18,10 @@ queue_config.json
 
 SVG Archive/
 Recipe Archive/
+
+# Session scratch / one-off dev scripts + runtime logs
+patch_*.py
+fix_*.py
+calibrate_estimator.py
+*.log
+*.pid

@@ -123,6 +123,37 @@
         return pts.length >= 3 && Math.abs(_polyArea(pts)) > (minArea || 0.5);
     }
 
+    // Scanline fill: horizontal lines inside polygon set (even-odd winding).
+    // Correctly handles donut shapes — inner + outer polys produce ring fill.
+    function _scanlineFill(polys, spacing) {
+        var xMin=1e9, xMax=-1e9, yMin=1e9, yMax=-1e9;
+        polys.forEach(function(poly) {
+            poly.forEach(function(pt) {
+                if (pt[0]<xMin) xMin=pt[0]; if (pt[0]>xMax) xMax=pt[0];
+                if (pt[1]<yMin) yMin=pt[1]; if (pt[1]>yMax) yMax=pt[1];
+            });
+        });
+        if (spacing < 0.5) spacing = 0.5;
+        var lines = [];
+        for (var y = yMin + spacing/2; y <= yMax; y += spacing) {
+            var xs = [];
+            polys.forEach(function(poly) {
+                var n = poly.length;
+                for (var i = 0; i < n; i++) {
+                    var p1 = poly[i], p2 = poly[(i+1)%n];
+                    if ((p1[1] <= y && p2[1] > y) || (p2[1] <= y && p1[1] > y)) {
+                        xs.push(p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1]));
+                    }
+                }
+            });
+            xs.sort(function(a,b){return a-b;});
+            for (var k = 0; k+1 < xs.length; k+=2) {
+                if (xs[k+1] - xs[k] > 0.5) lines.push([xs[k], y, xs[k+1], y]);
+            }
+        }
+        return lines;
+    }
+
     // Sample a logo path polygon (bezier approximation via brute-force)
     // We use pre-sampled polygons because the logo paths are complex Bézier from Illustrator.
     // These are manually-derived polygon approximations of the logo shapes.
@@ -161,31 +192,35 @@
     }
 
     // ── EF Script / Hershey text renderer ────────────────────────────────────
-    function _renderTextSVG(text, font, x, y, height, color) {
+    function _renderTextSVG(text, font, x, y, height, color, penWidthPx, sepScale, sepPad) {
         // font: window._efScriptFont  OR  null (fall back to simple hershey-ish strokes)
         // x,y: top-left of text baseline area; height: cap height in px
         if (!text) return '';
         var parts = [];
         var cx = x;
-        var sw = Math.max(0.5, height * 0.06);
+        var sw = penWidthPx !== undefined ? Math.max(0.3, penWidthPx) : Math.max(0.5, height * 0.06);
         var stroke = color || '#000';
 
         if (font && font.chars) {
+            var sepH   = height * (sepScale || 1.0);
+            var centY  = y + height / 2;   // shared vertical centre for all chars
             parts.push('<g fill="none" stroke="' + stroke + '" stroke-width="' + sw.toFixed(2) +
                        '" stroke-linecap="round" stroke-linejoin="round">');
             for (var i = 0; i < text.length; i++) {
                 var ch = text[i];
+                var h  = (ch === '|') ? sepH : height;
                 var glyph = font.chars[ch] || font.chars[' '];
-                if (!glyph) { cx += height * 0.35; continue; }
+                if (!glyph) { cx += h * 0.35; continue; }
+                var pad = (ch === '|') ? (height * (sepPad || 0)) : 0;
+                cx += pad;  // pre-pad
                 if (glyph.d) {
-                    // Transform: scale(height) and translate to (cx, y)
-                    // EF Script paths are normalised: y=0 is top of cap, y=1 is baseline
-                    parts.push('<g transform="translate(' + cx.toFixed(2) + ',' + y.toFixed(2) +
-                               ') scale(' + height.toFixed(3) + ')">');
-                    parts.push('<path d="' + glyph.d + '"/>');
+                    var charY = centY - h / 2;
+                    parts.push('<g transform="translate(' + cx.toFixed(2) + ',' + charY.toFixed(2) +
+                               ') scale(' + h.toFixed(3) + ')">');
+                    parts.push('<path d="' + glyph.d.replace(/Z/gi, "") + '"/>');
                     parts.push('</g>');
                 }
-                cx += (glyph.adv || 0.5) * height;
+                cx += (glyph.adv || 0.5) * h + pad;  // advance + post-pad
             }
             parts.push('</g>');
         } else {
@@ -230,13 +265,14 @@
             parts.push('<path d="' + outlinePaths[i] + '"/>');
         }
 
-        // Fill strokes (inward offsets of logo polygons)
-        var fillLines = _logoFillStrokes(parseFloat(sw) / sc, 300);
+        // Scanline fill — horizontal lines clipped to logo shape (even-odd, handles rings)
+        var swCoord = parseFloat(sw) / sc;
+        var fillSpacing = Math.max(2, swCoord * 1.8);
+        var fillLines = _scanlineFill(LOGO_POLYS, fillSpacing);
         for (var fi = 0; fi < fillLines.length; fi++) {
-            var poly = fillLines[fi];
-            if (poly.length < 2) continue;
-            var pts = poly.map(function(p){ return p[0].toFixed(2)+','+p[1].toFixed(2); }).join(' ');
-            parts.push('<polyline points="' + pts + '" fill="none"/>');
+            var fl = fillLines[fi];
+            parts.push('<line x1="' + fl[0].toFixed(1) + '" y1="' + fl[1].toFixed(1) +
+                        '" x2="' + fl[2].toFixed(1) + '" y2="' + fl[3].toFixed(1) + '"/>');
         }
 
         parts.push('</g>');
@@ -244,80 +280,101 @@
     }
 
     // ── main public API ───────────────────────────────────────────────────────
-    function buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed) {
+    function buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed, sigColor) {
         if (!cfg || !cfg.enabled) return '';
+        var _sigCol = sigColor || '#000000';
         var font = (cfg.font !== 'hershey' && window._efScriptFont) ? window._efScriptFont : null;
-        var heightPx = mmToPixels(cfg.heightMm || 2.0);
+        var heightPx = mmToPixels((cfg.heightMm || 2.0) * (cfg.scale || 1.0));
         var padH     = heightPx * 0.25;   // vertical padding above/below text in band
 
         // Position: centred vertically in bottom margin, with optional offsets
-        var yShift = mmToPixels(cfg.yOffsetMm || 0);
-        var hPad   = mmToPixels(cfg.hPadMm   || 0);
-        var bandY  = svgH - marginPx + (marginPx - heightPx) / 2 + yShift;
+        var hPad       = mmToPixels(cfg.hPadMm || 0);
+        var fmm        = mmToPixels(cfg.fromMarginMm !== undefined ? cfg.fromMarginMm : 2.0);
+        fmm = Math.max(0, fmm);
+        var bandY      = svgH - marginPx + fmm;
         var textY  = bandY;
         var textX  = marginPx + hPad;
 
         // Build left text string
         var name     = seedToName(seed || 0);
-        var leftText = (sketchName || 'pl0tb0t') + '  |  ' + name + '  |  1 of 1?';
-        if (cfg.customMsg) leftText += '  |  ' + cfg.customMsg;
+        var _ed = (cfg && cfg._editionOverride != null) ? cfg._editionOverride : null;
+        var _edText = _ed ? (_ed + ' of ' + _ed) : '1 of 1?';
+        var _leftParts = [sketchName || 'pl0tb0t'];
+        if (cfg.showSeedName !== false) _leftParts.push(name);
+        _leftParts.push(_edText);
+        var leftText = _leftParts.join('|');
+        if (cfg.customMsg) leftText += '|' + cfg.customMsg;
 
         // Logo
-        var logoH    = heightPx * 1.1;
-        var logoW    = logoH * (300 / 250);   // logo aspect ~1.2
-        var logoX    = svgW - marginPx - logoW - hPad;
-        var logoY    = bandY - logoH * 0.05;
-        var penPx    = mmToPixels ? mmToPixels(0.4) : 1.5;
+        var logoH    = heightPx * 1.1 * (cfg.logoScale || 1.0);
+        // 213 = rightmost x of logo content in 300-unit space (ring 1 right edge)
+        var logoX    = svgW - marginPx - hPad - 213 * (logoH / 300);
+        var logoY    = bandY + (heightPx - logoH) / 2;
+        var penPx    = mmToPixels ? mmToPixels(cfg.penWidthMm || 0.4) : 1.5;
 
         var parts = ['<g id="signature">'];
 
         // Left text
-        parts.push(_renderTextSVG(leftText, font, textX, textY, heightPx, '#000'));
+        parts.push(_renderTextSVG(leftText, font, textX, textY, heightPx, _sigCol, penPx, cfg.sepScale || 1.0, cfg.sepPad !== undefined ? cfg.sepPad : 1.3));
 
         // Right logo
         if (cfg.showLogo !== false) {
-            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, '#000'));
+            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, _sigCol));
         }
 
         parts.push('</g>');
         return parts.join('\n');
     }
 
-    function drawSignaturePreview(ctx, cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed) {
+    function drawSignaturePreview(ctx, cfg, svgW, svgH, marginPx, mmToPixels, sketchName, seed, sigColor) {
         if (!cfg || !cfg.enabled || !cfg.showPreview) return;
-        var heightPx = mmToPixels(cfg.heightMm || 2.0);
-        var yShift   = mmToPixels(cfg.yOffsetMm || 0);
-        var hPad     = mmToPixels(cfg.hPadMm   || 0);
-        var bandY    = svgH - marginPx + (marginPx - heightPx) / 2 + yShift;
+        var _col = sigColor || '#000000';
+        var heightPx = mmToPixels((cfg.heightMm || 2.0) * (cfg.scale || 1.0));
+        var hPad       = mmToPixels(cfg.hPadMm || 0);
+        var fmm        = mmToPixels(cfg.fromMarginMm !== undefined ? cfg.fromMarginMm : 2.0);
+        fmm = Math.max(0, fmm);
+        var bandY      = svgH - marginPx + fmm;
         var font     = (cfg.font !== 'hershey' && window._efScriptFont) ? window._efScriptFont : null;
 
         var name     = seedToName(seed || 0);
-        var leftText = (sketchName || 'pl0tb0t') + '  |  ' + name + '  |  1 of 1?';
-        if (cfg.customMsg) leftText += '  |  ' + cfg.customMsg;
+        var _ed = (cfg && cfg._editionOverride != null) ? cfg._editionOverride : null;
+        var _edText = _ed ? (_ed + ' of ' + _ed) : '1 of 1?';
+        var _leftParts = [sketchName || 'pl0tb0t'];
+        if (cfg.showSeedName !== false) _leftParts.push(name);
+        _leftParts.push(_edText);
+        var leftText = _leftParts.join('|');
+        if (cfg.customMsg) leftText += '|' + cfg.customMsg;
+
+        var swPx = mmToPixels ? mmToPixels(cfg.penWidthMm || 0.4) : 1.0;
 
         ctx.save();
-        ctx.fillStyle   = '#555';
-        ctx.strokeStyle = '#555';
-        ctx.lineWidth   = Math.max(0.5, heightPx * 0.06);
+        ctx.fillStyle   = _col;
+        ctx.strokeStyle = _col;
         ctx.lineCap     = 'round';
         ctx.lineJoin    = 'round';
 
         if (font && font.chars) {
             // Draw EF Script paths via canvas
-            var cx = marginPx + hPad;
+            var cx    = marginPx + hPad;
+            var sepH  = heightPx * (cfg.sepScale || 1.0);
+            var centY = bandY + heightPx / 2;   // shared centre line
             for (var i = 0; i < leftText.length; i++) {
                 var ch    = leftText[i];
+                var h     = (ch === '|') ? sepH : heightPx;
                 var glyph = font.chars[ch] || font.chars[' '];
-                if (!glyph) { cx += heightPx * 0.35; continue; }
+                if (!glyph) { cx += h * 0.35; continue; }
+                var pad = (ch === '|') ? heightPx * (cfg.sepPad !== undefined ? cfg.sepPad : 1.3) : 0;
+                cx += pad;  // pre-pad: gap between previous text and |
                 if (glyph.d) {
                     ctx.save();
-                    ctx.translate(cx, bandY);
-                    ctx.scale(heightPx, heightPx);
-                    var p2d = new Path2D(glyph.d);
+                    ctx.translate(cx, centY - h / 2);
+                    ctx.scale(h, h);
+                    ctx.lineWidth = swPx / h;  // set AFTER scale — canvas units
+                    var p2d = new Path2D(glyph.d.replace(/Z/gi, ""));
                     ctx.stroke(p2d);
                     ctx.restore();
                 }
-                cx += (glyph.adv || 0.5) * heightPx;
+                cx += (glyph.adv || 0.5) * h + pad;  // advance + post-pad
             }
         } else {
             // Fallback: thin text
@@ -327,17 +384,27 @@
 
         // Logo preview outline
         if (cfg.showLogo !== false) {
-            var logoH = heightPx * 1.1;
-            var logoX = svgW - marginPx - logoH * 1.2 - hPad;
+            var logoH = heightPx * 1.1 * (cfg.logoScale || 1.0);
+            var logoX = svgW - marginPx - hPad - 213 * (logoH / 300);
             var sc    = logoH / 300;
             ctx.save();
-            ctx.translate(logoX, bandY - logoH * 0.05);
+            ctx.strokeStyle = _col;
+            ctx.lineCap     = 'round';
+            ctx.lineJoin    = 'round';
+            ctx.translate(logoX, bandY + (heightPx - logoH) / 2);
             ctx.scale(sc, sc);
+            // lineWidth must be set AFTER scale — canvas units * sc = screen pixels
+            ctx.lineWidth = 1.5 / sc;
             var outlines = [
                 'M181.2,154.5c2,-3.6,4.9,-6,8.8,-7c4,-1.1,7.7,-0.7,11.2,1.3c3.6,2,5.9,4.9,7,8.9c1.1,3.9,0.7,7.7,-1.3,11.2c-1.9,3.6,-4.9,5.9,-8.8,7c-4,1.1,-7.7,0.7,-11.3,-1.3c-3.5,-2,-5.8,-5,-7,-9C178.8,161.8,179.3,158.1,181.2,154.5zM180.3,185.4c6.7,3.7,13.7,4.5,20.9,2.4c7.5,-2.1,13.1,-6.5,16.9,-13c3.9,-6.6,4.8,-13.5,2.7,-20.7c-2,-7.1,-6.4,-12.5,-13.1,-16.1c-6.7,-3.7,-13.8,-4.5,-21.1,-2.4c-7.1,2,-12.6,6.4,-16.5,13c-3.9,6.6,-4.8,13.4,-2.8,20.3C169.3,176.2,173.7,181.7,180.3,185.4z',
                 'M131.8,113.5c-4,-6.5,-9.7,-10.7,-17,-12.6c-7.1,-1.8,-14.1,-0.8,-20.8,3c-6.7,3.8,-10.9,9.2,-12.6,16.2c-1.8,7.3,-0.8,14.2,3.1,20.8c3.9,6.6,9.6,10.8,16.9,12.6c4.9,1.2,9.7,1.2,14.3,0c0.6,-0.2,1.1,0.4,1,1l-4.5,18.1c-0.5,1.8,0.6,3.7,2.5,4.1l6,1.5c1.8,0.5,3.7,-0.6,4.1,-2.5l9.9,-39.5c0,0,0.1,-0.3,0.1,-0.4c0,-0.1,0,-0.2,0,-0.3c0.2,-0.5,0.3,-1,0.4,-1.5C136.9,126.8,135.8,120,131.8,113.5zM104.7,141.6c-4,-1,-7.1,-3.3,-9.1,-6.8c-2.1,-3.5,-2.6,-7.3,-1.6,-11.3c1,-3.8,3.2,-6.8,6.7,-8.9c3.3,-2,7.3,-2.6,11,-1.7c4,1,7.1,3.2,9.2,6.8c2.3,3.8,2.7,7.9,1.3,12.2c-1,3,-3,5.7,-5.6,7.4C112.9,141.9,108.9,142.7,104.7,141.6z',
                 'M139.5,210.4l-7.9,-2c-1.3,-0.3,-2.1,-1.7,-1.8,-3l31,-123.4c0.3,-1.3,1.7,-2.1,3,-1.8l7.9,2c1.3,0.3,2.1,1.7,1.8,3l-31,123.4C142.2,209.9,140.8,210.7,139.5,210.4z'
             ];
+            // Fill (solid preview) then stroke outlines
+            ctx.fillStyle = _col;
+            ctx.globalAlpha = 0.88;
+            outlines.forEach(function(d) { ctx.fill(new Path2D(d), 'evenodd'); });
+            ctx.globalAlpha = 1.0;
             outlines.forEach(function(d) { ctx.stroke(new Path2D(d)); });
             ctx.restore();
         }
@@ -345,9 +412,30 @@
         ctx.restore();
     }
 
+    function pickSignatureColor(palette) {
+        // Black if the palette contains it; otherwise the darkest color present.
+        if (!palette || !palette.length) return '#000000';
+        var cols = [];
+        for (var i = 0; i < palette.length; i++) {
+            var c = (typeof palette[i] === 'string') ? palette[i] : (palette[i] && palette[i].color);
+            if (c) cols.push(String(c));
+        }
+        if (!cols.length) return '#000000';
+        for (var k = 0; k < cols.length; k++) { if (cols[k].toLowerCase() === '#000000') return '#000000'; }
+        function _lum(hex) {
+            var h = String(hex).replace('#', ''); if (h.length === 3) h = h.replace(/(.)/g, '$1$1');
+            var r = parseInt(h.substr(0,2),16)||0, g = parseInt(h.substr(2,2),16)||0, b = parseInt(h.substr(4,2),16)||0;
+            return 0.299*r + 0.587*g + 0.114*b;
+        }
+        var best = cols[0], bl = _lum(cols[0]);
+        for (var j = 1; j < cols.length; j++) { var l = _lum(cols[j]); if (l < bl) { bl = l; best = cols[j]; } }
+        return best;
+    }
+
     window.Signature = {
         seedToName: seedToName,
         buildSignatureSVG: buildSignatureSVG,
+        pickSignatureColor: pickSignatureColor,
         drawSignaturePreview: drawSignaturePreview
     };
 
@@ -359,6 +447,7 @@
         font: 'ef',
         customMsg: '',
         heightMm: 2.0,
+        scale: 2.0,
         yOffsetMm: 0.0,
         hPadMm: 0.0
     };

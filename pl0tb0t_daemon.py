@@ -26,6 +26,13 @@ except ImportError:
     def _list_ports(): return []
 
 
+def _fmt_dur(s):
+    s = int(s)
+    if s < 60: return f"{s}s"
+    m = s // 60
+    if m < 60: return f"{m}min"
+    return f"{m // 60}h {m % 60:02d}m"
+
 def _log(msg):
     ts = time.strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
@@ -162,7 +169,14 @@ class GrblDaemon:
     def _poll_thread(self):
         while self._running:
             time.sleep(POLL_INTERVAL)
-            if self._ser and not self._cmd_lock.locked():
+            # "?" is a GRBL real-time command: it is answered immediately with a
+            # <...> status line and never consumes a planner slot, so it is safe
+            # to send even mid-stream. The reader routes <...> to _parse_status
+            # (never into the command response queue), so this can't corrupt a
+            # command in flight. Sending it unconditionally (not gated on the
+            # cmd lock) is what keeps the DRO / machine position live WHILE a
+            # plot is streaming, instead of freezing until the stream ends.
+            if self._ser:
                 try:
                     with self._write_lock:
                         self._ser.write(b"?")
@@ -314,7 +328,10 @@ class GrblDaemon:
         self._stream_pause.set()
         self._stream_stop.clear()
         self._streaming = True
-        _log(f"Streaming {total} lines")
+        _est_s = float(data.get("est_s", 0))
+        _est_tag = f" (est ~{_fmt_dur(_est_s)})" if _est_s > 0 else ""
+        _log(f"Streaming {total} lines{_est_tag}")
+        _stream_t0 = time.time()
 
         def _run():
             try:
@@ -347,7 +364,9 @@ class GrblDaemon:
                 self._streaming = False
                 self._stream_stop.clear()
                 self._stream_pause.set()
-                _log("Stream done")
+                _elapsed = time.time() - _stream_t0
+                _est_tag = f" (est was ~{_fmt_dur(_est_s)})" if _est_s > 0 else ""
+                _log(f"Stream done in {_fmt_dur(_elapsed)}{_est_tag}")
                 self._broadcast({"event": "progress", "sent": sent, "total": total})
                 self._broadcast({"event": "gcode_done"})
 

@@ -263,6 +263,7 @@ window.sketches['cmyk'] = function(p) {
             svgParts.push('</svg>');
             downloadSvgString(svgParts.join('\n'), filename);
         },
+        hideGlobalFillIds: ['fillAngle', 'fillDensity', 'fillProb', 'penLiftFills'],
         setParam: function(name, val) {
             var pdef = api.params.find(function(x){ return x.id === name; });
             if (pdef) pdef.value = val;
@@ -405,6 +406,10 @@ window.sketches['cmyk'] = function(p) {
         for (var i = 0; i < ctx.cols; i++)
             for (var j = 0; j < ctx.rows; j++) drawCmykCell(ctx, i, j);
         p.blendMode(p.BLEND);
+        // Redraw on top: 0" margin or full-bleed content can paint
+        // edge-to-edge and cover the border drawn at the top of this
+        // function -- keep it visible as the top layer.
+        paper.drawPaperBorder(p);
     };
 
     // Progressive render: draw cells in ~10ms frame-budget batches, yielding to

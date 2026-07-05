@@ -54,6 +54,7 @@ window.makeSketchUtils = window.makeSketchUtils || (function() {
                 showModeHidden: true,
                 value: String(defaultMargin || 1),
                 options: [
+                    { value: '0', label: '0 (none)' },
                     { value: '0.5', label: '1/2 inch' },
                     { value: '0.75', label: '3/4 inch' },
                     { value: '1', label: '1 inch' }
