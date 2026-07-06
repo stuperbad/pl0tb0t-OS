@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.143"
+__version__ = "0.5.144"
 import os
 import sys
 import time
@@ -1337,7 +1337,9 @@ if has_display:
                 ("Pen Type Offsets",   self._scrolled(self._build_pen_offsets_panel()), False, 0),
                 ("Pen Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
                 ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), True,  1),
-                ("Signature Settings", self._scrolled(self._build_signature_panel()),  True, 0),
+                # "Signature Settings" panel removed -- signature is now owned by the make
+                # tab (make_local/scripts/signatureSettings.js). _build_signature_panel
+                # remains defined but unused; slated for deletion in a later cleanup.
             ])
             right_col = self._panel_column([
                 ("Print Queue",     self._scrolled(self._build_queue_panel()),  False, 1),
