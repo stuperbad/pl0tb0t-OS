@@ -31,7 +31,10 @@
 window.sketches = window.sketches || {};
 window.sketches['imageTrace'] = function (p) {
     var paper = window.makeSketchUtils;
-    var WORK_MAX = 480; // capped working resolution (long edge, px) — keeps every pass fast/safe
+    var WORK_MAX = 1200; // capped working resolution (long edge, px). 1200 resolves pen-width
+                         // detail for a ~3-5in plot (DBV3 uses full photo res, but finer than the
+                         // pen can draw doesn't reach paper). Higher = more detail AND denser lines
+                         // (spacing is in working px), and cost grows ~quadratically. Was 480 (Pi guard).
 
     var PARAMS = {
         paperSize: '9x12',
@@ -124,6 +127,8 @@ window.sketches['imageTrace'] = function (p) {
         adaptiveContrast: 100,
 
         ignoreWhite: 'off',
+
+        alpha: 80,           // canvas-preview ink opacity (%); overlapping pens mix (multiply)
 
         brightness: 100,
         contrast: 100,
@@ -1383,7 +1388,10 @@ window.sketches['imageTrace'] = function (p) {
             // is DBV3's own real length unit (not steps), so it's converted
             // to this tracer's maxSteps proportionally against Digital
             // Detail's 150 -> 50 steps baseline; Start Angle values >180
-            // are folded into -180..180 (they're periodic).
+            // are folded into -180..180 (they're periodic). DBV3 Max Length 0
+            // means "no maximum" (symmetric with Min Length 0 = no minimum),
+            // so it maps to this tracer's max steps (lines run until they hit
+            // the occupancy grid / image bounds) -- e.g. Raindrops' rain streaks.
             { label: 'Digital Detail', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
               values: { seedSpacing: 1, maxSpacing: 10, maxSteps: 50, distortion: 15, tone: 75, edgePower: 90, etfIterations: 1, etfRadius: 3, postBlurIterations: 0, postBlurRadius: 0, flowStartAngle: 0, flowXFreq: 0.001, flowYFreq: 1, flowScaleFreq: 0.1, flowAmplitude: 0 } },
             { label: 'Fingerprints', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
@@ -1397,7 +1405,7 @@ window.sketches['imageTrace'] = function (p) {
             { label: 'Turbulence', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['flow'] }],
               values: { flowStartAngle: 52, flowXFreq: 1, flowYFreq: 1, flowScaleFreq: 1.371, flowAmplitude: 100, seedSpacing: 1, maxSpacing: 10, maxSteps: 67, distortion: 0, tone: 75 } },
             { label: 'Raindrops', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['flow'] }],
-              values: { flowStartAngle: 0, flowXFreq: 2, flowYFreq: 0.2, flowScaleFreq: 2, flowAmplitude: 100, seedSpacing: 1, maxSpacing: 10, maxSteps: 4, distortion: 0, tone: 80 } },
+              values: { flowStartAngle: 0, flowXFreq: 2, flowYFreq: 0.2, flowScaleFreq: 2, flowAmplitude: 100, seedSpacing: 1, maxSpacing: 10, maxSteps: 150, distortion: 0, tone: 80 } },
             { label: 'Glitchy Horizontal', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['flow'] }],
               values: { flowStartAngle: 0, flowXFreq: 0.001, flowYFreq: 1, flowScaleFreq: 1, flowAmplitude: 100, seedSpacing: 1, maxSpacing: 10, maxSteps: 67, distortion: 15, tone: 75 } },
             { label: 'Glitchy Vertical', scope: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['flow'] }],
@@ -1595,9 +1603,9 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'postBlurIterations', label: 'Smooth Iterations', type: 'range', min: 0, max: 20, step: 1, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
               tip: 'DBV3 "Smooth Iterations": additional smoothing passes after ETF refinement.' },
-            { id: 'postBlurRadius', label: 'Smooth Radius', type: 'range', min: 1, max: 15, step: 1, value: 2, group: 'general',
+            { id: 'postBlurRadius', label: 'Smooth Radius', type: 'range', min: 1, max: 30, step: 1, value: 2, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
-              tip: 'DBV3 "Smooth Radius": kernel size for the smoothing pass. Capped lower than DBV3\'s own max (30) to stay safely bounded on the Pi\'s CPU.' },
+              tip: 'DBV3 "Smooth Radius": kernel size for the smoothing pass (matches DBV3\'s full 0-30 range; high values are heavier on the Pi\'s CPU).' },
             { id: 'flowStartAngle', label: 'Start Angle', type: 'range', min: -180, max: 180, step: 1, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['flow', 'superformula', 'edge'] }],
               tip: 'DBV3 "Start Angle": initial angle/orientation of the field.' },
@@ -1747,7 +1755,9 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'offsetX', label: 'Offset X (mm)', type: 'range', min: -200, max: 200, step: 1, value: 0, group: 'general',
               tip: 'Shift horizontally from center.' },
             { id: 'offsetY', label: 'Offset Y (mm)', type: 'range', min: -200, max: 200, step: 1, value: 0, group: 'general',
-              tip: 'Shift vertically from center.' }
+              tip: 'Shift vertically from center.' },
+            { id: 'alpha', label: 'Ink Opacity (%)', type: 'range', min: 5, max: 100, step: 5, value: 80, group: 'advanced',
+              tip: 'Canvas-preview opacity for plotted lines. Below 100% the pens draw with Multiply blending so overlapping CMYK strokes mix like real ink. Preview only — does not change the exported plot geometry. 80% ≈ DBV3\'s preview.' }
         ]),
         regenerate: function () { resizeIfNeeded(); p.redraw(); },
         redraw: function () { try { p.redraw(); } catch (e) {} },
@@ -1828,7 +1838,7 @@ window.sketches['imageTrace'] = function (p) {
                       'hatchSpacing', 'hatchAngle', 'hatchAmplitude', 'hatchVelocityMin', 'hatchVelocityMax',
                       'pointDensity', 'pointLimit', 'stippleRadiusMin', 'stippleRadiusMax', 'luminancePower', 'voronoiIterations',
                       'minSampleRadius', 'maxSampleRadius', 'adaptiveBrightness', 'adaptiveContrast',
-                      'brightness', 'contrast', 'rotation', 'offsetX', 'offsetY'].indexOf(name) >= 0) {
+                      'brightness', 'contrast', 'rotation', 'offsetX', 'offsetY', 'alpha'].indexOf(name) >= 0) {
                 PARAMS[name] = Number(val);
             } else if (PARAMS.hasOwnProperty(name)) PARAMS[name] = val;
         }
@@ -1873,11 +1883,14 @@ window.sketches['imageTrace'] = function (p) {
         if (strokesByPen) {
             var L = layout();
             var pens = selectedPens();
+            var inkA = Math.max(0.05, Math.min(1, (Number(PARAMS.alpha) || 100) / 100));
             p.push();
+            if (inkA < 1) p.blendMode(p.MULTIPLY);   // overlapping pens mix subtractively (CMYK ink preview)
             p.strokeCap(p.ROUND); p.noFill();
             for (var i = 0; i < pens.length; i++) {
                 var col = pens[i];
-                p.stroke(col);
+                var _rgb = hexToRgb01(col);
+                p.stroke(_rgb[0] * 255, _rgb[1] * 255, _rgb[2] * 255, inkA * 255);
                 p.strokeWeight(widthPxFor(col));
                 var lines = strokesByPen[col] || [];
                 for (var j = 0; j < lines.length; j++) {
@@ -1890,6 +1903,7 @@ window.sketches['imageTrace'] = function (p) {
                     p.endShape();
                 }
             }
+            p.blendMode(p.BLEND);
             p.pop();
         } else if (previewImg) {
             var dims = paper.getPaperPixels(PARAMS.paperSize);

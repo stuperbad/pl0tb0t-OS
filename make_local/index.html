@@ -37,6 +37,16 @@
         /* Machine busy banner */
         #busy-banner { display: none; color: #ff9800; font-weight: 700; font-size: 13px; padding: 6px; flex-shrink: 0; margin-bottom: 6px; }
         #busy-banner.visible { display: block; }
+        #queueStatus { margin: 0 0 6px; }
+        .mmon { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600;
+                padding:3px 9px; border-radius:11px; background:#f2f4f7; color:#475467; border:1px solid #e4e7ec; }
+        .mmon-dot { width:8px; height:8px; border-radius:50%; background:#98a2b3; flex-shrink:0; }
+        .mmon.online .mmon-dot { background:#12b76a; }
+        .mmon.plotting { background:#3a2000; color:#ff9800; border-color:#5a3000; }
+        .mmon.plotting .mmon-dot { background:#ff9800; animation:mmonpulse 1s infinite; }
+        .mmon.offline { color:#98a2b3; }
+        .mmon.offline .mmon-dot { background:#d0d5dd; }
+        @keyframes mmonpulse { 0%,100%{opacity:1} 50%{opacity:.35} }
 
         #sketch-header label { font-weight: 600; font-size: 14px; margin: 0; white-space: nowrap; }
         #sketchSelector { flex: 1; font-size: 14px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; height: 38px; }
@@ -170,6 +180,9 @@
         <div id="ctrl-card">
             <div id="ctrl-scroll">
                 <div id="dynamicParams"></div>
+                <!-- Global authorship settings (survive sketch switches; #dynamicParams is
+                     rebuilt per-sketch, this is not). Signature migrated here from the Python OS. -->
+                <div id="globalAuthorParams"></div>
             </div>
             <div id="ctrl-actions">
                 <button id="reseed"     class="btn btn-outline-secondary" type="button">Reseed</button>
@@ -201,7 +214,7 @@
 
 <script>
     window.IS_LOCAL_MODE = true;
-    var QUEUE_URL = 'http://localhost:5001';
+    var QUEUE_URL = window.QUEUE_URL || 'http://localhost:5001';
     var QUEUE_API_KEY = window.QUEUE_API_KEY || 'pl0tb0t-secret';
     function queueHeaders() { return { 'Content-Type': 'application/json', 'X-API-Key': QUEUE_API_KEY }; }
     window.QUEUE_URL = QUEUE_URL; window.QUEUE_API_KEY = QUEUE_API_KEY;
@@ -529,17 +542,40 @@
     setInterval(fetchQueue, 10000);
     fetchQueue();
 
-    // ── Machine status polling ────────────────────────────────────────────────
+    // ── Machine status monitor ────────────────────────────────────────────────
+    // Always-on indicator of the target machine (whatever QUEUE_URL points at --
+    // localhost, or the Pi when driving from another computer). Reuses /status
+    // and the /capabilities handshake for the machine name.
+    var _mmonName = '';
+    function renderMachineMonitor(cls, label) {
+        var el = document.getElementById('queueStatus');
+        if (!el) return;
+        var name = _mmonName ? ('<span class="mmon-name">' + _mmonName + '</span> · ') : '';
+        el.innerHTML = '<div class="mmon ' + cls + '"><span class="mmon-dot"></span>' + name +
+                       '<span class="mmon-state">' + label + '</span></div>';
+    }
+    function fetchMachineCapabilities() {
+        fetch(QUEUE_URL + '/capabilities').then(function(r){ return r.json(); }).then(function(c) {
+            if (c && c.name) _mmonName = c.name;
+        }).catch(function(){});
+    }
     function fetchMachineStatus() {
         fetch(QUEUE_URL + '/status').then(function(r){ return r.json(); }).then(function(s) {
             var banner = document.getElementById('busy-banner');
             if (s.busy) {
                 banner.classList.add('visible');
                 if (!banner.dataset.pyStep) banner.textContent = '● Plotting…';
+                renderMachineMonitor('online plotting', 'Plotting' + (s.current_job_id ? ' · ' + s.current_job_id : ''));
+            } else {
+                renderMachineMonitor('online', 'Idle');
             }
-            // never hide from poll — Python clears it when done
-        }).catch(function(){});
+            // never hide banner from poll — Python clears it when done
+        }).catch(function(){
+            renderMachineMonitor('offline', 'Offline');
+        });
     }
+    fetchMachineCapabilities();
+    setInterval(fetchMachineCapabilities, 30000);
     setInterval(fetchMachineStatus, 3000);
     fetchMachineStatus();
 
@@ -686,6 +722,7 @@
 </script>
 <script src="scripts/ef_script_font.js"></script>
 <script src="scripts/signature.js"></script>
+<script src="scripts/signatureSettings.js"></script>
 <script src="scripts/plotPens.js"></script>
 <script src="scripts/makeSketch.js"></script>
 <script>

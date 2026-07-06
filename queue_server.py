@@ -231,6 +231,32 @@ def add_cors(resp):
 def options_handler(path):
     return "", 204
 
+# ── Capabilities handshake ────────────────────────────────────────────────────
+# Machine self-description so any client (e.g. the make tab on another computer)
+# can confirm what this plotter host is, and which pen tools it can physically
+# load, BEFORE sending a job. Author-time work stays hardware-agnostic; this is
+# where a drawing is validated against the specific machine it's being sent to.
+@app.route("/capabilities", methods=["GET"])
+def capabilities():
+    import socket
+    caps = {
+        "name": socket.gethostname(),
+        "role": "plotter-host",
+        "queue_version": __version__,
+        "formats": ["svg"],
+        "tools": [],
+    }
+    try:
+        tools_path = BASE_DIR / "pl0tb0t_tools.json"
+        if tools_path.exists():
+            data = json.loads(tools_path.read_text())
+            for t in (data.get("tools", []) if isinstance(data, dict) else []):
+                # colour + name only -- the physical z/x/y offsets stay machine-side
+                caps["tools"].append({"color": t.get("color"), "name": t.get("name")})
+    except Exception:
+        pass
+    return jsonify(caps)
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 
 def get_db():

@@ -1,0 +1,18 @@
+# Windows requirements for the pl0tb0t-OS desktop app + make tab.
+#
+# The Pi-only hardware libs from requirements.txt (RPi.GPIO, board,
+# adafruit-circuitpython-seesaw) are intentionally omitted -- the desktop
+# app (pl0tb0t_OS.py) does not import them, and the plotter/daemon side
+# runs on the Pi. pycairo/pygame are also omitted (painful to install on
+# Windows and not needed to launch the GUI or generate SVGs in the make tab).
+#
+# Install with:  pip install -r requirements-win.txt
+
+PyQt6
+PyQt6-WebEngine        # QWebEngineView -- renders the make tab
+pyserial               # soft-imported for serial-port listing; optional
+
+# Only needed if you also run the queue server locally on the PC
+# (make-tab "send to plotter" pipeline). Safe to install; harmless if unused.
+flask
+svgwrite

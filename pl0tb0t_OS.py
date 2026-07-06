@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.142"
+__version__ = "0.5.143"
 import os
 import sys
 import time
@@ -44,6 +44,8 @@ except Exception:
 has_display = (
     os.environ.get("DISPLAY") is not None
     or os.environ.get("WAYLAND_DISPLAY") is not None
+    or sys.platform == "win32"      # Windows always has a GUI session
+    or sys.platform == "darwin"     # macOS likewise (native Cocoa display)
 )
 
 if has_display:
@@ -1462,17 +1464,25 @@ if has_display:
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
             view.page().loadFinished.connect(
-                lambda ok: (self._push_signature_config(), self._push_pen_width(), self._push_make_tab_settings(), self._push_pen_types_to_make(), self._push_draw_order(), self._push_machine_connected(), self._push_show_palette()) if ok else None)
+                lambda ok: (self._push_pen_width(), self._push_make_tab_settings(), self._push_pen_types_to_make(), self._push_draw_order(), self._push_machine_connected(), self._push_show_palette()) if ok else None)
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
             api_key = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
+            # Queue URL from the app's queue settings (queue_config.json) so the
+            # make tab posts Save/plot jobs wherever the OS is pointed -- e.g.
+            # http://pl0tb0tpi5:5001 when driving from a PC and plotting on the Pi.
+            try:
+                import json as _qj, pathlib as _qp
+                queue_url = _qj.loads((_qp.Path(__file__).parent / "queue_config.json").read_text()).get("url", "http://localhost:5001")
+            except Exception:
+                queue_url = "http://localhost:5001"
             # DocumentCreation: globals available before page scripts run
             inject = QWebEngineScript()
             inject.setName("pl0tb0t_inject")
             inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
             inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-            inject.setSourceCode(f"window.QUEUE_API_KEY = '{api_key}'; window._pl0tMode = 'full';")
+            inject.setSourceCode(f"window.QUEUE_URL = '{queue_url}'; window.QUEUE_API_KEY = '{api_key}'; window._pl0tMode = 'full';")
             view.page().scripts().insert(inject)
             # DocumentReady: force ctrl-col width via inline style so it wins
             # regardless of whatever CSS the webview ends up serving.
@@ -1845,32 +1855,11 @@ if has_display:
             return w
 
         def _push_signature_config(self):
-            """Push current signature config to the Make tab JS."""
-            cfg = self.config
-            js = (
-                'window._signatureConfig = {'
-                + 'enabled:' + ('true' if cfg.sig_enabled else 'false') + ','
-                + 'showPreview:' + ('true' if cfg.sig_show_preview else 'false') + ','
-                + 'suppressExport:' + ('true' if cfg.sig_suppress_export else 'false') + ','
-                + 'showLogo:' + ('true' if cfg.sig_show_logo else 'false') + ','
-                + 'showSeedName:' + ('true' if cfg.sig_show_seed_name else 'false') + ','
-                + 'font:"' + cfg.sig_font + '",'
-                + 'customMsg:"' + cfg.sig_custom_msg.replace('"', '\\"') + '",'
-                + 'heightMm:' + str(cfg.sig_height_mm) + ','
-                + 'scale:' + str(cfg.sig_scale) + ','
-                + 'fromMarginMm:' + str(cfg.sig_from_margin_mm) + ','
-                + 'hPadMm:' + str(cfg.sig_h_pad_mm) + ','
-                + 'penWidthMm:' + str(cfg.pen_width_mm) + ','
-                + 'logoScale:' + str(cfg.sig_logo_scale) + ','
-                + 'sepScale:' + str(cfg.sig_sep_scale) + ','
-                + 'sepPad:' + str(cfg.sig_sep_pad)
-                + '};'
-                + 'try{if(window.sketchAPI&&window.sketchAPI.redraw)window.sketchAPI.redraw();}catch(e){}'
-            )
-            try:
-                self._make_webview.page().runJavaScript(js)
-            except Exception:
-                pass
+            """Deprecated: signature config is now OWNED by the make tab
+            (make_local/scripts/signatureSettings.js, persisted in localStorage).
+            Kept as a no-op so existing on-change connections don't error and no
+            longer clobber the make tab's own config."""
+            return
 
         def _push_pen_width(self):
             """Push pen_width_mm and plot-speed globals to the Make tab."""
@@ -6232,6 +6221,10 @@ def main():
                 os.environ["QT_QPA_PLATFORM"] = "xcb"
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
+        # Force Fusion's light palette so the UI stays consistent regardless of the
+        # OS theme. On Windows 11 dark mode, Qt was tinting window/input backgrounds
+        # dark while the light stylesheet kept text/boxes light -- a jarring mix.
+        app.setPalette(app.style().standardPalette())
         app.setStyleSheet("""
             QPushButton {
                 padding: 4px 10px;
