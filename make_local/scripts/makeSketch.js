@@ -19,6 +19,23 @@
         return 'general';
     }
 
+    // Paper controls (paperSize/customWidth/customHeight/margin/landscape) are
+    // injected generically like Draw order etc (same placement/format as always),
+    // but their backing store is the GLOBAL paperSettings.js module, shared by
+    // every sketch. Route a change to that store; returns true if id was a paper field.
+    var PAPER_ID_MAP = { paperSize: 'paperSize', customWidth: 'customWidth', customHeight: 'customHeight', margin: 'margin' };
+    function routePaperChange(id, pv) {
+        if (!window.PaperSettings) return false;
+        if (PAPER_ID_MAP[id]) {
+            var key = PAPER_ID_MAP[id];
+            var v = (key === 'margin' || key === 'customWidth' || key === 'customHeight') ? Number(pv) : pv;
+            window.PaperSettings.set(key, v);
+            return true;
+        }
+        if (id === 'landscape') { window.PaperSettings.set('orientation', pv === 'on' ? 'landscape' : 'portrait'); return true; }
+        return false;
+    }
+
     function _drawSignatureOverlay() {
         if (!window._signatureConfig || !window._signatureConfig.enabled ||
             !window._signatureConfig.showPreview) return;
@@ -502,15 +519,9 @@
                 // clear existing dynamic
                 if (paramsContainer) paramsContainer.innerHTML = '';
                 var params = (registeredApi && registeredApi.params) ? registeredApi.params : null;
-                // Carry paper size/margin/custom W&H across sketch switches instead of
-                // resetting to each sketch's own baked-in default (Home dropdown + Show cycling).
-                if (params && window._pl0tPaperPrefs) {
-                    params.forEach(function(pdef) {
-                        if (Object.prototype.hasOwnProperty.call(window._pl0tPaperPrefs, pdef.id)) {
-                            pdef.value = window._pl0tPaperPrefs[pdef.id];
-                        }
-                    });
-                }
+                // Paper (size/margin/custom W&H) carries across sketch switches via the
+                // global paperSettings.js module (window._paperSettings), not a per-sketch
+                // default -- see the 'paperSize' injection block below.
                 // Home mode: color palettes select from the global pen registry
                 // (window._pl0tPens, pushed by the OS). The sketch keeps its own
                 // options in Show mode / when no registry is set.
@@ -581,8 +592,45 @@
                 if (params && !params.some(function(p){return p.id==='fillProb';}) && !(registeredApi && registeredApi.hideGlobalFillIds && registeredApi.hideGlobalFillIds.indexOf('fillProb') !== -1)) {
                     params = params.concat([{ id:'fillProb', label:'% cells filled', type:'range', min:0, max:100, step:5, value:100, group:'textures', showModeHidden:true }]);
                 }
-                // Orientation ("landscape") moved to the global Paper panel
-                // (paperSettings.js) -- no longer injected as a per-sketch control.
+                // Paper: same placement/format as always (generic injection, 'paper'
+                // group, positioned near the top like Landscape/Draw order below) --
+                // but the backing store is the GLOBAL paperSettings.js module now, not
+                // a per-sketch default, so every sketch shows/shares the same paper.
+                if (params && !params.some(function(p){return p.id==='paperSize';})) {
+                    var _ps = (window.PaperSettings && window.PaperSettings.get()) || (window.PaperSettings && window.PaperSettings.DEFAULTS) || {};
+                    params = params.concat([
+                        { id: 'paperSize', label: 'Paper size', type: 'select', showModeHidden: true, group: 'paper',
+                          value: _ps.paperSize || '9x12',
+                          options: [
+                              { value: '5x7', label: '5 x 7"' },
+                              { value: '9x12',   label: '9 x 12"' },
+                              { value: '11x14', label: '11 x 14"' },
+                              { value: '11x17', label: '11 x 17"' },
+                              { value: '14x17', label: '14 x 17"' },
+                              { value: 'custom', label: 'Custom...' }
+                          ] },
+                        { id: 'customWidth', label: 'Width (inches)', type: 'number', showModeHidden: true, group: 'paper',
+                          value: _ps.customWidth != null ? _ps.customWidth : 8.5, min: 1, max: 48, step: 0.25,
+                          visibleWhen: { param: 'paperSize', values: ['custom'] } },
+                        { id: 'customHeight', label: 'Height (inches)', type: 'number', showModeHidden: true, group: 'paper',
+                          value: _ps.customHeight != null ? _ps.customHeight : 11, min: 1, max: 48, step: 0.25,
+                          visibleWhen: { param: 'paperSize', values: ['custom'] } },
+                        { id: 'margin', label: 'Margin', type: 'select', showModeHidden: true, group: 'paper',
+                          value: String(_ps.margin != null ? _ps.margin : 1),
+                          options: [
+                              { value: '0', label: '0 (none)' },
+                              { value: '0.5', label: '1/2 inch' },
+                              { value: '0.75', label: '3/4 inch' },
+                              { value: '1', label: '1 inch' }
+                          ] }
+                    ]);
+                }
+                if (params && !params.some(function(p){return p.id==='landscape';})) {
+                    var _psO = (window.PaperSettings && window.PaperSettings.get()) || {};
+                    params = params.concat([{ id:'landscape', label:'Orientation', type:'select',
+                        value: (_psO.orientation === 'landscape') ? 'on' : 'off', group:'paper',
+                        options:[{value:'off',label:'Portrait'},{value:'on',label:'Landscape'}] }]);
+                }
                 if (params && !params.some(function(p){return p.id==='plotHorizontal';})) {
                     params = params.concat([{ id:'plotHorizontal', label:'Plot horizontal', type:'select',
                         value: window._pl0tPlotHorizontal ? 'on' : 'off', group:'advanced', showModeHidden:true,
@@ -923,9 +971,10 @@
                 Object.keys(groupsInUse).forEach(function(k) {
                     if (preferredGroups.indexOf(k) === -1) ensureGroup(k);
                 });
-                // Per-sketch 'paper' group no longer exists (paper is now the global
-                // panel in paperSettings.js -- buildPaperParams() returns [] and
-                // 'landscape' is no longer injected), so no visibility handling needed here.
+                // Paper group stays visible in both modes (its rows hide individually
+                // via showModeHidden; Orientation has none, so it's visible in Show mode).
+                var _pg = document.getElementById('param-group-paper');
+                if (_pg) _pg.style.display = '';
 
                 function getParamValue(id) {
                     var input = document.getElementById(id);
@@ -976,7 +1025,7 @@
                             else if (id === 'penLiftFills') window.plotFills.setPenLift(pv === 'on');
                             else if (id === 'scatterFill') { var _sf; try { _sf = JSON.parse(pv); } catch(e) { _sf = [pv]; } if (!Array.isArray(_sf)) _sf = [String(pv)]; window.plotFills.setScatterStyles(_sf.filter(Boolean)); }
                         }
-                        if (id === 'landscape') window._pl0tLandscape = (pv === 'on');
+                        if (routePaperChange(id, pv)) { /* handled via global paper state */ }
                         else if (id === 'plotHorizontal') { window._pl0tPlotHorizontal = (pv === 'on'); if (typeof window._pl0tApplyOrientation === 'function') window._pl0tApplyOrientation(); }
                         else if (id === 'drawOrder') { window._pl0tDrawOrder = pv; }
                         else if (id === 'delayRender') { window._pl0tDelayRender = (pv === 'on'); var _rb = document.getElementById('renderNow'); if (_rb) _rb.style.display = (pv === 'on') ? '' : 'none'; }
@@ -1407,10 +1456,6 @@
                             if (spanValue) spanValue.textContent = input.value;
                             window.controls = window.controls || {};
                             window.controls[pdef.id] = val;
-                            if (pdef.id === 'paperSize' || pdef.id === 'margin' || pdef.id === 'customWidth' || pdef.id === 'customHeight') {
-                                window._pl0tPaperPrefs = window._pl0tPaperPrefs || {};
-                                window._pl0tPaperPrefs[pdef.id] = val;
-                            }
                             if (input.type === 'range') {
                                 if (input._redrawTimer) clearTimeout(input._redrawTimer);
                                 input._redrawTimer = setTimeout(function() {
@@ -1433,7 +1478,7 @@
                                     if (!Array.isArray(_sfv)) _sfv = [String(_sfv)];
                                     window.plotFills && window.plotFills.setScatterStyles(_sfv.filter(Boolean));
                                 }
-                                if (pdef.id === 'landscape')      { window._pl0tLandscape = (val === 'on'); }
+                                routePaperChange(pdef.id, val);
                                 if (pdef.id === 'plotHorizontal') { window._pl0tPlotHorizontal = (val === 'on'); if (typeof window._pl0tApplyOrientation === 'function') window._pl0tApplyOrientation(); }
                                 if (pdef.id === 'drawOrder')      { window._pl0tDrawOrder = val; }
                                 if (pdef.id === 'delayRender')    { window._pl0tDelayRender = (val === 'on'); var _rb = document.getElementById('renderNow'); if (_rb) _rb.style.display = (val === 'on') ? '' : 'none'; }
@@ -1561,6 +1606,10 @@
     window.makeSketchApp = {
         make: make,
         buildParamUI: buildParamUI,
+        // Rebuild the current sketch's control panel from its live registeredApi.
+        // Used by paperSettings.js after an external (non-UI-driven) paper change
+        // -- e.g. a loaded recipe -- so the Paper group's controls stay in sync.
+        refreshParamUI: function() { try { if (registeredApi) buildParamUI(registeredApi); } catch (e) {} },
         drawSignatureOverlay: function() { try { _drawSignatureOverlay(); } catch (e) {} },
         getSeedSlug: function() {
             try {
@@ -1587,8 +1636,8 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
-            // Per-sketch 'paper' group no longer exists -- paper/orientation are the
-            // global panel in paperSettings.js now, always visible regardless of mode.
+            var _paperGrp = document.getElementById('param-group-paper');
+            if (_paperGrp) _paperGrp.style.display = '';   // Landscape lives here; visible in both modes
             // Keep a hidden input so getParamValue('_renderMode') works for visibleWhen
             var _rmEl = document.getElementById('_renderMode');
             if (!_rmEl) {
