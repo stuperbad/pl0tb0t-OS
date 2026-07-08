@@ -117,7 +117,7 @@ window.sketches['cmyk'] = function(p) {
                 { value: 'star', label: 'Stars' },
                 { value: 'blob', label: 'Random blobs' }
               ]},
-            { id: 'viewMode', label: 'View mode', type: 'select', value: 'multiply',
+            { id: 'viewMode', label: 'View mode', type: 'select', value: 'multiply', group: 'advanced',
               options: [
                 { value: 'normal', label: 'Normal' },
                 { value: 'multiply', label: 'Multiply' }
@@ -151,10 +151,10 @@ window.sketches['cmyk'] = function(p) {
               labelByValue: { param: 'fieldRelation', values: { unique: 'Border Perlin scale', default: 'Perlin scale' } } },
             { id: 'lineNoiseScale', label: 'Line Perlin scale', type: 'range', min: 1, max: 50, step: 1, value: 10, group: 'orientation',
               visibleWhen: { param: 'fieldRelation', values: ['unique'] } },
-            { id: 'gradAngle',  label: 'Gradient angle°', type: 'range', min: 0,   max: 355, step: 5,   value: 0, group: 'color' },
+            { id: 'gradAngle',  label: 'Gradient angle°', type: 'range', min: 0,   max: 355, step: 5,   value: 0, group: 'general' },
             { id: 'density',    label: 'Density (ln/mm)', type: 'range', min: 10,  max: 30,  step: 2,   value: 20,
               _toInternal: function(v){ return v / 10; } },
-            { id: 'palette', label: 'Inks', type: 'colorPalette', maxSelect: 6,
+            { id: 'palette', label: 'Inks', type: 'colorPalette', maxSelect: 6, group: 'general',
               value: PARAMS.palette.slice(),
               options: [
                 { value: '#00ffff', label: 'Cyan' },
@@ -168,8 +168,8 @@ window.sketches['cmyk'] = function(p) {
                 { value: '#9c27b0', label: 'Purple' },
                 { value: 'custom',  label: 'Custom' }
               ]},
-            { id: 'startColor', label: 'Gradient start', type: 'color', value: '#ff6600' },
-            { id: 'endColor',   label: 'Gradient end',   type: 'color', value: '#0066cc' }
+            { id: 'startColor', label: 'Gradient start', type: 'color', value: '#ff6600', group: 'general' },
+            { id: 'endColor',   label: 'Gradient end',   type: 'color', value: '#0066cc', group: 'general' }
         ]),
         regenerate: function() { resizeIfNeeded(); renderChunked(); },
         reseed: function() {
