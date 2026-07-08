@@ -1664,7 +1664,19 @@
                 if (_pp && Array.isArray(_pp.value)) _pal = _pp.value;
             }
             var _sigCol = window.Signature.pickSignatureColor ? window.Signature.pickSignatureColor(_pal) : '#000000';
-            return window.Signature.buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPx, label, seed, _sigCol);
+            var _sig = window.Signature.buildSignatureSVG(cfg, svgW, svgH, marginPx, mmToPx, label, seed, _sigCol);
+            // Plot-horizontal rotates the whole page 90deg via rotateSvgForPlot(). The
+            // plot pipeline regenerates this signature fresh (for the edition #) and
+            // appends it at the TOP level of an ALREADY-rotated page with no further
+            // rotation -- so it must carry the SAME transform or it lands off the
+            // landscape page (the "plot horizontal drops the signature" bug).
+            // Only the null-svgElement caller (Python plot) needs this: the getSvgString()
+            // path passes an element and rotates the whole SVG afterward, so pre-wrapping
+            // there would double-rotate. svgH (portrait height) becomes the landscape width.
+            if (_sig && !svgElement && window._pl0tPlotHorizontal) {
+                _sig = '<g transform="translate(' + svgH + ',0) rotate(90)">' + _sig + '</g>';
+            }
+            return _sig;
             } catch(e) { return ''; }
         }
     };
