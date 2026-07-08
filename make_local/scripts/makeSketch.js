@@ -103,10 +103,22 @@
         }, 60);
 
         lastSketchName = name;
-        // Wrap redraw so signature overlay is painted after every draw call
+        // Wrap draw so "Signature only" (window._signatureConfig.onlySignature) can
+        // short-circuit the sketch's own art -- centralised here so no per-sketch
+        // changes are needed. Wrap redraw so the signature overlay is painted after
+        // every draw call.
         (function() {
             var _p = currentP5;
             if (!_p) return;
+            var _origDraw = _p.draw;
+            _p.draw = function() {
+                if (window._signatureConfig && window._signatureConfig.onlySignature) {
+                    _p.background(255);
+                    if (window.makeSketchUtils && window.makeSketchUtils.drawPaperBorder) window.makeSketchUtils.drawPaperBorder(_p);
+                    return;
+                }
+                if (typeof _origDraw === 'function') _origDraw();
+            };
             var _orig = _p.redraw.bind(_p);
             _p.redraw = function() { _orig(); _drawSignatureOverlay(); };
         })();
@@ -569,11 +581,8 @@
                 if (params && !params.some(function(p){return p.id==='fillProb';}) && !(registeredApi && registeredApi.hideGlobalFillIds && registeredApi.hideGlobalFillIds.indexOf('fillProb') !== -1)) {
                     params = params.concat([{ id:'fillProb', label:'% cells filled', type:'range', min:0, max:100, step:5, value:100, group:'textures', showModeHidden:true }]);
                 }
-                if (params && !params.some(function(p){return p.id==='landscape';})) {
-                    params = params.concat([{ id:'landscape', label:'Orientation', type:'select',
-                        value: window._pl0tLandscape ? 'on' : 'off', group:'paper',
-                        options:[{value:'off',label:'Portrait'},{value:'on',label:'Landscape'}] }]);
-                }
+                // Orientation ("landscape") moved to the global Paper panel
+                // (paperSettings.js) -- no longer injected as a per-sketch control.
                 if (params && !params.some(function(p){return p.id==='plotHorizontal';})) {
                     params = params.concat([{ id:'plotHorizontal', label:'Plot horizontal', type:'select',
                         value: window._pl0tPlotHorizontal ? 'on' : 'off', group:'advanced', showModeHidden:true,
@@ -914,10 +923,9 @@
                 Object.keys(groupsInUse).forEach(function(k) {
                     if (preferredGroups.indexOf(k) === -1) ensureGroup(k);
                 });
-                // Paper group stays visible in both modes (Landscape lives here);
-                // its mode-only rows hide individually via showModeHidden.
-                var _pg = document.getElementById('param-group-paper');
-                if (_pg) _pg.style.display = '';
+                // Per-sketch 'paper' group no longer exists (paper is now the global
+                // panel in paperSettings.js -- buildPaperParams() returns [] and
+                // 'landscape' is no longer injected), so no visibility handling needed here.
 
                 function getParamValue(id) {
                     var input = document.getElementById(id);
@@ -1579,8 +1587,8 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
-            var _paperGrp = document.getElementById('param-group-paper');
-            if (_paperGrp) _paperGrp.style.display = '';   // Landscape lives here; visible in both modes
+            // Per-sketch 'paper' group no longer exists -- paper/orientation are the
+            // global panel in paperSettings.js now, always visible regardless of mode.
             // Keep a hidden input so getParamValue('_renderMode') works for visibleWhen
             var _rmEl = document.getElementById('_renderMode');
             if (!_rmEl) {

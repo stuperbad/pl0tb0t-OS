@@ -326,6 +326,23 @@
     }
 
     function getSvgString() {
+        // "Signature only": skip capturing the sketch's own art entirely (avoids
+        // invoking any per-sketch saveSVG/render side effects) and build a minimal
+        // border + signature page directly, at the current global paper size.
+        if (window._signatureConfig && window._signatureConfig.onlySignature &&
+            window.makeSketchUtils && window.makeSketchApp && typeof window.makeSketchApp.getSignatureSvgForQueue === 'function') {
+            try {
+                var _dims = window.makeSketchUtils.getPaperPixels();
+                var _sig = window.makeSketchApp.getSignatureSvgForQueue(null) || '';
+                var _svg = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="' + _dims.width + '" height="' + _dims.height +
+                    '" viewBox="0 0 ' + _dims.width + ' ' + _dims.height + '">\n' +
+                    '<rect x="1" y="1" width="' + (_dims.width - 2) + '" height="' + (_dims.height - 2) + '" fill="none" stroke="#b4b4b4" stroke-width="2"/>\n' +
+                    _sig + '\n</svg>';
+                if (window._pl0tPlotHorizontal) _svg = rotateSvgForPlot(_svg);
+                return Promise.resolve(_svg);
+            } catch (e) { /* fall through to the normal capture path */ }
+        }
         var svgEl = document.querySelector('#make-sketch svg');
         var p = svgEl ? Promise.resolve(new XMLSerializer().serializeToString(svgEl))
                       : captureSvgFromSaveSVG();

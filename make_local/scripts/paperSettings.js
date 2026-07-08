@@ -10,8 +10,8 @@
 // "edit from queue" restores the exact size the job was made at.
 (function () {
   var KEY = 'pl0t_paper_settings';
-  var DEFAULTS = { paperSize: '9x12', margin: 1, customWidth: 8.5, customHeight: 11 };
-  var KEYS = ['paperSize', 'margin', 'customWidth', 'customHeight'];
+  var DEFAULTS = { paperSize: '9x12', margin: 1, customWidth: 8.5, customHeight: 11, orientation: 'portrait' };
+  var KEYS = ['paperSize', 'margin', 'customWidth', 'customHeight', 'orientation'];
 
   function load() {
     var cfg = {}; for (var k in DEFAULTS) cfg[k] = DEFAULTS[k];
@@ -24,17 +24,20 @@
 
   var config = load();
   window._paperSettings = config;
+  window._pl0tLandscape = (config.orientation === 'landscape');   // was previously a per-sketch 'landscape' control
 
   function persist() { try { localStorage.setItem(KEY, JSON.stringify(config)); } catch (e) {} }
   function resizeActiveSketch() {
     try { if (window.sketchAPI && window.sketchAPI.regenerate) window.sketchAPI.regenerate(); } catch (e) {}
   }
+  function syncLandscapeGlobal() { window._pl0tLandscape = (config.orientation === 'landscape'); }
 
   // user edit -> persist + resize the live canvas
   function set(key, val) {
     if (KEYS.indexOf(key) < 0) return;
     config[key] = val;
     window._paperSettings = config;
+    syncLandscapeGlobal();
     persist(); syncUI(); resizeActiveSketch();
   }
 
@@ -49,13 +52,18 @@
         changed = true;
       }
     });
-    if (changed) { window._paperSettings = config; persist(); syncUI(); }
+    if (changed) { window._paperSettings = config; syncLandscapeGlobal(); persist(); syncUI(); }
   }
-  // legacy recipes carried paperSize/margin/custom* inside params[]
+  // legacy recipes carried paperSize/margin/custom* AND the old per-sketch
+  // 'landscape' (on/off) control inside params[] -- map both into this global.
   function adoptFromParams(params) {
     if (!Array.isArray(params)) return;
     var m = {};
-    params.forEach(function (p) { if (p && KEYS.indexOf(p.id) >= 0) m[p.id] = p.value; });
+    params.forEach(function (p) {
+      if (!p) return;
+      if (KEYS.indexOf(p.id) >= 0) m[p.id] = p.value;
+      else if (p.id === 'landscape') m.orientation = (p.value === 'on') ? 'landscape' : 'portrait';
+    });
     adopt(m);
   }
 
@@ -71,6 +79,7 @@
     if (els.margin) els.margin.value = String(config.margin);
     if (els.customWidth) els.customWidth.value = config.customWidth;
     if (els.customHeight) els.customHeight.value = config.customHeight;
+    if (els.orientation) els.orientation.value = config.orientation;
     var isCustom = config.paperSize === 'custom';
     if (els.customWRow) els.customWRow.style.display = isCustom ? 'flex' : 'none';
     if (els.customHRow) els.customHRow.style.display = isCustom ? 'flex' : 'none';
@@ -128,6 +137,15 @@
       .forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; els.margin.appendChild(op); });
     els.margin.addEventListener('change', function () { set('margin', Number(els.margin.value)); });
     mr.appendChild(els.margin); body.appendChild(mr);
+
+    // orientation (was the per-sketch "Landscape" control -- global now, since
+    // it flips the same paper the rest of this panel controls)
+    var or = row('Orientation');
+    els.orientation = document.createElement('select'); els.orientation.style.cssText = 'font-size:12px;';
+    [['portrait', 'Portrait'], ['landscape', 'Landscape']]
+      .forEach(function (o) { var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; els.orientation.appendChild(op); });
+    els.orientation.addEventListener('change', function () { set('orientation', els.orientation.value); });
+    or.appendChild(els.orientation); body.appendChild(or);
 
     panel.appendChild(head); panel.appendChild(body);
     mount.appendChild(panel);
