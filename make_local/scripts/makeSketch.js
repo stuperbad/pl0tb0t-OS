@@ -349,7 +349,10 @@
                 version: 1,
                 sketch: lastSketchName || 'sketch',
                 params: window.sketchAPI.getParamsSnapshot ? window.sketchAPI.getParamsSnapshot() : [],
-                state: null
+                state: null,
+                // global authorship settings (paper now; more later) so the recipe is a
+                // complete snapshot -- "edit from queue" restores the exact paper size.
+                globals: (window.PaperSettings ? { paper: Object.assign({}, window.PaperSettings.get()) } : undefined)
             };
             if (registeredApi && typeof registeredApi.getRecipe === 'function') {
                 try {
@@ -369,9 +372,17 @@
 
         window.sketchAPI.applyRecipe = function(recipe) {
             if (!recipe || typeof recipe !== 'object') return;
+            // Global authorship settings (paper) travel in recipe.globals; legacy recipes
+            // carried paperSize/margin/custom* inside params[] -> adopt those as a fallback.
+            // Set the global BEFORE the sketch applies params so the resize below uses it.
+            if (window.PaperSettings) {
+                if (recipe.globals && recipe.globals.paper) window.PaperSettings.adopt(recipe.globals.paper);
+                else if (Array.isArray(recipe.params)) window.PaperSettings.adoptFromParams(recipe.params);
+            }
             if (registeredApi && typeof registeredApi.applyRecipe === 'function') {
                 try {
                     registeredApi.applyRecipe(recipe);
+                    try { if (window.sketchAPI.regenerate) window.sketchAPI.regenerate(); } catch(e) {}
                     return;
                 } catch(e) {
                     console.error('registeredApi.applyRecipe error', e);

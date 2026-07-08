@@ -8,72 +8,28 @@ window.makeSketchUtils = window.makeSketchUtils || (function() {
         '14x17': { w: 14, h: 17 }
     };
 
+    // Paper is now a GLOBAL authorship setting owned by paperSettings.js
+    // (window._paperSettings) rather than a per-sketch control. Returning []
+    // removes the old per-sketch paper controls; the helpers below read the
+    // global. The args are kept only as a backward-compat fallback for any
+    // caller that still passes a size before the global is initialised.
     function buildPaperParams(defaultPaper, defaultMargin) {
-        return [
-            {
-                id: 'paperSize',
-                label: 'Paper size',
-                type: 'select',
-                showModeHidden: true,
-                value: defaultPaper || '9x12',
-                options: [
-                    { value: '5x7', label: '5 x 7"' },
-                    { value: '9x12',   label: '9 x 12"' },
-                    { value: '11x14', label: '11 x 14"' },
-                    { value: '11x17', label: '11 x 17"' },
-                    { value: '14x17', label: '14 x 17"' },
-                    { value: 'custom', label: 'Custom...' }
-                ]
-            },
-            {
-                id: 'customWidth',
-                label: 'Width (inches)',
-                type: 'number',
-                showModeHidden: true,
-                value: 8.5,
-                min: 1,
-                max: 48,
-                step: 0.25,
-                visibleWhen: { param: 'paperSize', values: ['custom'] }
-            },
-            {
-                id: 'customHeight',
-                label: 'Height (inches)',
-                type: 'number',
-                showModeHidden: true,
-                value: 11,
-                min: 1,
-                max: 48,
-                step: 0.25,
-                visibleWhen: { param: 'paperSize', values: ['custom'] }
-            },
-            {
-                id: 'margin',
-                label: 'Margin',
-                type: 'select',
-                showModeHidden: true,
-                value: String(defaultMargin || 1),
-                options: [
-                    { value: '0', label: '0 (none)' },
-                    { value: '0.5', label: '1/2 inch' },
-                    { value: '0.75', label: '3/4 inch' },
-                    { value: '1', label: '1 inch' }
-                ]
-            }
-        ];
+        return [];
     }
 
     function getPaperPixels(paperSize) {
+        var ps = window._paperSettings || {};
+        var size = ps.paperSize || paperSize || '9x12';
         var dims;
-        if (paperSize === 'custom') {
-            var w = parseFloat((window.controls && window.controls.customWidth) || 8.5);
-            var h = parseFloat((window.controls && window.controls.customHeight) || 11);
+        if (size === 'custom') {
+            var w = parseFloat(ps.customWidth != null ? ps.customWidth : ((window.controls && window.controls.customWidth) || 8.5));
+            var h = parseFloat(ps.customHeight != null ? ps.customHeight : ((window.controls && window.controls.customHeight) || 11));
             if (!(w >= 1)) w = 8.5;
             if (!(h >= 1)) h = 11;
             dims = { width: Math.round(w * DPI), height: Math.round(h * DPI) };
         } else {
-            var size = PAPER_SIZES[paperSize] || PAPER_SIZES['9x12'];
-            dims = { width: Math.round(size.w * DPI), height: Math.round(size.h * DPI) };
+            var sz = PAPER_SIZES[size] || PAPER_SIZES['9x12'];
+            dims = { width: Math.round(sz.w * DPI), height: Math.round(sz.h * DPI) };
         }
         // Landscape: flip artboard X/Y (global toggle from the Make tab).
         if (window._pl0tLandscape) return { width: dims.height, height: dims.width };
@@ -97,7 +53,9 @@ window.makeSketchUtils = window.makeSketchUtils || (function() {
     }
 
     function getMarginPixels(marginInches) {
-        return Number(marginInches) * DPI;
+        var ps = window._paperSettings || {};
+        var m = (ps.margin != null) ? ps.margin : marginInches;
+        return Number(m) * DPI;
     }
 
     function mmToPixels(mm) {
