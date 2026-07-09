@@ -6,7 +6,9 @@ window.sketches['cmyk'] = function(p) {
     var PARAMS = {
         paperSize:  '9x12',
         margin:     1,
-        shape:      'boxes',
+        shape:      'polygon',
+        vertexCount: 4,
+        filletPct:  0,
         fillMode:   'lines',
         viewMode:   'normal',
         fieldSeed:  1,
@@ -27,11 +29,27 @@ window.sketches['cmyk'] = function(p) {
         noiseScale: 0.10,
         lineNoiseScale: 0.10,
         gradAngle:  0,
-        density:    2,
+        density:    100,   // % of the reference pen width; 100 = lines exactly one pen-width apart
         startColor: '#ff6600',
         endColor:   '#0066cc',
         palette: ['#00ffff', '#ff00ff', '#ffff00', '#000000'],
         viewMode: 'multiply'
+    };
+
+    // Old recipes/queued jobs may carry one of the pre-consolidation shape ids
+    // (each shape option used to be its own dropdown entry -- squares,
+    // rectangles, rounded squares, circles, ovals, triangles, pentagons,
+    // hexagons). They're all just a regular polygon at a given vertex count
+    // and fillet %, so map them onto that instead of breaking/defaulting.
+    var LEGACY_SHAPE_MAP = {
+        boxes:      { vertexCount: 4,  filletPct: 0 },
+        rectangle:  { vertexCount: 4,  filletPct: 0 },
+        roundRect:  { vertexCount: 4,  filletPct: 50 },
+        circles:    { vertexCount: 24, filletPct: 100 },
+        oval:       { vertexCount: 24, filletPct: 100 },
+        triangle:   { vertexCount: 3,  filletPct: 0 },
+        pentagon:   { vertexCount: 5,  filletPct: 0 },
+        hexagon:    { vertexCount: 6,  filletPct: 0 }
     };
 
     // Normalize hex color to [0-1] per-channel RGB array
@@ -97,26 +115,25 @@ window.sketches['cmyk'] = function(p) {
     var api = {
         hasPause: false,
         stylePresets: [
-            { label: 'CMYK halftone', values: { shape:'circles', fillMode:'texture', viewMode:'multiply', composition:50, overlap:20, palette:['#00ffff','#ff00ff','#ffff00','#000000'] } },
-            { label: 'Color-line boxes', values: { shape:'boxes', fillMode:'lines', viewMode:'multiply', composition:50, overlap:0 } },
-            { label: 'Woven rectangles', values: { shape:'rectangle', shapeAspect:35, overlap:60, fillMode:'lines', borderField:'on', lineField:'on', fieldRelation:'mirror' } },
+            { label: 'CMYK halftone', values: { shape:'polygon', vertexCount:24, filletPct:100, fillMode:'texture', viewMode:'multiply', composition:50, overlap:20, palette:['#00ffff','#ff00ff','#ffff00','#000000'] } },
+            { label: 'Color-line boxes', values: { shape:'polygon', vertexCount:4, filletPct:0, fillMode:'lines', viewMode:'multiply', composition:50, overlap:0 } },
+            { label: 'Woven rectangles', values: { shape:'polygon', vertexCount:4, filletPct:0, shapeAspect:35, overlap:60, fillMode:'lines', borderField:'on', lineField:'on', fieldRelation:'mirror' } },
             { label: 'Confetti blobs', values: { shape:'blob', fillMode:'lines', overlap:40, shapeAspect:75, composition:55 } },
             { label: 'Star scatter', values: { shape:'star', starPoints:5, fillMode:'lines', overlap:25 } }
         ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
-            { id: 'shape', label: 'Shape', type: 'select', value: 'boxes',
+            { id: 'shape', label: 'Shape', type: 'select', value: 'polygon',
               options: [
-                { value: 'boxes', label: 'Squares' },
-                { value: 'rectangle', label: 'Rectangles' },
-                { value: 'roundRect', label: 'Rounded squares' },
-                { value: 'circles', label: 'Circles' },
-                { value: 'oval', label: 'Ovals' },
-                { value: 'triangle', label: 'Triangles' },
-                { value: 'pentagon', label: 'Pentagons' },
-                { value: 'hexagon', label: 'Hexagons' },
-                { value: 'star', label: 'Stars' },
-                { value: 'blob', label: 'Random blobs' }
+                { value: 'polygon', label: 'Polygon' },
+                { value: 'star', label: 'Star' },
+                { value: 'blob', label: 'Random blob' }
               ]},
+            { id: 'vertexCount', label: 'Vertices', type: 'range', min: 3, max: 24, step: 1, value: 4,
+              visibleWhen: { param: 'shape', values: ['polygon'] },
+              tip: '3 = triangle, 4 = square, 5 = pentagon... higher counts approximate a circle, especially combined with a high Fillet %.' },
+            { id: 'filletPct', label: 'Fillet %', type: 'range', min: 0, max: 100, step: 5, value: 0,
+              visibleWhen: { param: 'shape', values: ['polygon'] },
+              tip: '0 = sharp vertices. 100 = maximally rounded (each corner rounds out to its edges\' midpoints) -- combined with Aspect below 100%, this gives an oval instead of a circle.' },
             { id: 'viewMode', label: 'View mode', type: 'select', value: 'multiply', group: 'advanced',
               options: [
                 { value: 'normal', label: 'Normal' },
@@ -152,8 +169,8 @@ window.sketches['cmyk'] = function(p) {
             { id: 'lineNoiseScale', label: 'Line Perlin scale', type: 'range', min: 1, max: 50, step: 1, value: 10, group: 'orientation',
               visibleWhen: { param: 'fieldRelation', values: ['unique'] } },
             { id: 'gradAngle',  label: 'Gradient angle°', type: 'range', min: 0,   max: 355, step: 5,   value: 0, group: 'general' },
-            { id: 'density',    label: 'Density (ln/mm)', type: 'range', min: 10,  max: 30,  step: 2,   value: 20,
-              _toInternal: function(v){ return v / 10; } },
+            { id: 'density',    label: 'Density (%)', type: 'range', min: 20, max: 300, step: 5, value: 100,
+              tip: '% of the loaded pen width. 100% = lines spaced exactly one pen-width apart (edge-to-edge, no gap/overlap). Above 100% lines overlap (denser); below spreads them out. Based on your palette’s thinnest loaded pen if widths are known, else the Pen width slider.' },
             { id: 'palette', label: 'Inks', type: 'colorPalette', maxSelect: 6, group: 'general',
               value: PARAMS.palette.slice(),
               options: [
@@ -171,7 +188,7 @@ window.sketches['cmyk'] = function(p) {
             { id: 'startColor', label: 'Gradient start', type: 'color', value: '#ff6600', group: 'general' },
             { id: 'endColor',   label: 'Gradient end',   type: 'color', value: '#0066cc', group: 'general' }
         ]),
-        regenerate: function() { resizeIfNeeded(); renderChunked(); },
+        regenerate: function() { resizeIfNeeded(); _updateHelp(); renderChunked(); },
         reseed: function() {
             PARAMS.fieldSeed = Math.floor(Math.random() * 1e6);
             PARAMS.shapeSeed = Math.floor(Math.random() * 1e6);
@@ -269,7 +286,21 @@ window.sketches['cmyk'] = function(p) {
             if (pdef) pdef.value = val;
             if (name === 'paperSize')  { PARAMS.paperSize = val; resizeIfNeeded(); }
             if (name === 'margin')     PARAMS.margin     = Number(val);
-            if (name === 'shape')      PARAMS.shape = val;
+            if (name === 'shape') {
+                var _legacy = LEGACY_SHAPE_MAP[val];
+                if (_legacy) {
+                    PARAMS.shape = 'polygon';
+                    PARAMS.vertexCount = _legacy.vertexCount;
+                    PARAMS.filletPct   = _legacy.filletPct;
+                    if (pdef) pdef.value = 'polygon';
+                    setSliderById('vertexCount', _legacy.vertexCount);
+                    setSliderById('filletPct', _legacy.filletPct);
+                } else {
+                    PARAMS.shape = val;
+                }
+            }
+            if (name === 'vertexCount') PARAMS.vertexCount = Number(val);
+            if (name === 'filletPct')   PARAMS.filletPct   = Number(val);
             if (name === 'fillMode')   PARAMS.fillMode = val;
             if (name === 'viewMode')   PARAMS.viewMode = val;
             if (name === 'circleSize') PARAMS.circleSize = Number(val);
@@ -290,7 +321,7 @@ window.sketches['cmyk'] = function(p) {
             if (name === 'noiseScale') PARAMS.noiseScale = Number(val) / 100;
             if (name === 'lineNoiseScale') PARAMS.lineNoiseScale = Number(val) / 100;
             if (name === 'gradAngle')  PARAMS.gradAngle  = Number(val);
-            if (name === 'density')    PARAMS.density    = Number(val) / 10;
+            if (name === 'density')    PARAMS.density    = Number(val);
             if (name === 'startColor') PARAMS.startColor = val;
             if (name === 'endColor')   PARAMS.endColor   = val;
             if (name === 'palette')    PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette;
@@ -314,19 +345,63 @@ window.sketches['cmyk'] = function(p) {
         if (typeof register === 'function') register(api);
     };
 
+    var helpEl = null;
+    var HELP_DEFAULT = 'Adjust sliders and palette on the right to design your piece. Hit Reseed for a new flow pattern.';
+
+    // Density-driven line spacing is based on the THINNEST pen currently loaded
+    // for the active palette (falls back to the manual Pen width slider if the
+    // pen registry doesn't know a colour's width). A mixed-width palette means
+    // thicker pens will visually overlap more than the density % implies --
+    // surfaced as a warning in the help line rather than silently applying.
+    function _paletteLoadedWidthsMm() {
+        var pal = PARAMS.palette, widths = [];
+        if (window.plotPens && typeof window.plotPens.widthFor === 'function') {
+            for (var i = 0; i < pal.length; i++) {
+                var w = window.plotPens.widthFor(pal[i]);
+                if (w > 0) widths.push(w);
+            }
+        }
+        return widths;
+    }
+    function _referencePenWidthMm() {
+        var widths = _paletteLoadedWidthsMm();
+        return widths.length ? Math.min.apply(null, widths) : (PARAMS.penWidthMm || 0.4);
+    }
+    function _lineSpacingPx() {
+        var refMm = _referencePenWidthMm();
+        var pct = Math.max(5, PARAMS.density);
+        return paper.mmToPixels(refMm * (100 / pct));
+    }
+    function _updateHelp() {
+        if (!helpEl) return;
+        var widths = _paletteLoadedWidthsMm();
+        var mixed = widths.length > 1 && Math.min.apply(null, widths) !== Math.max.apply(null, widths);
+        if (mixed) {
+            helpEl.textContent = 'Density is based on your palette’s thinnest loaded pen (' +
+                Math.min.apply(null, widths).toFixed(2) + 'mm) — your palette has mixed pen widths (' +
+                Math.min.apply(null, widths).toFixed(2) + '–' + Math.max.apply(null, widths).toFixed(2) +
+                'mm), so thicker pens will lay down denser/more-overlapping lines than the % implies.';
+            helpEl.style.color = '#b45309';
+        } else {
+            helpEl.textContent = HELP_DEFAULT;
+            helpEl.style.color = '#667085';
+        }
+    }
+
     p.setup = function() {
         var container = document.getElementById('make-sketch');
         if (container) {
             container.style.flexDirection = 'column';
             container.style.alignItems = 'center';
-            var helpEl = document.createElement('div');
+            helpEl = document.createElement('div');
             helpEl.style.cssText = 'width:100%;max-width:900px;margin:0 auto 8px;color:#667085;font-size:13px;line-height:1.35;text-align:center;';
-            helpEl.textContent = 'Adjust sliders and palette on the right to design your piece. Hit Reseed for a new flow pattern.';
+            helpEl.textContent = HELP_DEFAULT;
             container.appendChild(helpEl);
         }
         var canvas = paper.createPaperCanvas(p, PARAMS.paperSize);
         canvas.parent(container || document.getElementById('make-sketch'));
         if (helpEl) helpEl.style.width = p.width + 'px';
+        _updateHelp();
         p.pixelDensity(1);
         p.noLoop();
     };
@@ -453,31 +528,65 @@ window.sketches['cmyk'] = function(p) {
         step();
     }
 
+    // Round each vertex of a polygon by cutting back along both adjacent
+    // edges (capped at half the shorter edge, so cuts from neighbouring
+    // corners can never overlap/self-intersect) and bridging the cut with a
+    // quadratic-bezier arc using the original vertex as control point.
+    // filletPct 0 = the cut length is 0 (sharp corner, vertex unchanged);
+    // 100 = the cut reaches each edge's midpoint (maximally rounded -- for a
+    // regular N-gon this is exactly its inscribed circle, i.e. a smooth
+    // circle/ellipse once N is reasonably large).
+    function _filletPolygon(verts, filletPct) {
+        var f = Math.max(0, Math.min(100, filletPct)) / 100;
+        if (f <= 0.001 || verts.length < 3) return verts;
+        var n = verts.length, out = [], ARC_SEGS = 8;
+        for (var i = 0; i < n; i++) {
+            var prev = verts[(i - 1 + n) % n], cur = verts[i], next = verts[(i + 1) % n];
+            var tpx = prev.x - cur.x, tpy = prev.y - cur.y, lp = Math.hypot(tpx, tpy) || 1e-9;
+            var tnx = next.x - cur.x, tny = next.y - cur.y, ln = Math.hypot(tnx, tny) || 1e-9;
+            var cut = f * 0.5 * Math.min(lp, ln);
+            var p1x = cur.x + tpx / lp * cut, p1y = cur.y + tpy / lp * cut;
+            var p2x = cur.x + tnx / ln * cut, p2y = cur.y + tny / ln * cut;
+            for (var k = 0; k <= ARC_SEGS; k++) {
+                var t = k / ARC_SEGS, mt = 1 - t;
+                out.push({
+                    x: mt * mt * p1x + 2 * mt * t * cur.x + t * t * p2x,
+                    y: mt * mt * p1y + 2 * mt * t * cur.y + t * t * p2y
+                });
+            }
+        }
+        return out;
+    }
+
     // ── Mask-shape geometry ─────────────────────────────────────────────
     // Build a closed polygon (global coords) for the requested shape, centered
     // at (cx,cy), sized w x h, rotated by theta. Concave shapes (stars, blobs)
     // are fine — the scanline hatch pairs intersections correctly.
-    function buildShapePoly(shape, cx, cy, w, h, theta, starPoints, rng) {
+    function buildShapePoly(shape, cx, cy, w, h, theta, starPoints, rng, vertexCount, filletPct) {
         var rx = w / 2, ry = h / 2, TWO = Math.PI * 2, pts = [];
         var ct = Math.cos(theta), st = Math.sin(theta);
         function add(lx, ly) { pts.push({ x: cx + lx * ct - ly * st, y: cy + lx * st + ly * ct }); }
-        if (shape === 'boxes' || shape === 'rectangle') {
-            add(-rx, -ry); add(rx, -ry); add(rx, ry); add(-rx, ry);
-        } else if (shape === 'circles' || shape === 'oval') {
-            for (var i = 0; i < 48; i++) { var a = i / 48 * TWO; add(rx * Math.cos(a), ry * Math.sin(a)); }
-        } else if (shape === 'roundRect') {
-            var rad = Math.min(rx, ry) * 0.4, seg = 6;
-            var cs = [[rx - rad, ry - rad], [-(rx - rad), ry - rad], [-(rx - rad), -(ry - rad)], [rx - rad, -(ry - rad)]];
-            var sa = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
-            for (var ci = 0; ci < 4; ci++) {
-                for (var k = 0; k <= seg; k++) {
-                    var aa = sa[ci] + (k / seg) * (Math.PI / 2);
-                    add(cs[ci][0] + rad * Math.cos(aa), cs[ci][1] + rad * Math.sin(aa));
-                }
+        if (shape === 'polygon') {
+            // Squares/rectangles/rounded squares/circles/ovals/triangles/pentagons/
+            // hexagons were all separate shape options; they're really just this
+            // one shape (a regular N-gon with optionally-rounded corners) at
+            // different vertex counts and fillet amounts, so they're consolidated
+            // here. A high vertex count + 100% fillet reads as a circle/ellipse.
+            var n = Math.max(3, Math.round(vertexCount || 4));
+            // Even-sided polygons default flat-side-up (n=4 -> an axis-aligned
+            // square, matching the old "boxes" shape) rather than vertex-up
+            // (which for a square specifically reads as a diamond, a visible
+            // surprise vs. the pre-consolidation default). Odd-sided polygons
+            // (n=3 -> apex-up triangle) keep the vertex-up look, which is the
+            // conventional/expected orientation there.
+            var phase = (n % 2 === 0) ? (Math.PI / n) : 0;
+            var verts = [];
+            for (var vi = 0; vi < n; vi++) {
+                var av = -Math.PI / 2 + phase + vi / n * TWO;
+                verts.push({ x: rx * Math.cos(av), y: ry * Math.sin(av) });
             }
-        } else if (shape === 'triangle' || shape === 'pentagon' || shape === 'hexagon') {
-            var n = shape === 'triangle' ? 3 : (shape === 'pentagon' ? 5 : 6);
-            for (var i2 = 0; i2 < n; i2++) { var a2 = -Math.PI / 2 + i2 / n * TWO; add(rx * Math.cos(a2), ry * Math.sin(a2)); }
+            verts = _filletPolygon(verts, filletPct || 0);
+            for (var vj = 0; vj < verts.length; vj++) add(verts[vj].x, verts[vj].y);
         } else if (shape === 'star') {
             var sp = Math.max(3, Math.round(starPoints || 5));
             for (var i3 = 0; i3 < sp * 2; i3++) { var rr = (i3 % 2 === 0) ? 1 : 0.42; var a3 = -Math.PI / 2 + i3 / (sp * 2) * TWO; add(rx * rr * Math.cos(a3), ry * rr * Math.sin(a3)); }
@@ -517,16 +626,15 @@ window.sketches['cmyk'] = function(p) {
 
     function buildCellPoly(cx, cy, cellSize, shapeTheta, shapeRng) {
         var grow = 1 + (PARAMS.overlap / 100);
-        var isReg = (PARAMS.shape === 'boxes' || PARAMS.shape === 'circles');
-        var aspect = isReg ? 1 : (PARAMS.shapeAspect / 100);
+        var aspect = PARAMS.shapeAspect / 100;
         var w = cellSize * 0.92 * grow;
         var h = w * aspect;
-        return buildShapePoly(PARAMS.shape, cx, cy, w, h, shapeTheta, PARAMS.starPoints, shapeRng);
+        return buildShapePoly(PARAMS.shape, cx, cy, w, h, shapeTheta, PARAMS.starPoints, shapeRng, PARAMS.vertexCount, PARAMS.filletPct);
     }
 
     function cellShapeRows(cx, cy, cellSize, hatchAngle, shapeTheta, shapeRng) {
         var poly = buildCellPoly(cx, cy, cellSize, shapeTheta, shapeRng);
-        var spacing = (paper.DPI / 25.4) / Math.max(0.2, PARAMS.density);
+        var spacing = _lineSpacingPx();
         var hatchDeg = hatchAngle * 180 / Math.PI;
         return window.plotFills.hatchPolyRows(poly, hatchDeg, spacing);
     }
@@ -537,7 +645,7 @@ window.sketches['cmyk'] = function(p) {
     function cellTextureSegs(poly, weights, lineTheta, cellSize, seed) {
         var out = [];
         var pal = PARAMS.palette;
-        var baseSpacing = (paper.DPI / 25.4) / Math.max(0.2, PARAMS.density);
+        var baseSpacing = _lineSpacingPx();
         var scatter = window.plotFills.getScatterStyles();
         var imp = window.plotFills.getFillImperfection();
         for (var i = 0; i < pal.length; i++) {
@@ -565,151 +673,6 @@ window.sketches['cmyk'] = function(p) {
         var c = p.color(hex);
         if (PARAMS.viewMode === 'multiply') c.setAlpha(204);
         return c;
-    }
-
-    function drawLineCircle(d, weights, theta) {
-        var r = d / 2;
-        var stepSize = (paper.DPI / 25.4) / PARAMS.density;
-        p.push();
-        p.rotate(theta);
-        for (var yloc = 0; yloc < r; yloc += stepSize) {
-            var xloc = Math.sqrt(Math.max(0, r * r - yloc * yloc));
-            p.stroke(getRandomColor(weights));
-            p.line(-xloc,  yloc, xloc,  yloc);
-            if (yloc > 0) {
-                p.stroke(getRandomColor(weights));
-                p.line(-xloc, -yloc, xloc, -yloc);
-            }
-        }
-        p.pop();
-    }
-
-    function exportLineCircle(parts, cx, cy, d, weights, theta, strokeW, rng) {
-        var r = d / 2;
-        var stepSize = (paper.DPI / 25.4) / PARAMS.density;
-        var cosT = Math.cos(theta);
-        var sinT = Math.sin(theta);
-        for (var yloc = 0; yloc < r; yloc += stepSize) {
-            var xloc = Math.sqrt(Math.max(0, r * r - yloc * yloc));
-            appendRotatedLine(parts, cx, cy, -xloc, yloc, xloc, yloc, cosT, sinT, pickFromWeights(weights, rng), strokeW);
-            if (yloc > 0) {
-                appendRotatedLine(parts, cx, cy, -xloc, -yloc, xloc, -yloc, cosT, sinT, pickFromWeights(weights, rng), strokeW);
-            }
-        }
-    }
-
-    function drawLineBox(w, h, weights, theta, boxTheta) {
-        var halfW = w / 2;
-        var halfH = h / 2;
-        var relTheta = theta - boxTheta;
-        var stepSize = (paper.DPI / 25.4) / PARAMS.density;
-        var maxOffset = Math.abs(halfW * Math.sin(relTheta)) + Math.abs(halfH * Math.cos(relTheta));
-        p.push();
-        p.rotate(boxTheta);
-        for (var yloc = 0; yloc <= maxOffset; yloc += stepSize) {
-            drawClippedBoxLine(halfW, halfH, yloc, relTheta, weights);
-            if (yloc > 0) {
-                drawClippedBoxLine(halfW, halfH, -yloc, relTheta, weights);
-            }
-        }
-        p.pop();
-    }
-
-    function exportLineBox(parts, cx, cy, w, h, weights, theta, boxTheta, strokeW, rng) {
-        var halfW = w / 2;
-        var halfH = h / 2;
-        var relTheta = theta - boxTheta;
-        var stepSize = (paper.DPI / 25.4) / PARAMS.density;
-        var maxOffset = Math.abs(halfW * Math.sin(relTheta)) + Math.abs(halfH * Math.cos(relTheta));
-        var cosB = Math.cos(boxTheta);
-        var sinB = Math.sin(boxTheta);
-
-        for (var yloc = 0; yloc <= maxOffset; yloc += stepSize) {
-            appendBoxExportLine(parts, cx, cy, halfW, halfH, yloc, relTheta, cosB, sinB, weights, strokeW, rng);
-            if (yloc > 0) {
-                appendBoxExportLine(parts, cx, cy, halfW, halfH, -yloc, relTheta, cosB, sinB, weights, strokeW, rng);
-            }
-        }
-    }
-
-    function drawClippedBoxLine(halfW, halfH, yloc, theta, weights) {
-        var cosT = Math.cos(theta);
-        var sinT = Math.sin(theta);
-        var lineHalf = Math.sqrt(halfW * halfW + halfH * halfH) * 1.5;
-        var x1 = -lineHalf;
-        var y1 = yloc;
-        var x2 = lineHalf;
-        var y2 = yloc;
-
-        var ax = x1 * cosT - y1 * sinT;
-        var ay = x1 * sinT + y1 * cosT;
-        var bx = x2 * cosT - y2 * sinT;
-        var by = x2 * sinT + y2 * cosT;
-
-        var clipped = clipLineToRect(ax, ay, bx, by, -halfW, halfW, -halfH, halfH);
-        if (!clipped) return;
-
-        p.stroke(getRandomColor(weights));
-        p.line(clipped.x1, clipped.y1, clipped.x2, clipped.y2);
-    }
-
-    function appendBoxExportLine(parts, cx, cy, halfW, halfH, yloc, theta, cosB, sinB, weights, strokeW, rng) {
-        var cosT = Math.cos(theta);
-        var sinT = Math.sin(theta);
-        var lineHalf = Math.sqrt(halfW * halfW + halfH * halfH) * 1.5;
-        var x1 = -lineHalf;
-        var y1 = yloc;
-        var x2 = lineHalf;
-        var y2 = yloc;
-
-        var ax = x1 * cosT - y1 * sinT;
-        var ay = x1 * sinT + y1 * cosT;
-        var bx = x2 * cosT - y2 * sinT;
-        var by = x2 * sinT + y2 * cosT;
-        var clipped = clipLineToRect(ax, ay, bx, by, -halfW, halfW, -halfH, halfH);
-        if (!clipped) return;
-
-        var gx1 = cx + clipped.x1 * cosB - clipped.y1 * sinB;
-        var gy1 = cy + clipped.x1 * sinB + clipped.y1 * cosB;
-        var gx2 = cx + clipped.x2 * cosB - clipped.y2 * sinB;
-        var gy2 = cy + clipped.x2 * sinB + clipped.y2 * cosB;
-        appendSvgLine(parts, gx1, gy1, gx2, gy2, pickFromWeights(weights, rng), strokeW);
-    }
-
-    function clipLineToRect(x1, y1, x2, y2, xmin, xmax, ymin, ymax) {
-        var dx = x2 - x1;
-        var dy = y2 - y1;
-        var t0 = 0;
-        var t1 = 1;
-        var checks = [
-            { p: -dx, q: x1 - xmin },
-            { p:  dx, q: xmax - x1 },
-            { p: -dy, q: y1 - ymin },
-            { p:  dy, q: ymax - y1 }
-        ];
-
-        for (var i = 0; i < checks.length; i++) {
-            var entry = checks[i];
-            if (entry.p === 0) {
-                if (entry.q < 0) return null;
-                continue;
-            }
-            var t = entry.q / entry.p;
-            if (entry.p < 0) {
-                if (t > t1) return null;
-                if (t > t0) t0 = t;
-            } else {
-                if (t < t0) return null;
-                if (t < t1) t1 = t;
-            }
-        }
-
-        return {
-            x1: x1 + t0 * dx,
-            y1: y1 + t0 * dy,
-            x2: x1 + t1 * dx,
-            y2: y1 + t1 * dy
-        };
     }
 
     function resolveGrid(availW, availH, cellSize, composition) {
@@ -761,14 +724,6 @@ window.sketches['cmyk'] = function(p) {
         var c = p.color(pickFromWeights(weights, function(){ return p.random(); }));
         if (PARAMS.viewMode === 'multiply') c.setAlpha(204);
         return c;
-    }
-
-    function appendRotatedLine(parts, cx, cy, x1, y1, x2, y2, cosT, sinT, stroke, strokeW) {
-        var gx1 = cx + x1 * cosT - y1 * sinT;
-        var gy1 = cy + x1 * sinT + y1 * cosT;
-        var gx2 = cx + x2 * cosT - y2 * sinT;
-        var gy2 = cy + x2 * sinT + y2 * cosT;
-        appendSvgLine(parts, gx1, gy1, gx2, gy2, stroke, strokeW);
     }
 
     function appendSvgLine(parts, x1, y1, x2, y2, stroke, strokeW) {
