@@ -89,11 +89,20 @@
         #editLayoutToggle { border: 1px solid #ccc; background: #fff; border-radius: 8px; padding: 3px 9px; cursor: pointer; font-size: 11px; color: #555; }
         #editLayoutToggle.active { background: #7c4dff; color: #fff; border-color: #7c4dff; }
         .param-group-body [data-param-id] { position: relative; }
-        .param-drag-handle { display: none; position: absolute; top: 0; right: 0; cursor: grab; color: #98a2b3; font-size: 15px; padding: 2px 4px; user-select: none; line-height: 1; }
-        body.pl0t-edit-mode .param-drag-handle { display: inline-block; }
-        body.pl0t-edit-mode .param-group-body [data-param-id] { outline: 1px dashed #e0d4ff; border-radius: 6px; padding: 4px 22px 4px 4px; margin: -4px -4px 8px -4px; }
+        .param-edit-controls { display: none; position: absolute; top: 0; right: 0; align-items: center; gap: 5px; }
+        body.pl0t-edit-mode .param-edit-controls { display: flex; }
+        .param-edit-controls input[type=checkbox] { cursor: pointer; margin: 0; width: 13px; height: 13px; }
+        .param-suppress-btn { border: none; background: none; color: #98a2b3; font-size: 14px; cursor: pointer; padding: 0 2px; line-height: 1; }
+        .param-suppress-btn:hover { color: #c00; }
+        .param-drag-handle { cursor: grab; color: #98a2b3; font-size: 15px; padding: 0 2px; user-select: none; line-height: 1; }
+        body.pl0t-edit-mode .param-group-body [data-param-id] { outline: 1px dashed #e0d4ff; border-radius: 6px; padding: 4px 58px 4px 4px; margin: -4px -4px 8px -4px; }
+        [data-param-id].param-suppressed { opacity: 0.45; }
         .param-group-body.drag-over { outline: 2px dashed #7c4dff; outline-offset: 2px; border-radius: 6px; }
         [data-param-id].drag-ghost { opacity: 0.35; }
+        .param-bounds-editor { display: none; gap: 8px; margin-top: 5px; align-items: center; }
+        body.pl0t-edit-mode .param-bounds-editor { display: flex; }
+        .param-bounds-editor label { display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 9px; color: #98a2b3; }
+        .param-bounds-editor input { width: 48px; font-size: 11px; padding: 2px 3px; border: 1px solid #ccc; border-radius: 4px; }
         .palette-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
         .palette-item { display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; user-select: none; }
         .palette-swatch { width: 32px; height: 32px; border-radius: 5px; border: 2px solid #e0e0e0; transition: border-color 0.1s; }

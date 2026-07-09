@@ -18,6 +18,70 @@
         window._pl0tSigSeed = Math.floor(Math.random() * 1e9) + 1;
     }
 
+    function isShowHidden(pdef) {
+        return !!(pdef.showModeHidden || (window.ParamLayout && window.ParamLayout.getShowHidden(pdef.id)));
+    }
+    function isSuppressed(pdef) {
+        return !!(window.ParamLayout && window.ParamLayout.getSuppressed(pdef.id));
+    }
+
+    // Rebuild on every Edit-layout toggle. This is what makes suppressed rows
+    // actually disappear when edit mode turns off (the suppress-skip guard in
+    // buildParamUI only runs at build time, so without a rebuild a row that
+    // was suppressed mid-session would just keep sitting in the DOM). It also
+    // covers editable min/max "snapping in" to the live control for free --
+    // a rebuilt <input> picks up ParamLayout.getBounds() fresh, which already
+    // has whatever the operator just typed (Min/Max fields save on every
+    // change), so there's no separate live-patch step needed. buildParamUI()
+    // itself is registeredApi-driven, not a Home/Show mode switch, so this
+    // never touches window._pl0tMode or triggers a render.
+    if (window.ParamLayout) {
+        window.ParamLayout.onEditModeChange(function() { try { buildParamUI(registeredApi); } catch(e) {} });
+    }
+
+    // A hidden-in-Show-mode numeric param's "Show default" (Edit layout mode)
+    // is substituted only for the duration of a Show-mode session -- never
+    // written into the live Home-mode slider permanently, so switching back
+    // to Home mode restores exactly what the operator had before, protecting
+    // art in progress. _showModeStash holds the pre-substitution values.
+    var _showModeStash = null;
+    function applyShowModeLockedDefaults() {
+        if ((window._pl0tMode || 'fast') === 'full') return;
+        if (!window.ParamLayout || _showModeStash) return;   // already applied this Show-mode session
+        var stash = {};
+        (_lastBuiltParams || []).forEach(function(pdef) {
+            if (!isShowHidden(pdef)) return;
+            if (pdef.type !== 'range' && pdef.type !== 'number' && pdef.type !== undefined) return;
+            var b = window.ParamLayout.getBounds(pdef.id);
+            if (!b || b.def === undefined || b.def === '' || b.def === null) return;
+            var v = Number(b.def);
+            if (isNaN(v)) return;
+            stash[pdef.id] = (typeof pdef.value !== 'undefined') ? pdef.value : v;
+            pdef.value = v;
+            window.controls = window.controls || {};
+            window.controls[pdef.id] = v;
+            if (registeredApi && typeof registeredApi.setParam === 'function') { try { registeredApi.setParam(pdef.id, v); } catch(e) {} }
+            var el = document.getElementById(pdef.id);
+            if (el) el.value = v;
+        });
+        if (Object.keys(stash).length) _showModeStash = stash;
+    }
+    function restoreShowModeStash() {
+        if (!_showModeStash) return;
+        var stash = _showModeStash;
+        _showModeStash = null;
+        Object.keys(stash).forEach(function(id) {
+            var v = stash[id];
+            var pdefFound = (_lastBuiltParams || []).find(function(p) { return p.id === id; });
+            if (pdefFound) pdefFound.value = v;
+            window.controls = window.controls || {};
+            window.controls[id] = v;
+            if (registeredApi && typeof registeredApi.setParam === 'function') { try { registeredApi.setParam(id, v); } catch(e) {} }
+            var el = document.getElementById(id);
+            if (el) el.value = v;
+        });
+    }
+
     function getParamGroup(pdef) {
         // A user-dragged placement (Edit layout mode) always wins over the
         // sketch/code default -- that's the whole point of letting it be dragged.
@@ -519,6 +583,12 @@
     var GLOBAL_GROUPS = { paper: true, advanced: true };
 
     function buildParamUI(registeredApi) {
+            // A fresh params array means any stashed pre-Show-mode values belong to
+            // the PREVIOUS sketch's pdefs/registeredApi -- discard rather than risk
+            // restoring stale values into whatever sketch is active when Home mode
+            // is next entered. applyShowModeLockedDefaults() re-stashes below if
+            // still in Show mode.
+            _showModeStash = null;
             try {
                 var paramsContainer = document.getElementById('dynamicParams');
                 var globalParamsContainer = document.getElementById('globalDynamicParams');
@@ -1175,7 +1245,7 @@
                                 return _activeVals.some(function(v){return allowedValues.indexOf(v)!==-1;});
                             });
                             row.style.display = _vwAllMatch ? '' : 'none';
-                        } else if (pdef.showModeHidden && (window._pl0tMode || 'fast') !== 'full') {
+                        } else if (isShowHidden(pdef) && (window._pl0tMode || 'fast') !== 'full') {
                             row.style.display = 'none';
                         } else {
                             row.style.display = '';
@@ -1232,21 +1302,80 @@
                     // hide static controls
                     if (staticControls) staticControls.style.display = 'none';
                     params.forEach(function(pdef){
+                        // Suppressed params are fully removed from the UI outside Edit
+                        // layout mode -- that's the point (park a control you don't want
+                        // to see or delete-and-re-add every time). In edit mode they still
+                        // render (grayed, pushed to the bottom) so they can be restored.
+                        if (isSuppressed(pdef) && !(window.ParamLayout && window.ParamLayout.isEditMode())) return;
+
                         var row = document.createElement('div');
                         row.className = 'mb-3';
                         row.setAttribute('data-param-id', pdef.id);
                         if (pdef.tip) row.title = pdef.tip;   // hover tooltip
-                        // Hide in show mode; home mode (full) always shows
-                        if (pdef.showModeHidden) {
+                        // Hide in show mode; home mode (full) always shows. isShowHidden()
+                        // also honors a user-set override from Edit layout mode, not just
+                        // the sketch/code's own hardcoded showModeHidden flag.
+                        if (isShowHidden(pdef)) {
                             row.dataset.showModeHidden = '1';
                             if ((window._pl0tMode || 'fast') !== 'full') row.style.display = 'none';
                         }
+                        if (isSuppressed(pdef)) row.classList.add('param-suppressed');
 
-                        // Edit-layout drag handle. Always created (every row type exits
-                        // through this same `row` var), visibility is CSS-gated on
-                        // body.pl0t-edit-mode so toggling edit mode needs no rebuild.
-                        // draggable is scoped to this small handle -- never the row
-                        // itself -- so it can't hijack normal slider/input interaction.
+                        // Edit-layout affordances: hide-in-Show checkbox, suppress toggle,
+                        // drag handle. Always created (every row type exits through this
+                        // same `row` var), visibility is CSS-gated on body.pl0t-edit-mode
+                        // so toggling edit mode needs no rebuild. draggable is scoped to
+                        // the handle only -- never the row -- so it can't hijack normal
+                        // slider/input interaction.
+                        var editControls = document.createElement('span');
+                        editControls.className = 'param-edit-controls';
+
+                        var hideCb = document.createElement('input');
+                        hideCb.type = 'checkbox';
+                        hideCb.title = 'Hide in Show mode';
+                        hideCb.checked = isShowHidden(pdef);
+                        hideCb.disabled = !!pdef.showModeHidden;   // hardcoded-hidden params aren't user-toggleable back on
+                        hideCb.addEventListener('change', function() {
+                            if (window.ParamLayout) window.ParamLayout.setShowHidden(pdef.id, hideCb.checked);
+                            // Keep dataset in sync too -- setRenderMode()'s blanket show/hide
+                            // toggle on mode switch keys off [data-show-mode-hidden], not
+                            // isShowHidden(), so a checkbox-only override needs it set here
+                            // or a later Show->Home switch would leave this row stuck hidden.
+                            if (isShowHidden(pdef)) row.dataset.showModeHidden = '1'; else delete row.dataset.showModeHidden;
+                            applyConditionalUI(params);
+                        });
+                        editControls.appendChild(hideCb);
+
+                        var suppressBtn = document.createElement('button');
+                        suppressBtn.type = 'button';
+                        suppressBtn.className = 'param-suppress-btn';
+                        function updateSuppressBtn() {
+                            var supp = isSuppressed(pdef);
+                            suppressBtn.textContent = supp ? '↺' : '×';
+                            suppressBtn.title = supp ? 'Restore this control' : 'Suppress this control (hide outside Edit layout mode)';
+                            row.classList.toggle('param-suppressed', supp);
+                        }
+                        suppressBtn.addEventListener('click', function() {
+                            var supp = !isSuppressed(pdef);
+                            if (window.ParamLayout) window.ParamLayout.setSuppressed(pdef.id, supp);
+                            updateSuppressBtn();
+                            if (supp) {
+                                var body = row.closest('.param-group-body');
+                                if (body) {
+                                    body.appendChild(row);   // push to the bottom of its group
+                                    var g = row.closest('.param-group');
+                                    var gname = g ? g.id.replace('param-group-', '') : null;
+                                    if (gname && window.ParamLayout) {
+                                        var idsNow = Array.prototype.filter.call(body.children, function(el) { return el.hasAttribute('data-param-id'); })
+                                            .map(function(el) { return el.getAttribute('data-param-id'); });
+                                        window.ParamLayout.setOrder(gname, idsNow);
+                                    }
+                                }
+                            }
+                        });
+                        updateSuppressBtn();
+                        editControls.appendChild(suppressBtn);
+
                         var dragHandle = document.createElement('span');
                         dragHandle.className = 'param-drag-handle';
                         dragHandle.textContent = '⠇';
@@ -1263,7 +1392,8 @@
                             document.querySelectorAll('.param-group-body.drag-over').forEach(function(b) { b.classList.remove('drag-over'); });
                             draggedRow = null;
                         });
-                        row.appendChild(dragHandle);
+                        editControls.appendChild(dragHandle);
+                        row.appendChild(editControls);
 
                         var label = document.createElement('label');
                         label.className = 'control-label';
@@ -1505,18 +1635,22 @@
                         }
 
                         var input;
+                        // User-edited min/max (Edit layout mode) override the sketch's own
+                        // bounds. Only min/max apply here -- the "Show default" field never
+                        // touches input.value, it's read separately (applyShowModeLockedDefaults).
+                        var _savedBounds = window.ParamLayout ? (window.ParamLayout.getBounds(pdef.id) || {}) : {};
                         if ((pdef.type === 'range') || pdef.type === undefined) {
                             input = document.createElement('input');
                             input.type = 'range';
-                            input.min = pdef.min || 0;
-                            input.max = pdef.max || 100;
+                            input.min = (_savedBounds.min !== undefined && _savedBounds.min !== '') ? _savedBounds.min : (pdef.min || 0);
+                            input.max = (_savedBounds.max !== undefined && _savedBounds.max !== '') ? _savedBounds.max : (pdef.max || 100);
                             input.step = (typeof pdef.step !== 'undefined') ? pdef.step : 1;
                             input.value = (typeof pdef.value !== 'undefined') ? pdef.value : input.min;
                         } else if (pdef.type === 'number') {
                             input = document.createElement('input');
                             input.type = 'number';
-                            input.min = pdef.min || 0;
-                            input.max = pdef.max || 100000;
+                            input.min = (_savedBounds.min !== undefined && _savedBounds.min !== '') ? _savedBounds.min : (pdef.min || 0);
+                            input.max = (_savedBounds.max !== undefined && _savedBounds.max !== '') ? _savedBounds.max : (pdef.max || 100000);
                             input.step = (typeof pdef.step !== 'undefined') ? pdef.step : 1;
                             input.value = (typeof pdef.value !== 'undefined') ? pdef.value : input.min;
                         } else if (pdef.type === 'select') {
@@ -1536,7 +1670,7 @@
                             // Segmented chip group (the visible touch control)
                             var _segCtrl = document.createElement('div');
                             _segCtrl.className = 'seg-ctrl';
-                            (function(_inp, _sc, _opts, _isMulti) {
+                            (function(_inp, _sc, _opts, _isMulti, _requireOne) {
                                 function _getArr() { try { var _a=JSON.parse(_inp.value); return Array.isArray(_a)?_a:[_inp.value]; } catch(e){ return [_inp.value]; } }
                                 function _isActive(v) { return _isMulti ? _getArr().indexOf(v)>=0 : _inp.value===v; }
                                 function _syncChips() { _sc.querySelectorAll('.seg-btn').forEach(function(b){ b.classList.toggle('seg-active', _isActive(b.dataset.segVal)); }); }
@@ -1549,7 +1683,9 @@
                                     btn.addEventListener('click', function() {
                                         if (_isMulti) {
                                             var arr=_getArr(), idx=arr.indexOf(String(opt.value));
-                                            if (idx>=0) { if (arr.length>1) arr.splice(idx,1); }
+                                            // _requireOne is opt-in per param (pdef.requireOne) -- most multi-selects
+                                            // (e.g. scatterFill) default to [] and should allow deselecting to zero.
+                                            if (idx>=0) { if (!_requireOne || arr.length>1) arr.splice(idx,1); }
                                             else arr.push(String(opt.value));
                                             _inp.value=JSON.stringify(arr);
                                         } else {
@@ -1562,7 +1698,7 @@
                                 });
                                 // Sync chip visuals when value set externally (applyParamsSnapshot)
                                 _inp.addEventListener('input', _syncChips);
-                            })(input, _segCtrl, pdef.options || [], _multi);
+                            })(input, _segCtrl, pdef.options || [], _multi, !!pdef.requireOne);
                             input._segCtrl = _segCtrl;
                         } else if (pdef.type === 'color') {
                             input = document.createElement('input');
@@ -1622,6 +1758,42 @@
                         row.appendChild(label);
                         if (input._segCtrl) row.appendChild(input._segCtrl);
                         row.appendChild(input);
+
+                        // Editable bounds (Edit layout mode only, numeric controls only).
+                        // Min/Max snap into the live control's own min/max when edit mode
+                        // turns off (rebuild picks up the freshly-saved bounds -- see the
+                        // onEditModeChange registration near the top) -- never live, to avoid
+                        // jumping a slider the operator may be mid-tweaking. Show default
+                        // never touches the live control at all; it's only read when
+                        // generating a Show-mode plot with this param hidden (see
+                        // applyShowModeLockedDefaults).
+                        if (input.type === 'range' || input.type === 'number') {
+                            var boundsRow = document.createElement('div');
+                            boundsRow.className = 'param-bounds-editor';
+                            function mkBoundField(labelText, key, fallback, titleText) {
+                                var wrap = document.createElement('label');
+                                var lab = document.createElement('span'); lab.textContent = labelText;
+                                var fld = document.createElement('input');
+                                fld.type = 'number';
+                                fld.title = titleText || '';
+                                var savedVal = _savedBounds[key];
+                                fld.value = (savedVal !== undefined && savedVal !== '') ? savedVal : fallback;
+                                fld.addEventListener('change', function() {
+                                    var cur = (window.ParamLayout && window.ParamLayout.getBounds(pdef.id)) || {};
+                                    cur[key] = (fld.value === '') ? undefined : Number(fld.value);
+                                    if (window.ParamLayout) window.ParamLayout.setBounds(pdef.id, cur);
+                                });
+                                wrap.appendChild(lab); wrap.appendChild(fld);
+                                return wrap;
+                            }
+                            boundsRow.appendChild(mkBoundField('Min', 'min', pdef.min || 0));
+                            boundsRow.appendChild(mkBoundField('Max', 'max', pdef.max || (input.type === 'range' ? 100 : 100000)));
+                            boundsRow.appendChild(mkBoundField('Show', 'def',
+                                (typeof pdef.value !== 'undefined') ? pdef.value : '',
+                                'Value used for this control while it\'s hidden in Show mode'));
+                            row.appendChild(boundsRow);
+                        }
+
                         ensureGroup(getParamGroup(pdef)).appendChild(row);
                     });
                     applyConditionalUI(params);
@@ -1693,6 +1865,11 @@
                         ordered.forEach(function(r) { body.appendChild(r); });
                     });
                 })();
+
+                // Fresh load / sketch switch while already in Show mode: lock in any
+                // hidden numeric params' Show defaults immediately (setRenderMode()
+                // handles the transition case when Home <-> Show is toggled live).
+                applyShowModeLockedDefaults();
 
                 // show/hide pause button based on sketch capability
                 var pauseBtn = document.getElementById('pause');
@@ -1786,6 +1963,10 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
+            // Lock in / restore hidden numeric params' Show defaults (Edit layout
+            // mode). Restoring on the way back to Home mode is what keeps this from
+            // clobbering art in progress -- see applyShowModeLockedDefaults above.
+            if (_isHome) restoreShowModeStash(); else applyShowModeLockedDefaults();
             // The blanket un-hide above only knows about showModeHidden -- it doesn't
             // re-check a param's OWN visibleWhen condition (e.g. Custom Width/Height
             // only apply when Paper size = Custom), so entering Home mode could leave
