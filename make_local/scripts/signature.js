@@ -170,9 +170,23 @@
     // as a failure and stop rather than draw the resulting mess.
     function _offsetPassBlewUp(before, after, stepPx) {
         var b0 = _bbox(before), b1 = _bbox(after);
+        var dw = (b1[2]-b1[0]) - (b0[2]-b0[0]), dh = (b1[3]-b1[1]) - (b0[3]-b0[1]);
         var expected = Math.abs(stepPx) * 2, limit = Math.max(expected * 4, 2);
-        return Math.abs((b1[2]-b1[0]) - (b0[2]-b0[0])) > limit ||
-               Math.abs((b1[3]-b1[1]) - (b0[3]-b0[1])) > limit;
+        if (Math.abs(dw) > limit || Math.abs(dh) > limit) return true;
+        // A thin, elongated solid shape (the signature's diagonal slash, at
+        // typical logo-size/pen-width ratios where the pen-width-derived step
+        // is several times the shape's own cross-width) can self-intersect
+        // into a LARGER polygon that still passes the magnitude-only check
+        // above -- verified live: bbox grew past its own original size and
+        // area went briefly negative (flipped winding), yet kept getting
+        // accepted for the full 60-pass budget, drawing wildly oscillating
+        // ink instead of cleanly stopping. An inward offset (stepPx > 0)
+        // must never GROW the bbox; an outward one (stepPx < 0, a ring's
+        // hole growing) must never SHRINK it -- either direction is a sign
+        // this pass degenerated, not a valid offset.
+        if (stepPx > 0 && (dw > 0.5 || dh > 0.5)) return true;
+        if (stepPx < 0 && (dw < -0.5 || dh < -0.5)) return true;
+        return false;
     }
 
     // Split a multi-subpath "d" string ("M...Z M...Z") into one d-string per
