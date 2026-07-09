@@ -332,6 +332,14 @@ window.sketches['cmyk'] = function(p) {
     };
 
     var _chunkRaf = null;
+    // Generation token: cancelAnimationFrame() is not an airtight guarantee against
+    // timing races -- if a stale render's RAF callback has already been committed to
+    // run by the browser in the instant before a newer render cancels it, it can still
+    // fire and draw a cell using the OLD (now-superseded) grid geometry, leaving a
+    // stray/misplaced cell in the final composite (reproduced on real hardware where
+    // renders take long enough to interrupt mid-flight). Each renderChunked() call gets
+    // a new generation id; a stale step() checks it's still current before drawing.
+    var _renderGen = 0;
 
     function cmykFrameCtx() {
         var marginPx  = paper.getMarginPixels(PARAMS.margin);
@@ -401,6 +409,7 @@ window.sketches['cmyk'] = function(p) {
 
     p.draw = function() {
         if (_chunkRaf) { window.cancelAnimationFrame(_chunkRaf); _chunkRaf = null; }
+        _renderGen++;   // supersede any in-flight chunked render's stale generation
         cmykPaintStart();
         var ctx = cmykFrameCtx();
         for (var i = 0; i < ctx.cols; i++)
@@ -417,6 +426,7 @@ window.sketches['cmyk'] = function(p) {
     // builds up visibly. A new edit cancels the in-flight render and restarts.
     function renderChunked() {
         if (_chunkRaf) { window.cancelAnimationFrame(_chunkRaf); _chunkRaf = null; }
+        var myGen = ++_renderGen;
         cmykPaintStart();
         var ctx = cmykFrameCtx();
         var total = ctx.cols * ctx.rows, k = 0;
@@ -430,6 +440,7 @@ window.sketches['cmyk'] = function(p) {
             }
         }
         function step() {
+            if (myGen !== _renderGen) return;   // superseded -- a newer render already started/cleared; abort silently
             var start = nowFn();
             while (k < total) {
                 drawCmykCell(ctx, Math.floor(k / ctx.rows), k % ctx.rows);
