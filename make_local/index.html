@@ -11,6 +11,7 @@
     <script src="scripts/interactiveSVG.js"></script>
     <script src="scripts/sharedPaperControls.js"></script>
     <script src="scripts/paperSettings.js"></script>
+    <script src="scripts/paramLayoutOverrides.js"></script>
     <script src="scripts/autonomous_manifest.js"></script>
     <script src="scripts/autonomousLoader.js"></script>
     <script src="scripts/sharedFills.js"></script>
@@ -82,6 +83,17 @@
         .param-group summary::after { content: '+'; font-size: 18px; line-height: 1; color: #888; }
         .param-group[open] summary::after { content: '−'; }
         .param-group-body { padding-top: 10px; }
+        /* Editable layout: drag param rows between groups / reorder within a group */
+        #global-card-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px 0; }
+        #global-card-head .head-label { font-size: 11px; font-weight: 700; color: #98a2b3; text-transform: uppercase; letter-spacing: .03em; }
+        #editLayoutToggle { border: 1px solid #ccc; background: #fff; border-radius: 8px; padding: 3px 9px; cursor: pointer; font-size: 11px; color: #555; }
+        #editLayoutToggle.active { background: #7c4dff; color: #fff; border-color: #7c4dff; }
+        .param-group-body [data-param-id] { position: relative; }
+        .param-drag-handle { display: none; position: absolute; top: 0; right: 0; cursor: grab; color: #98a2b3; font-size: 15px; padding: 2px 4px; user-select: none; line-height: 1; }
+        body.pl0t-edit-mode .param-drag-handle { display: inline-block; }
+        body.pl0t-edit-mode .param-group-body [data-param-id] { outline: 1px dashed #e0d4ff; border-radius: 6px; padding: 4px 22px 4px 4px; margin: -4px -4px 8px -4px; }
+        .param-group-body.drag-over { outline: 2px dashed #7c4dff; outline-offset: 2px; border-radius: 6px; }
+        [data-param-id].drag-ghost { opacity: 0.35; }
         .palette-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
         .palette-item { display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; user-select: none; }
         .palette-swatch { width: 32px; height: 32px; border-radius: 5px; border: 2px solid #e0e0e0; transition: border-color 0.1s; }
@@ -161,6 +173,10 @@
          right, but this container is never cleared on a sketch switch. -->
     <div id="global-col">
         <div id="global-card">
+            <div id="global-card-head">
+                <span class="head-label">Settings</span>
+                <button id="editLayoutToggle" type="button" title="Drag controls between groups and reorder them">&#9998; Edit layout</button>
+            </div>
             <div id="global-scroll">
                 <div id="globalDynamicParams"></div>
             </div>
@@ -247,6 +263,12 @@
         window._pl0tSigSeed = Math.floor(Math.random() * 1e9) + 1;
         if (window.sketchAPI && typeof window.sketchAPI.reseed === 'function') window.sketchAPI.reseed();
         else if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
+    });
+    document.getElementById('editLayoutToggle').addEventListener('click', function() {
+        var on = !(window.ParamLayout && window.ParamLayout.isEditMode());
+        if (window.ParamLayout) window.ParamLayout.setEditMode(on);
+        this.classList.toggle('active', on);
+        document.body.classList.toggle('pl0t-edit-mode', on);
     });
     document.getElementById('shuffleLayout').addEventListener('click', function() {
         if (window.sketchAPI && typeof window.sketchAPI.shuffleLayout === 'function') window.sketchAPI.shuffleLayout();

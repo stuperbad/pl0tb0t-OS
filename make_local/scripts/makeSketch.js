@@ -5,6 +5,13 @@
     var registeredApi = null;
     var lastSketchName = null;
     var _lastBuiltParams = null;   // registeredApi.params + buildParamUI's own generic injections (paper, advanced, etc.)
+    // Row currently being dragged in Edit layout mode. Shared between the
+    // per-row dragstart handlers (rebuilt fresh every buildParamUI call) and
+    // the per-group dragover/drop handlers (bound ONCE when a group's DOM is
+    // first created and never rebuilt), so it has to live at module scope --
+    // not as a buildParamUI()-local var, which those persistent listeners
+    // would see a stale copy of after the first sketch switch.
+    var draggedRow = null;
     // Per-launch random fallback for the signature/print name, used when the
     // active sketch doesn't supply its own getSignatureSeed(). Re-rolled on Reseed.
     if (typeof window._pl0tSigSeed === 'undefined' || !window._pl0tSigSeed) {
@@ -12,6 +19,12 @@
     }
 
     function getParamGroup(pdef) {
+        // A user-dragged placement (Edit layout mode) always wins over the
+        // sketch/code default -- that's the whole point of letting it be dragged.
+        if (window.ParamLayout) {
+            var override = window.ParamLayout.getGroup(pdef.id);
+            if (override) return override;
+        }
         if (pdef.group) return pdef.group;
         var id = pdef.id || '';
         if (id === 'paperSize' || id === 'margin' || id === 'customWidth' || id === 'customHeight') return 'paper';
@@ -705,6 +718,53 @@
                     body.className = 'param-group-body';
                     if (isGlobal) _clearedGlobalGroupsThisBuild[name] = true;   // freshly-created body starts empty; no need to clear it again this pass
 
+                    // Drop target for Edit-layout drag/reorder. 'pens' is excluded --
+                    // it's a custom chip editor (buildPensEditor), not a list of plain
+                    // param rows. Bound ONCE here (groups persist across rebuilds, this
+                    // branch only runs the first time a group's DOM is created), so this
+                    // must read live/global state (window.ParamLayout, getParamGroup,
+                    // _lastBuiltParams) rather than anything captured from the current
+                    // buildParamUI() call, which will be stale after the next sketch switch.
+                    if (name !== 'pens') {
+                        body.addEventListener('dragover', function(e) {
+                            if (!draggedRow || !window.ParamLayout || !window.ParamLayout.isEditMode()) return;
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                            body.classList.add('drag-over');
+                        });
+                        body.addEventListener('dragleave', function(e) {
+                            if (e.target === body) body.classList.remove('drag-over');
+                        });
+                        body.addEventListener('drop', function(e) {
+                            if (!draggedRow) return;
+                            e.preventDefault();
+                            body.classList.remove('drag-over');
+                            var rows = Array.prototype.filter.call(body.children, function(el) {
+                                return el.hasAttribute('data-param-id') && el !== draggedRow;
+                            });
+                            var before = null;
+                            for (var i = 0; i < rows.length; i++) {
+                                var r = rows[i].getBoundingClientRect();
+                                if (e.clientY < r.top + r.height / 2) { before = rows[i]; break; }
+                            }
+                            if (before) body.insertBefore(draggedRow, before); else body.appendChild(draggedRow);
+
+                            var newGroup = name;
+                            var draggedId = draggedRow.getAttribute('data-param-id');
+                            if (window.ParamLayout && draggedId) {
+                                var pdefFound = (_lastBuiltParams || []).find(function(p) { return p.id === draggedId; });
+                                var priorGroup = pdefFound ? getParamGroup(pdefFound) : null;
+                                if (priorGroup !== newGroup) window.ParamLayout.setGroup(draggedId, newGroup);
+                                var idsNow = Array.prototype.filter.call(body.children, function(el) {
+                                    return el.hasAttribute('data-param-id');
+                                }).map(function(el) { return el.getAttribute('data-param-id'); });
+                                window.ParamLayout.setOrder(newGroup, idsNow);
+                            }
+                            draggedRow.classList.remove('drag-ghost');
+                            draggedRow = null;
+                        });
+                    }
+
                     details.appendChild(summary);
                     details.appendChild(body);
                     var target = (isGlobal && globalParamsContainer) ? globalParamsContainer : paramsContainer;
@@ -1182,6 +1242,29 @@
                             if ((window._pl0tMode || 'fast') !== 'full') row.style.display = 'none';
                         }
 
+                        // Edit-layout drag handle. Always created (every row type exits
+                        // through this same `row` var), visibility is CSS-gated on
+                        // body.pl0t-edit-mode so toggling edit mode needs no rebuild.
+                        // draggable is scoped to this small handle -- never the row
+                        // itself -- so it can't hijack normal slider/input interaction.
+                        var dragHandle = document.createElement('span');
+                        dragHandle.className = 'param-drag-handle';
+                        dragHandle.textContent = '⠇';
+                        dragHandle.title = 'Drag to move this control';
+                        dragHandle.draggable = true;
+                        dragHandle.addEventListener('dragstart', function(e) {
+                            draggedRow = row;
+                            e.dataTransfer.effectAllowed = 'move';
+                            try { e.dataTransfer.setData('text/plain', pdef.id); } catch(err) {}
+                            setTimeout(function() { row.classList.add('drag-ghost'); }, 0);
+                        });
+                        dragHandle.addEventListener('dragend', function() {
+                            row.classList.remove('drag-ghost');
+                            document.querySelectorAll('.param-group-body.drag-over').forEach(function(b) { b.classList.remove('drag-over'); });
+                            draggedRow = null;
+                        });
+                        row.appendChild(dragHandle);
+
                         var label = document.createElement('label');
                         label.className = 'control-label';
                         var spanLabel = document.createElement('span');
@@ -1584,6 +1667,32 @@
                 } else {
                     if (staticControls) staticControls.style.display = '';
                 }
+
+                // Re-apply any user-dragged row order. Groups without a saved order are
+                // left completely untouched (natural declaration order / the fixed
+                // "Advanced" ordering block above), so this only affects groups the
+                // operator has actually reordered via Edit layout mode.
+                (function applyStoredOrder() {
+                    if (!window.ParamLayout) return;
+                    var groupIds = {};
+                    if (paramsContainer) paramsContainer.querySelectorAll('.param-group').forEach(function(d) { groupIds[d.id.replace('param-group-', '')] = true; });
+                    if (globalParamsContainer) globalParamsContainer.querySelectorAll('.param-group').forEach(function(d) { groupIds[d.id.replace('param-group-', '')] = true; });
+                    Object.keys(groupIds).forEach(function(g) {
+                        var order = window.ParamLayout.getOrder(g);
+                        if (!order || !order.length) return;
+                        var details = document.getElementById('param-group-' + g);
+                        var body = details && details.querySelector('.param-group-body');
+                        if (!body) return;
+                        var rows = Array.prototype.filter.call(body.children, function(el) { return el.hasAttribute('data-param-id'); });
+                        if (rows.length < 2) return;
+                        var byId = {};
+                        rows.forEach(function(r) { byId[r.getAttribute('data-param-id')] = r; });
+                        var ordered = [];
+                        order.forEach(function(id) { if (byId[id]) { ordered.push(byId[id]); delete byId[id]; } });
+                        rows.forEach(function(r) { if (byId[r.getAttribute('data-param-id')]) ordered.push(r); });   // unlisted rows keep their natural relative order, appended after
+                        ordered.forEach(function(r) { body.appendChild(r); });
+                    });
+                })();
 
                 // show/hide pause button based on sketch capability
                 var pauseBtn = document.getElementById('pause');
