@@ -4,6 +4,7 @@
     var currentP5 = null;
     var registeredApi = null;
     var lastSketchName = null;
+    var _lastBuiltParams = null;   // registeredApi.params + buildParamUI's own generic injections (paper, advanced, etc.)
     // Per-launch random fallback for the signature/print name, used when the
     // active sketch doesn't supply its own getSignatureSeed(). Re-rolled on Reseed.
     if (typeof window._pl0tSigSeed === 'undefined' || !window._pl0tSigSeed) {
@@ -15,7 +16,10 @@
         var id = pdef.id || '';
         if (id === 'paperSize' || id === 'margin' || id === 'customWidth' || id === 'customHeight') return 'paper';
         if (id === 'palette' || id === 'colorMode' || id === 'viewMode' || id === 'startColor' || id === 'endColor') return 'color';
-        if (id === 'density' || id === 'penWidthMm' || id === 'hatchWeight' || id === 'alpha') return 'advanced';
+        // penWidthMm intentionally NOT auto-bucketed to 'advanced' -- pen width is
+        // now set per pen-type in the Pens panel (window.plotPens), so a manual
+        // per-sketch override slider doesn't belong in the global Advanced group.
+        if (id === 'density' || id === 'hatchWeight' || id === 'alpha') return 'advanced';
         return 'general';
     }
 
@@ -493,9 +497,23 @@
         setTimeout(function(){ buildParamUI(registeredApi); }, 80);
     }
 
+    // Groups that live in the far-left "global authorship" column instead of
+    // the per-sketch controls on the right -- true across every sketch, not
+    // specific to the one on screen. That container is never cleared on a
+    // sketch switch (unlike #dynamicParams), so ensureGroup() below clears an
+    // already-existing global group's body itself before repopulating it,
+    // rather than relying on the container wipe every other group gets.
+    var GLOBAL_GROUPS = { paper: true, advanced: true };
+
     function buildParamUI(registeredApi) {
             try {
                 var paramsContainer = document.getElementById('dynamicParams');
+                var globalParamsContainer = document.getElementById('globalDynamicParams');
+                // ensureGroup() is called once PER ROW (not once per group) as controls
+                // are placed, so a global group's body must only be cleared on the FIRST
+                // touch in this build pass -- clearing on every call would wipe out each
+                // previously-placed row, leaving only the last one.
+                var _clearedGlobalGroupsThisBuild = {};
                 var staticControls = document.getElementById('staticControls');
                 var groupMeta = {
                     pens:     { title: 'Pens',     open: false },
@@ -647,11 +665,32 @@
                         value: window._pl0tDelayRender ? 'on' : 'off', group:'advanced', showModeHidden:true,
                         options:[{value:'off',label:'Off (live)'},{value:'on',label:'On (manual)'}] }]);
                 }
+                // Paper/orientation/plotHorizontal/drawOrder/delayRender etc. above are
+                // injected into this LOCAL `params` array, not registeredApi.params -- the
+                // sketch itself never declares them. setRenderMode() needs their
+                // visibleWhen conditions (e.g. Custom Width only when Paper size =
+                // Custom) to correctly re-sync visibility when switching Home/Show mode,
+                // so the fully-augmented list is captured here for it to read.
+                _lastBuiltParams = params;
                 if (!paramsContainer) return;
 
                 function ensureGroup(name) {
+                    var isGlobal = !!GLOBAL_GROUPS[name];
                     var existing = document.getElementById('param-group-' + name);
-                    if (existing) return existing.querySelector('.param-group-body');
+                    if (existing) {
+                        var existingBody = existing.querySelector('.param-group-body');
+                        // Global groups' container persists across sketch switches (unlike
+                        // #dynamicParams, which is fully wiped every rebuild), so an existing
+                        // global group needs its OWN body cleared here or re-populating it
+                        // would append duplicate rows on top of the last sketch's -- but only
+                        // on the FIRST touch this build pass (ensureGroup is called once per
+                        // row placed, not once per group).
+                        if (isGlobal && existingBody && !_clearedGlobalGroupsThisBuild[name]) {
+                            existingBody.innerHTML = '';
+                            _clearedGlobalGroupsThisBuild[name] = true;
+                        }
+                        return existingBody;
+                    }
 
                     var details = document.createElement('details');
                     details.className = 'param-group';
@@ -664,10 +703,12 @@
 
                     var body = document.createElement('div');
                     body.className = 'param-group-body';
+                    if (isGlobal) _clearedGlobalGroupsThisBuild[name] = true;   // freshly-created body starts empty; no need to clear it again this pass
 
                     details.appendChild(summary);
                     details.appendChild(body);
-                    paramsContainer.appendChild(details);
+                    var target = (isGlobal && globalParamsContainer) ? globalParamsContainer : paramsContainer;
+                    target.appendChild(details);
                     return body;
                 }
 
@@ -1636,6 +1677,28 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
+            // The blanket un-hide above only knows about showModeHidden -- it doesn't
+            // re-check a param's OWN visibleWhen condition (e.g. Custom Width/Height
+            // only apply when Paper size = Custom), so entering Home mode could leave
+            // a conditionally-hidden row incorrectly visible. Re-apply those here.
+            try {
+                var _vwParams = _lastBuiltParams || [];
+                _vwParams.forEach(function(pdef) {
+                    if (!pdef.visibleWhen) return;
+                    var _row = document.querySelector('[data-param-id="' + pdef.id + '"]');
+                    if (!_row) return;
+                    var _conds = Array.isArray(pdef.visibleWhen) ? pdef.visibleWhen : [pdef.visibleWhen];
+                    var _match = _conds.every(function(cond) {
+                        if (!cond || !cond.param) return true;
+                        var _valEl = document.getElementById(cond.param);
+                        var _cur = _valEl ? _valEl.value : '';
+                        var _allowed = (cond.values || []).map(String);
+                        try { var _pa = JSON.parse(_cur); if (Array.isArray(_pa)) return _pa.map(String).some(function(v){return _allowed.indexOf(v)!==-1;}); } catch(e) {}
+                        return _allowed.indexOf(String(_cur)) !== -1;
+                    });
+                    _row.style.display = _match ? '' : 'none';
+                });
+            } catch(e) {}
             var _paperGrp = document.getElementById('param-group-paper');
             if (_paperGrp) _paperGrp.style.display = '';   // Landscape lives here; visible in both modes
             // Keep a hidden input so getParamValue('_renderMode') works for visibleWhen
@@ -1647,10 +1710,11 @@
                 document.body.appendChild(_rmEl);
             }
             _rmEl.value = mode;
-            // Toggle visibility of params gated on _renderMode (e.g. scatterFill)
+            // Toggle visibility of params gated on _renderMode (e.g. scatterFill --
+            // itself a generic buildParamUI injection, so _lastBuiltParams, not
+            // registeredApi.params, is where its visibleWhen actually lives)
             try {
-                var _api = registeredApi || (window.sketchAPI && window.sketchAPI._registeredApi);
-                var _params = (_api && _api.params) ? _api.params : [];
+                var _params = _lastBuiltParams || [];
                 _params.forEach(function(pdef) {
                     if (!pdef.visibleWhen || pdef.visibleWhen.param !== '_renderMode') return;
                     var _row = document.querySelector('[data-param-id="' + pdef.id + '"]');
