@@ -10,7 +10,7 @@
   var DEFAULTS = {
     enabled: false, showPreview: true, suppressExport: false, showLogo: true, showSeedName: true,
     onlySignature: false,   // suppress the sketch's own art; canvas + exported/queued SVG show only the signature band
-    font: 'ef', customMsg: '', heightMm: 2.0, scale: 2.0, fromMarginMm: -1,
+    font: 'ef', customMsg: '', heightMm: 2.0, scale: 1.0, fromMarginMm: -1,
     hPadMm: 0.0, penWidthMm: 0.4, logoScale: 1.0, sepScale: 1.3, sepPad: 1.3,
     logoOffsetPct: 80   // logo fill: each inset pass steps in by this % of pen width
   };
