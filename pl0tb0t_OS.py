@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.149"
+__version__ = "0.5.150"
 import os
 import sys
 import time
@@ -2175,6 +2175,27 @@ if has_display:
                 self._make_webview.page().runJavaScript(js)
             except Exception:
                 pass
+
+        def _dedupe_assignments_by_color(self, assignments):
+            # _split_svg_by_color() extracts every path of a given colour from the
+            # WHOLE svg regardless of which layer/sculpture triggered the call, so
+            # if `assignments` has multiple entries sharing a colour (e.g. several
+            # sculptures/shapes using the same pen), each one would independently
+            # regenerate and re-plot ALL of that colour's content from scratch --
+            # the same lines drawn N times in a row (same colour throughout, since
+            # it's one pen pickup covering all N repeats). Call this right before
+            # gcode generation (not inside the shared assignment-building helpers --
+            # some callers index into their result positionally against the full,
+            # non-deduped per-layer list). Keeps the first entry per colour.
+            seen = set()
+            out = []
+            for layer, tool in assignments:
+                c = (layer.get("color") or "").lower()
+                if c in seen:
+                    continue
+                seen.add(c)
+                out.append((layer, tool))
+            return out
 
         def _apply_draw_order(self, assignments, order_mode=None):
             # Re-sequence an already-built (layer, tool) assignments list so
@@ -5325,6 +5346,7 @@ if has_display:
                 if _draw_order != self.config.draw_order:
                     self.config.draw_order = _draw_order
                     save_config(self.config)
+                assignments = self._dedupe_assignments_by_color(assignments)
             def _mark_plotting():
                 try:
                     self._queue_http(f"/jobs/{job_id}/status",
@@ -5597,7 +5619,8 @@ if has_display:
                     if not self._confirm_pen_assignments(assignments, colors_exceed_slots=colors_exceed):
                         return
                     self._run_vpype_with_toolchanges(
-                        svg_path, config_path, profile, output_path, assignments)
+                        svg_path, config_path, profile, output_path,
+                        self._dedupe_assignments_by_color(assignments))
                     return
                 else:
                     QMessageBox.warning(self, "No holder slots",
