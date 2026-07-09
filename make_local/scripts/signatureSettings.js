@@ -11,7 +11,8 @@
     enabled: false, showPreview: true, suppressExport: false, showLogo: true, showSeedName: true,
     onlySignature: false,   // suppress the sketch's own art; canvas + exported/queued SVG show only the signature band
     font: 'ef', customMsg: '', heightMm: 2.0, scale: 2.0, fromMarginMm: -1,
-    hPadMm: 0.0, penWidthMm: 0.4, logoScale: 1.0, sepScale: 1.3, sepPad: 1.3
+    hPadMm: 0.0, penWidthMm: 0.4, logoScale: 1.0, sepScale: 1.3, sepPad: 1.3,
+    logoOffsetPct: 80   // logo fill: each inset pass steps in by this % of pen width
   };
 
   function load() {
@@ -50,6 +51,7 @@
     ['hPadMm', 'Band padding (mm)', 0.1],
     ['penWidthMm', 'Pen width (mm)', 0.05],
     ['logoScale', 'Logo scale', 0.1],
+    ['logoOffsetPct', 'Logo fill offset (%)', 5],
     ['sepScale', 'Separator scale', 0.1],
     ['sepPad', 'Separator padding (em)', 0.1]
   ];

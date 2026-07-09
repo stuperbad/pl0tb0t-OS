@@ -107,6 +107,14 @@
         // ensure consistent winding (CCW positive)
         if (_polyArea(pts) < 0) pts = pts.slice().reverse();
         var out = [];
+        // Miter limit: at a sharp/near-antiparallel corner the averaged-normal
+        // miter join distance explodes (dividing by a near-zero ml2), spiking that
+        // vertex far outside the intended offset -- a classic offset-polygon
+        // failure mode, especially likely here since the logo is tiny (a few mm)
+        // so a pen-width-sized offset step is a LARGE fraction of its own radius.
+        // Cap the displacement to a small multiple of |d| (falls back to a plain
+        // perpendicular offset for that vertex instead of a wild miter spike).
+        var maxDisp = Math.abs(d) * 3;
         for (var i = 0; i < n; i++) {
             var p = pts[(i+n-1)%n], c = pts[i], q = pts[(i+1)%n];
             var dx1=c[0]-p[0], dy1=c[1]-p[1], l1=Math.hypot(dx1,dy1)||1e-9;
@@ -114,78 +122,136 @@
             var nx1=-dy1/l1, ny1=dx1/l1, nx2=-dy2/l2, ny2=dx2/l2;
             var mx=nx1+nx2, my=ny1+ny2, ml2=mx*mx+my*my;
             var sc = ml2>0.001 ? d*2/ml2 : d;
-            out.push([c[0]+mx*sc, c[1]+my*sc]);
+            var vx = mx*sc, vy = my*sc, vlen = Math.hypot(vx, vy);
+            if (vlen > maxDisp) { var k = maxDisp / vlen; vx *= k; vy *= k; }
+            out.push([c[0]+vx, c[1]+vy]);
         }
         return out;
+    }
+
+    // Offset by the full requested distance, but internally via several small
+    // sub-steps rather than one big jump. The miter clamp alone isn't enough
+    // when the requested step is a large fraction of the shape's own size (true
+    // here: the logo is only a few mm, so an ~80%-pen-width step can be most of
+    // its radius in one go) -- a single big _polyOffset call still degrades the
+    // polygon (self-crossing loops) even with clamped displacement, because
+    // EVERY vertex moves a large distance at once. Sub-stepping keeps each
+    // individual move small relative to the CURRENT shape size, which is what
+    // actually keeps the miter-join math well-behaved.
+    function _polyOffsetSafe(pts, totalD) {
+        if (!_isValidPoly(pts)) return pts;
+        var b = _bbox(pts), minDim = Math.min(b[2]-b[0], b[3]-b[1]);
+        var maxSub = Math.max(0.05, minDim * 0.12);
+        var remaining = totalD, sign = totalD < 0 ? -1 : 1, guard = 0;
+        while (Math.abs(remaining) > 1e-6 && guard < 30) {
+            var step = Math.abs(remaining) > maxSub ? sign * maxSub : remaining;
+            var next = _polyOffset(pts, step);
+            if (!_isValidPoly(next) || _offsetPassBlewUp(pts, next, step)) break;
+            pts = next;
+            remaining -= step;
+            guard++;
+        }
+        return pts;
     }
 
     function _isValidPoly(pts, minArea) {
         return pts.length >= 3 && Math.abs(_polyArea(pts)) > (minArea || 0.5);
     }
 
-    // Scanline fill: horizontal lines inside polygon set (even-odd winding).
-    // Correctly handles donut shapes — inner + outer polys produce ring fill.
-    function _scanlineFill(polys, spacing) {
-        var xMin=1e9, xMax=-1e9, yMin=1e9, yMax=-1e9;
-        polys.forEach(function(poly) {
-            poly.forEach(function(pt) {
-                if (pt[0]<xMin) xMin=pt[0]; if (pt[0]>xMax) xMax=pt[0];
-                if (pt[1]<yMin) yMin=pt[1]; if (pt[1]>yMax) yMax=pt[1];
-            });
-        });
-        if (spacing < 0.5) spacing = 0.5;
-        var lines = [];
-        for (var y = yMin + spacing/2; y <= yMax; y += spacing) {
-            var xs = [];
-            polys.forEach(function(poly) {
-                var n = poly.length;
-                for (var i = 0; i < n; i++) {
-                    var p1 = poly[i], p2 = poly[(i+1)%n];
-                    if ((p1[1] <= y && p2[1] > y) || (p2[1] <= y && p1[1] > y)) {
-                        xs.push(p1[0] + (y - p1[1]) * (p2[0] - p1[0]) / (p2[1] - p1[1]));
-                    }
-                }
-            });
-            xs.sort(function(a,b){return a-b;});
-            for (var k = 0; k+1 < xs.length; k+=2) {
-                if (xs[k+1] - xs[k] > 0.5) lines.push([xs[k], y, xs[k+1], y]);
-            }
-        }
-        return lines;
+    function _bbox(pts) {
+        var x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+        for (var i=0;i<pts.length;i++) { var p=pts[i]; if(p[0]<x0)x0=p[0]; if(p[0]>x1)x1=p[0]; if(p[1]<y0)y0=p[1]; if(p[1]>y1)y1=p[1]; }
+        return [x0,y0,x1,y1];
+    }
+    // Each offset pass should move the boundary by roughly |stepPx| per side
+    // (bbox width/height changes by ~2*stepPx, shrinking for an inward offset,
+    // growing for the hole's outward one). If a pass moves it far more than
+    // that -- even with the miter clamp -- a join still spiked; treat that pass
+    // as a failure and stop rather than draw the resulting mess.
+    function _offsetPassBlewUp(before, after, stepPx) {
+        var b0 = _bbox(before), b1 = _bbox(after);
+        var expected = Math.abs(stepPx) * 2, limit = Math.max(expected * 4, 2);
+        return Math.abs((b1[2]-b1[0]) - (b0[2]-b0[0])) > limit ||
+               Math.abs((b1[3]-b1[1]) - (b0[3]-b0[1])) > limit;
     }
 
-    // Sample a logo path polygon (bezier approximation via brute-force)
-    // We use pre-sampled polygons because the logo paths are complex Bézier from Illustrator.
-    // These are manually-derived polygon approximations of the logo shapes.
-    var LOGO_POLYS = [
-        // Ring 1 outer boundary (CCW in SVG space, Y-down)
-        [[181,155],[191,148],[202,149],[209,157],[208,167],[200,175],[189,176],[180,171],[178,162]],
-        // Ring 1 inner boundary (CW — will be offset outward)
-        [[184,157],[191,153],[199,154],[204,160],[203,167],[196,172],[188,173],[183,168],[182,162]],
-        // Ring 2 outer boundary
-        [[132,114],[116,101],[95,103],[81,116],[79,134],[99,153],[114,152],[120,172],[124,175],[132,151],[137,127]],
-        // Ring 2 inner boundary
-        [[129,115],[116,104],[98,106],[85,117],[83,132],[99,149],[112,148],[105,142]],
-        // Slash
-        [[140,210],[132,208],[163,86],[172,82],[170,88],[140,210]]
-    ];
+    // Split a multi-subpath "d" string ("M...Z M...Z") into one d-string per
+    // subpath. The logo's two rings are each a single compound path (outer
+    // boundary + inner hole, Illustrator "compound shape" convention); the
+    // slash is a single solid subpath. M only ever starts a new subpath, so
+    // splitting on lookahead-M is safe for this data.
+    function _splitSubpaths(d) {
+        var parts = d.match(/M[^M]*/g) || [d];
+        return parts.map(function(s) { return s.trim(); }).filter(Boolean);
+    }
 
-    function _logoFillStrokes(penWidthPx, logoSize) {
-        // logoSize: bounding box size in px (logo is ~300x300 units → scale)
-        var sc = logoSize / 300;
+    // Sample a subpath "d" string into a closed point polygon using the
+    // browser's own SVG path engine (handles cubic beziers, arcs, everything —
+    // far more robust than a hand-rolled bezier flattener). Points are in the
+    // path's native coordinate space (no transform applied).
+    function _samplePathD(d, numPoints) {
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg  = document.createElementNS(svgNS, 'svg');
+        var path = document.createElementNS(svgNS, 'path');
+        path.setAttribute('d', d);
+        svg.appendChild(path);
+        svg.style.cssText = 'position:absolute;left:-99999px;width:1px;height:1px;overflow:hidden;';
+        document.body.appendChild(svg);
+        var pts = [];
+        try {
+            var len = path.getTotalLength();
+            if (len > 0) {
+                for (var k = 0; k < numPoints; k++) {
+                    var pt = path.getPointAtLength(len * k / numPoints);
+                    pts.push([pt.x, pt.y]);
+                }
+            }
+        } catch (e) { /* malformed d — return whatever we sampled */ }
+        document.body.removeChild(svg);
+        return pts;
+    }
+
+    // Offset-fill for one logo path (outline strokes at successively inset
+    // passes, like Illustrator's "Offset Path" applied repeatedly). Handles
+    // BOTH solid shapes (the slash — one subpath, offset inward until it
+    // degenerates) AND compound shapes with a hole (each ring — outer
+    // boundary offset INWARD while the inner hole boundary offsets OUTWARD,
+    // in lockstep, so the interior of the hole is always left untouched/white;
+    // stops once the annular gap between them closes).
+    function _pathOffsetFillStrokes(d, stepPx, maxPasses) {
+        maxPasses = maxPasses || 60;
+        var subpaths = _splitSubpaths(d).map(function(sd) { return _samplePathD(sd, 72); })
+            .filter(function(pts) { return pts.length >= 3; });
         var lines = [];
-        var polys = LOGO_POLYS.map(function(poly) {
-            return poly.map(function(pt) { return [pt[0]*sc, pt[1]*sc]; });
-        });
-        var penPx = penWidthPx;
-        for (var pi = 0; pi < polys.length; pi++) {
-            var poly = polys[pi];
-            var d    = penPx;
-            var passes = 0;
-            while (_isValidPoly(poly) && passes < 40) {
+        if (subpaths.length === 1) {
+            // solid shape
+            var poly = subpaths[0], passes = 0;
+            while (_isValidPoly(poly) && passes < maxPasses) {
                 lines.push(poly.slice());
-                poly = _polyOffset(poly, d);
+                var nextPoly = _polyOffsetSafe(poly, stepPx);
+                if (nextPoly === poly) break;   // sub-stepper made no progress -- shape closed up
+                poly = nextPoly;
                 passes++;
+            }
+        } else if (subpaths.length >= 2) {
+            // compound shape: larger-area subpath is the outer boundary,
+            // the rest are holes (offset outward = negative step, since
+            // _polyOffset always normalises winding before offsetting).
+            subpaths.sort(function(a, b) { return Math.abs(_polyArea(b)) - Math.abs(_polyArea(a)); });
+            var outer = subpaths[0], hole = subpaths[1];
+            var p2 = 0;
+            while (p2 < maxPasses) {
+                var outerArea = Math.abs(_polyArea(outer));
+                var holeArea  = Math.abs(_polyArea(hole));
+                if (!_isValidPoly(outer) || !_isValidPoly(hole) || outerArea <= holeArea) break;
+                lines.push(outer.slice());
+                lines.push(hole.slice());
+                var nextOuter = _polyOffsetSafe(outer, stepPx);
+                var nextHole  = _polyOffsetSafe(hole, -stepPx);
+                if (nextOuter === outer && nextHole === hole) break;   // no progress -- stop
+                outer = nextOuter;
+                hole  = nextHole;
+                p2++;
             }
         }
         return lines;
@@ -245,7 +311,7 @@
     }
 
     // ── logo SVG rendering ────────────────────────────────────────────────────
-    function _renderLogoSVG(x, y, size, penWidthPx, color) {
+    function _renderLogoSVG(x, y, size, penWidthPx, color, offsetPct) {
         // x,y: top-left; size: logo height px (logo is square-ish)
         var sc = size / 300;
         var col = color || '#000';
@@ -265,14 +331,23 @@
             parts.push('<path d="' + outlinePaths[i] + '"/>');
         }
 
-        // Scanline fill — horizontal lines clipped to logo shape (even-odd, handles rings)
+        // Offset fill — Illustrator-style: each path (ring = compound outer+hole,
+        // slash = solid) gets successive inset outline passes at offsetPct of the
+        // pen width, like "Offset Path" applied repeatedly. Rings keep their hole
+        // white: the outer boundary shrinks in while the inner hole boundary
+        // grows out, in lockstep, until the annular gap between them closes.
         var swCoord = parseFloat(sw) / sc;
-        var fillSpacing = Math.max(2, swCoord * 1.8);
-        var fillLines = _scanlineFill(LOGO_POLYS, fillSpacing);
-        for (var fi = 0; fi < fillLines.length; fi++) {
-            var fl = fillLines[fi];
-            parts.push('<line x1="' + fl[0].toFixed(1) + '" y1="' + fl[1].toFixed(1) +
-                        '" x2="' + fl[2].toFixed(1) + '" y2="' + fl[3].toFixed(1) + '"/>');
+        var stepPx  = Math.max(0.15, swCoord * ((offsetPct != null ? offsetPct : 80) / 100));
+        for (var oi = 0; oi < outlinePaths.length; oi++) {
+            var fillLines = _pathOffsetFillStrokes(outlinePaths[oi], stepPx);
+            for (var fi = 0; fi < fillLines.length; fi++) {
+                var poly = fillLines[fi], pd = '';
+                for (var vi = 0; vi < poly.length; vi++) {
+                    pd += (vi === 0 ? 'M' : 'L') + poly[vi][0].toFixed(1) + ',' + poly[vi][1].toFixed(1) + ' ';
+                }
+                pd += 'Z';
+                parts.push('<path d="' + pd + '"/>');
+            }
         }
 
         parts.push('</g>');
@@ -319,7 +394,7 @@
 
         // Right logo
         if (cfg.showLogo !== false) {
-            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, _sigCol));
+            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, _sigCol, cfg.logoOffsetPct));
         }
 
         parts.push('</g>');
