@@ -838,8 +838,17 @@ window.sketches['whirls'] = function(p) {
 
                 if (style === 'squiggleHatch') {
                     var sr = plotFills.squiggleRows(plotFills.hatchPolyRows(cpoly, hatchDeg, spacing), spacing, phase, spacing*plotFills.getFillImperfection()*0.9);
-                    var sd = clipOutlines.length
-                        ? null  // erase mode: use clipped straight connectors
+                    // clipOutlines.length alone isn't the right test -- squiggleConnectedPathD
+                    // never applies margin clipping either, so a piece near the paper edge
+                    // needs the clipped path below even with nothing to erase against.
+                    var srNeedsClip = clipOutlines.length > 0 || sr.some(function(row) {
+                        return row.some(function(pc) {
+                            return pc.x1 < mp || pc.x1 > dims.width-mp || pc.y1 < mp || pc.y1 > dims.height-mp ||
+                                   pc.x2 < mp || pc.x2 > dims.width-mp || pc.y2 < mp || pc.y2 > dims.height-mp;
+                        });
+                    });
+                    var sd = srNeedsClip
+                        ? null  // fall through to the clipped path builder below
                         : plotFills.squiggleConnectedPathD(sr);
                     if (sd) {
                         parts.push('<path d="'+sd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round" stroke-linejoin="round"/>');
@@ -859,7 +868,12 @@ window.sketches['whirls'] = function(p) {
                     return;
                 }
                 if (style === 'waves') {
-                    var wd = plotFills.waveConnectedPathD(cpoly, hatchDeg, spacing, phase);
+                    // waveConnectedPathD previously only checked points against the
+                    // cell's own polygon -- never against other whirls (clipOutlines)
+                    // or the paper margin, unlike every other clipped fill style. Now
+                    // fixed to take both, same erase-mode inputs as clippedConnectedPaths.
+                    var wd = plotFills.waveConnectedPathD(cpoly, hatchDeg, spacing, phase,
+                        clipOutlines, { x0: mp, y0: mp, x1: dims.width - mp, y1: dims.height - mp });
                     if (wd) parts.push('<path d="'+wd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round" stroke-linejoin="round"/>');
                     return;
                 }

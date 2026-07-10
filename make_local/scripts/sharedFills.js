@@ -596,7 +596,14 @@ window.plotFills = (function () {
     }
 
     // Wave: point-by-point traversal with inside-poly check; alternating row direction.
-    function waveConnectedPathD(poly, angleDeg, spacing, phase) {
+    // clipOutlines/marginRect are OPTIONAL -- omitted by every caller except
+    // whirls.js's erase-mode export, which needs them because this function
+    // previously only checked points against the cell's OWN polygon, never
+    // against other whirls drawn on top or the paper margin. Every other
+    // clipped/connected fill style routes through clippedConnectedPaths()
+    // (which does apply both), but waves never did -- a complete gap, not a
+    // partial one, unlike the narrower contour/squiggle fast-path gaps.
+    function waveConnectedPathD(poly, angleDeg, spacing, phase, clipOutlines, marginRect) {
         if (!poly.length || spacing <= 0) return '';
         var ang = angleDeg * Math.PI / 180;
         var dir = { x: Math.cos(ang), y: Math.sin(ang) };
@@ -620,8 +627,19 @@ window.plotFills = (function () {
             }
             var pts = (ki % 2 === 0) ? rowFwd : rowFwd.slice().reverse();
             for (var j = 0; j < pts.length; j++) {
-                if (pointInPoly(pts[j], poly)) {
-                    parts.push((pd ? 'L' : 'M') + fmt(pts[j].x) + ' ' + fmt(pts[j].y));
+                var pt = pts[j];
+                var keep = pointInPoly(pt, poly);
+                if (keep && marginRect) {
+                    keep = pt.x >= marginRect.x0 && pt.x <= marginRect.x1 &&
+                           pt.y >= marginRect.y0 && pt.y <= marginRect.y1;
+                }
+                if (keep && clipOutlines) {
+                    for (var ci = 0; ci < clipOutlines.length; ci++) {
+                        if (pointInPoly(pt, clipOutlines[ci])) { keep = false; break; }
+                    }
+                }
+                if (keep) {
+                    parts.push((pd ? 'L' : 'M') + fmt(pt.x) + ' ' + fmt(pt.y));
                     pd = true;
                 } else { pd = false; }
             }
