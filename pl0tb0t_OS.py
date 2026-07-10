@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.160"
+__version__ = "0.5.161"
 import os
 import sys
 import time
@@ -647,6 +647,7 @@ if has_display:
         grbl_log       = pyqtSignal(str)
         queue_jobs_ready = pyqtSignal(list)
         queue_pen_assign = pyqtSignal(object)  # carries ctx dict from _queue_plot_selected
+        confirm_and_run_gcode = pyqtSignal(str, str, object, str, str)  # job_id, gcode_path, paper_mm, base_url, key -- marshals the single-pass plot path's g-code-ready confirm dialog onto the main thread
         update_banner  = pyqtSignal(str)    # update Make tab banner text
         plot_progress  = pyqtSignal(str)    # rich plot progress (JSON) -> setPlotProgress
         daemon_indicator = pyqtSignal()   # refresh daemon status dot (thread-safe)
@@ -1090,6 +1091,7 @@ if has_display:
             self.signals.grbl_log.connect(self._append_grbl_log)
             self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
             self.signals.queue_pen_assign.connect(self._queue_on_pen_assign)
+            self.signals.confirm_and_run_gcode.connect(self._on_confirm_and_run_gcode)
             self.signals.update_banner.connect(
                 lambda t: self._make_webview.page().runJavaScript(f"setBannerText({repr(t)})"))
             self.signals.plot_progress.connect(
@@ -5306,6 +5308,89 @@ if has_display:
                 pass
             return result[0]
 
+        def _confirm_gcode_preview(self, job_id: str, gcode_path: str, paper_mm=None) -> bool:
+            """Modal preview of the ACTUAL generated g-code before it's sent to the
+            machine. The make-tab's own canvas preview can look correct while the
+            exported g-code is wrong (e.g. a clipping bug drawing past the paper
+            edge -- the canvas preview is protected by a ctx.clip() the SVG export
+            doesn't always apply) -- this is the last chance to catch that before
+            the pen moves. Returns True to proceed with plotting, False if the
+            user cancelled.
+            """
+            try:
+                self.load_gcode_file(gcode_path, artboard_mm=paper_mm)
+            except Exception:
+                pass
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Confirm G-code — {job_id}")
+            dlg.resize(720, 680)
+            layout = QVBoxLayout(dlg)
+
+            info = "Review the actual toolpath before it's sent to the machine."
+            bounds = getattr(self, 'gcode_bounds', None)
+            segments = getattr(self, 'gcode_segments', None) or []
+            if paper_mm:
+                info += f"\nPaper: {paper_mm[0]:.1f} × {paper_mm[1]:.1f} mm"
+            if bounds:
+                w = bounds[2] - bounds[0]
+                h = bounds[3] - bounds[1]
+                info += f"\nArtwork: {w:.1f} × {h:.1f} mm  ·  {len(segments)} draw segments"
+                if paper_mm:
+                    pad = 0.5  # mm tolerance for float noise
+                    if (bounds[0] < -pad or bounds[1] < -pad or
+                            bounds[2] > paper_mm[0] + pad or bounds[3] > paper_mm[1] + pad):
+                        info += "\n⚠ Artwork extends past the paper edge — check the preview below."
+            layout.addWidget(QLabel(info))
+
+            preview = GcodePreviewWidget()
+            preview.setMinimumHeight(440)
+            preview.set_data(segments, bounds, artboard=paper_mm)
+            layout.addWidget(preview)
+
+            btns = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            btns.button(QDialogButtonBox.StandardButton.Ok).setText("Looks good — Plot")
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            layout.addWidget(btns)
+            return dlg.exec() == QDialog.DialogCode.Accepted
+
+        def _on_confirm_and_run_gcode(self, job_id, gcode_path, paper_mm, base_url, key):
+            """Main-thread handler for the single-pass queue-plot path (its g-code
+            generation runs on a background thread, which can't show a QDialog
+            directly -- see confirm_and_run_gcode signal). Mirrors the confirm +
+            autorun-or-cancel behavior already inline in _queue_on_pen_assign's
+            multi-color path."""
+            import threading
+            proceed = self._confirm_gcode_preview(job_id, gcode_path, paper_mm)
+
+            def _mark(status):
+                try:
+                    self._queue_http(f"/jobs/{job_id}/status",
+                                     "PATCH", {"status": status},
+                                     base_url=base_url, key=key)
+                    self._cloud_push_status(job_id, status)
+                except Exception:
+                    pass
+                self.signals.update_status.emit("__q_refresh__")
+
+            if not proceed:
+                threading.Thread(target=lambda: _mark("queued"), daemon=True).start()
+                self._queue_status_lbl.setText(f"Plot cancelled for {job_id}")
+                return
+
+            self.gcode_path = gcode_path
+            if self.port:
+                self.signals.update_status.emit("__q_autorun__")
+            else:
+                self.signals.show_info.emit(
+                    "Not Connected",
+                    "The g-code is ready, but the machine isn't connected, "
+                    "so it wasn't sent.\n\nClick Connect on the Machine tab, "
+                    "then press Run to plot.")
+            threading.Thread(target=lambda: _mark("done"), daemon=True).start()
+
         def _queue_on_pen_assign(self, ctx):
             import threading, tempfile, pathlib, shutil
             job_id   = ctx["job_id"]
@@ -5494,11 +5579,34 @@ if has_display:
                             self.signals.update_status.emit("__q_refresh__")
                         threading.Thread(target=_mark_err, daemon=True).start()
                         return
-                    self.signals.update_banner.emit("● Plotting… sending to machine")
-                    self.load_gcode_file(str(gcode_path),
-                                         artboard_mm=self._svg_page_mm(svg_path))
+                    self.signals.update_banner.emit("● Plotting… ready for review")
+                    if not gcode_path.exists():
+                        QMessageBox.critical(self, "Error", "G-code generation reported success but the file is missing.")
+                        def _mark_missing():
+                            try:
+                                self._queue_http(f"/jobs/{job_id}/status",
+                                                 "PATCH", {"status": "error"},
+                                                 base_url=base_url, key=key)
+                                self._cloud_push_status(job_id, "error")
+                            except Exception:
+                                pass
+                            self.signals.update_status.emit("__q_refresh__")
+                        threading.Thread(target=_mark_missing, daemon=True).start()
+                        return
+                    if not self._confirm_gcode_preview(job_id, str(gcode_path), self._svg_page_mm(svg_path)):
+                        def _mark_cancelled():
+                            try:
+                                self._queue_http(f"/jobs/{job_id}/status",
+                                                 "PATCH", {"status": "queued"},
+                                                 base_url=base_url, key=key)
+                            except Exception:
+                                pass
+                            self.signals.update_status.emit("__q_refresh__")
+                        threading.Thread(target=_mark_cancelled, daemon=True).start()
+                        self._queue_status_lbl.setText(f"Plot cancelled for {job_id}")
+                        return
                     _debug_log(f"_check: gcode={gcode_path} exists={gcode_path.exists()} port={self.port} running={self.gcode_running}")
-                    if self.port and gcode_path.exists():
+                    if self.port:
                         _debug_log("_check: emitting __q_autorun__")
                         self.signals.update_status.emit("__q_autorun__")
                     else:
@@ -5564,19 +5672,23 @@ if has_display:
                             "M2",
                         ]
                         pathlib.Path(gcode_path).write_text('\n'.join(wrapped) + '\n', encoding='utf-8')
-                    if self.port and gcode_path.exists():
-                        self.gcode_path = str(gcode_path)
-                        self.signals.update_status.emit("__q_autorun__")
+                    if gcode_path.exists():
+                        # _single() runs on this background thread -- can't show a
+                        # QDialog here, so marshal the confirm+autorun-or-cancel
+                        # decision onto the main thread via a signal (see
+                        # _on_confirm_and_run_gcode).
+                        self.signals.confirm_and_run_gcode.emit(
+                            job_id, str(gcode_path), self._svg_page_mm(svg_path), base_url, key)
                     else:
                         self.signals.show_info.emit(
-                            "Queue", f"vpype done. Load {gcode_path.name} in G-code Runner.")
-                    try:
-                        self._queue_http(f"/jobs/{job_id}/status",
-                                         "PATCH", {"status": "done"},
-                                         base_url=base_url, key=key)
-                        self._cloud_push_status(job_id, "done")
-                    except Exception:
-                        pass
+                            "Queue", f"vpype done but {gcode_path.name} is missing.")
+                        try:
+                            self._queue_http(f"/jobs/{job_id}/status",
+                                             "PATCH", {"status": "error"},
+                                             base_url=base_url, key=key)
+                            self._cloud_push_status(job_id, "error")
+                        except Exception:
+                            pass
                 except Exception as e:
                     try:
                         self._queue_http(f"/jobs/{job_id}/status",
