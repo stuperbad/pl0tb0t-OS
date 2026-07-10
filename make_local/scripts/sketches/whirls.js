@@ -18,6 +18,7 @@ window.sketches['whirls'] = function(p) {
         fillStyles: ['hatch'],
         laneVariability: 0,
         cellLenVariability: 0,
+        endFray: 0,
         divergentEnds: false,
         symbolScale: 1.0,
         viewMode: 'normal',
@@ -73,6 +74,9 @@ window.sketches['whirls'] = function(p) {
               _toInternal: function(v) { return v / 10; } },
             { id: 'cellLenVariability', label: 'Cell length variability', type: 'range', min: 0, max: 10, step: 1, value: 0,
               _toInternal: function(v) { return v / 10; } },
+            { id: 'endFray', label: 'End fraying', type: 'range', min: 0, max: 10, step: 1, value: 0,
+              tip: 'At 0, every row/lane in a whirl runs the full length and ends together (current default). Above 0, each row independently stops somewhere in the tail of the path, so rows drop out one by one -- the whirl narrows toward its end instead of cutting off all at once.',
+              _toInternal: function(v) { return v / 10; } },
             { id: 'fieldScale', label: 'Turbulence',  type: 'range', min: 1,   max: 12,  step: 1,   value: 3,
               _toInternal: function(v) { return v / 1000; } },
             { id: 'pathMode', label: 'Path mode', type: 'select', value: 'flow',
@@ -125,6 +129,7 @@ window.sketches['whirls'] = function(p) {
             if (name === 'rowsSpread')  PARAMS.rowsSpread = val;
             if (name === 'laneVariability') PARAMS.laneVariability = val;
             if (name === 'cellLenVariability') PARAMS.cellLenVariability = val;
+            if (name === 'endFray')    PARAMS.endFray = val;
             if (name === 'divergentEnds') PARAMS.divergentEnds = val === 'on';
             if (name === 'fieldScale')  PARAMS.fieldScale = val;
             if (name === 'pathMode')    PARAMS.pathMode = val;
@@ -142,7 +147,7 @@ window.sketches['whirls'] = function(p) {
             if (name === 'viewMode')    PARAMS.viewMode = val;
             if (name === 'palette')     { PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette; }
             if (name === '_renderMode') { p.redraw(); }
-            var rebuilds = ['whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
+            var rebuilds = ['whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','endFray','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
             if (rebuilds.indexOf(name) !== -1) buildAllWhirls();
         },
         saveSVG: function() { exportSVG(); },
@@ -369,6 +374,17 @@ window.sketches['whirls'] = function(p) {
             for (var r=0; r<rows; r++) rowWidths.push(Math.max(cw*0.15, _rawW[r]*_rscale));
         }
         var totalRowW = rowWidths.reduce(function(a,b){return a+b;},0);
+        // Per-row end point: at endFray=0 every row runs the whirl's full
+        // length (current/original behavior). Above 0, each row independently
+        // stops somewhere in the tail of the path -- rows keep dropping out
+        // one by one as ci advances, which is what actually reads as
+        // "fraying" (progressively narrower toward the end), rather than
+        // every row cutting off at once.
+        var endFray = PARAMS.endFray || 0;
+        var rowEndCi = [];
+        for (var r=0; r<rows; r++) {
+            rowEndCi.push(endFray < 0.01 ? path.length : Math.round(path.length * (1 - rowsRng()*endFray)));
+        }
         var ci = 0, cellIdx = 0;
         while (ci + baseSegsPerCell < path.length) {
             // Per-cell length: randomised if cellLenVariability > 0, else the fixed
@@ -388,6 +404,10 @@ window.sketches['whirls'] = function(p) {
             var rowOff = 0;
             for (var r=0; r<rows; r++) {
                 var io=rowOff, oo=rowOff+rowWidths[r]; rowOff=oo;
+                // This row already frayed out -- still advance rowOff above (so
+                // rows after it keep their correct lane position) but stop
+                // generating cells for THIS row past its own end point.
+                if (ci >= rowEndCi[r]) continue;
                 var innerPts=[], outerPts=[];
                 for (var j=0; j<=segsPerCell; j++) {
                     var pi=Math.min(ci+j, path.length-1);
