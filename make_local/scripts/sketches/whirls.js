@@ -682,9 +682,34 @@ window.sketches['whirls'] = function(p) {
         return parts;
     }
 
-    function drawCells(whirl, strokeW) {
+    // Paint white over THIS CELL's own quad (innerPts+outerPts), not the
+    // whole whirl's offset-path outline. A whole-whirl outline is built by
+    // offsetting the ENTIRE path outward, which can fold back on itself at
+    // tight turns (confirmed live) and, worse, doesn't necessarily match
+    // what's actually drawn -- shrinking that outline to avoid self-
+    // intersection (an earlier attempt at this fix) made the mask and the
+    // real cell geometry diverge, causing BOTH unmasked overlap where the
+    // mask undershot and orphaned white gaps where it overshot. A single
+    // cell's own quad is short and simple enough to essentially never
+    // self-intersect, and masking with the EXACT shape that's about to be
+    // drawn means mask and content can never disagree.
+    function drawCellMask(cell) {
+        if (!cell.innerPts || !cell.innerPts.length) return;
+        var curBlend = PARAMS.viewMode === 'multiply' ? p.MULTIPLY : p.BLEND;
+        p.blendMode(p.BLEND);
+        p.noStroke();
+        p.fill(255);
+        p.beginShape();
+        cell.innerPts.forEach(function(pt){ p.vertex(pt.x, pt.y); });
+        for (var k=cell.outerPts.length-1; k>=0; k--) p.vertex(cell.outerPts[k].x, cell.outerPts[k].y);
+        p.endShape(p.CLOSE);
+        p.blendMode(curBlend);
+    }
+
+    function drawCells(whirl, strokeW, doMask) {
         var ctx = p.drawingContext;
         whirl.cells.forEach(function(cell) {
+            if (doMask) drawCellMask(cell);
             var _style = getCellFillStyle(cell);
             var _isScatter = _style==='sprigFill'||_style==='ribbonFill'||_style==='crossFill'||_style==='asteriskFill';
             if (_style && plotFills.getFillProb() < 1 && ((cell.colorIdx >>> 0) % 997) / 997 >= plotFills.getFillProb()) _style = null;
@@ -767,19 +792,6 @@ window.sketches['whirls'] = function(p) {
         });
     }
 
-    function drawWhirlMask(whirl) {
-        if (!whirl.outline.length) return;
-        p.push();
-        p.blendMode(p.BLEND);
-        p.noStroke();
-        p.fill(255);
-        p.beginShape();
-        whirl.outline.forEach(function(pt){ p.vertex(pt.x, pt.y); });
-        p.endShape(p.CLOSE);
-        p.pop();
-        p.blendMode(PARAMS.viewMode === 'multiply' ? p.MULTIPLY : p.BLEND);
-    }
-
     p.draw = function() {
         p.background(255);
         paper.drawPaperBorder(p);
@@ -796,8 +808,8 @@ window.sketches['whirls'] = function(p) {
         ctx.clip();
 
         whirls.forEach(function(whirl, i) {
-            if (PARAMS.overlapMode === 'erase' && i > 0) drawWhirlMask(whirl);
-            drawCells(whirl, strokeW);
+            var doMask = PARAMS.overlapMode === 'erase' && i > 0;
+            drawCells(whirl, strokeW, doMask);
         });
 
         ctx.restore();
