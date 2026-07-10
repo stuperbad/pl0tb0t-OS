@@ -1023,7 +1023,19 @@ window.sketches['artproofs'] = function(p) {
         togglePause: function() { return false; },
         setParam: function(name, rawVal) {
             var pdef = api.params.find(function(x) { return x.id === name; });
-            if (pdef) pdef.value = rawVal;
+            if (pdef) {
+                // multiSelect params (e.g. fillStyle) carry their live value as a
+                // JSON-stringified array (the hidden <input>'s raw DOM value) --
+                // pdef.value must hold the PARSED array, not that raw string, or
+                // the next UI rebuild re-stringifies the already-stringified
+                // string, corrupting the selection.
+                if (pdef.multiSelect && typeof rawVal === 'string') {
+                    try { var _parsed = JSON.parse(rawVal); pdef.value = Array.isArray(_parsed) ? _parsed : [rawVal]; }
+                    catch (e) { pdef.value = [rawVal]; }
+                } else {
+                    pdef.value = rawVal;
+                }
+            }
             if (_syncingControls) return;
             var val = (pdef && pdef._toInternal) ? pdef._toInternal(Number(rawVal)) : rawVal;
 
