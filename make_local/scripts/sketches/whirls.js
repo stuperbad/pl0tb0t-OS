@@ -51,7 +51,14 @@ window.sketches['whirls'] = function(p) {
             { label: 'Flow hatch', values: { pathMode:'flow', whirlCount:8, cellLen:40, cellWidth:22, rowsBase:3, fieldScale:3, fillStyle:['hatch'] } },
             { label: 'Curly chaos', values: { pathMode:'curlyq', swirlStrength:80, whirlCount:14, fieldScale:6, fillStyle:['sketchHatch'] } },
             { label: 'Shared vortex', values: { pathMode:'sharedSwirl', swirlStrength:70, whirlCount:6, cellLen:60, fillStyle:['hatch'] } },
-            { label: 'Contour weave', values: { pathMode:'flow', fillStyle:['contour'], whirlCount:10, cellWidth:30, showBorder:'on' } }
+            { label: 'Contour weave', values: { pathMode:'flow', fillStyle:['contour'], whirlCount:10, cellWidth:30, showBorder:'on' } },
+            // Matches the original "noodles" algorithm's look (github.com/Fossj117/noodles_code,
+            // outputs/output_1.svg): many thin (2-row) strands converging/crossing through the
+            // field, not a few thick multi-row bands. rowsBase down to 2, cellWidth down to 10,
+            // whirlCount way up, divergentEnds on (that toggle exists specifically to replicate
+            // this algorithm's zero-smoothing path-following), border off since the reference
+            // has no black grid lines between color segments.
+            { label: 'Noodles', values: { pathMode:'flow', whirlCount:25, rowsBase:2, cellWidth:10, cellLen:35, divergentEnds:'on', showBorder:'off', fillStyle:['hatch'] } }
         ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6,
