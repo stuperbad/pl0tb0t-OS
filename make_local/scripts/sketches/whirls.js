@@ -776,39 +776,47 @@ window.sketches['whirls'] = function(p) {
                     var cnL = Math.max(1, Math.round(cw / spacing));
                     var csOff = (cw - (cnL - 1) * spacing) / 2;
                     if (cnL >= 1) {
-                        if (!clipOutlines.length) {
+                        // Collect the raw (unclipped) point sets first so we can check
+                        // whether ANY of them cross the margin before picking a path.
+                        // The canvas preview is protected by a ctx.clip() around the
+                        // whole render (see p.draw()), so this bug was invisible there
+                        // -- only the SVG/gcode export was affected. clipOutlines being
+                        // empty means "nothing else on top to erase against", NOT "safe
+                        // to skip margin clipping" -- those are independent conditions.
+                        var cnAllPts = [];
+                        for (var ck = 0; ck < cnL; ck++) {
+                            var ca = (csOff + ck * spacing) / cw;
+                            var cpts = [];
+                            for (var cj=0; cj<cnp; cj++) cpts.push({x:cell.innerPts[cj].x+(cell.outerPts[cj].x-cell.innerPts[cj].x)*ca, y:cell.innerPts[cj].y+(cell.outerPts[cj].y-cell.innerPts[cj].y)*ca});
+                            cnAllPts.push(cpts);
+                        }
+                        var needsClip = clipOutlines.length > 0 || cnAllPts.some(function(cpts) {
+                            return cpts.some(function(pt) { return pt.x < mp || pt.x > dims.width-mp || pt.y < mp || pt.y > dims.height-mp; });
+                        });
+                        if (!needsClip) {
                             if (plotFills.isPenLift()) {
                                 // Pen-lift: separate path per contour line
-                                for (var ck = 0; ck < cnL; ck++) {
-                                    var ca = (csOff + ck * spacing) / cw;
-                                    var cpts = [];
-                                    for (var cj=0; cj<cnp; cj++) cpts.push({x:cell.innerPts[cj].x+(cell.outerPts[cj].x-cell.innerPts[cj].x)*ca, y:cell.innerPts[cj].y+(cell.outerPts[cj].y-cell.innerPts[cj].y)*ca});
+                                cnAllPts.forEach(function(cpts) {
                                     var cd='M'+fmt(cpts[0].x)+' '+fmt(cpts[0].y);
                                     for (var cj=1;cj<cpts.length;cj++) cd+=' L'+fmt(cpts[cj].x)+' '+fmt(cpts[cj].y);
                                     parts.push('<path d="'+cd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round"/>');
-                                }
+                                });
                             } else {
                                 // Connected: single serpentine path per cell (pen stays down)
                                 var cd = '';
-                                for (var ck = 0; ck < cnL; ck++) {
-                                    var ca = (csOff + ck * spacing) / cw;
+                                cnAllPts.forEach(function(cpts, ck) {
                                     var cfwd = (ck % 2 === 0);
-                                    var cpts = [];
-                                    for (var cj=0; cj<cnp; cj++) cpts.push({x:cell.innerPts[cj].x+(cell.outerPts[cj].x-cell.innerPts[cj].x)*ca, y:cell.innerPts[cj].y+(cell.outerPts[cj].y-cell.innerPts[cj].y)*ca});
                                     if (cfwd) {
                                         for (var cj=0; cj<cpts.length; cj++) cd += (cd==='' ? 'M' : ' L')+fmt(cpts[cj].x)+' '+fmt(cpts[cj].y);
                                     } else {
                                         for (var cj=cpts.length-1; cj>=0; cj--) cd += (cd==='' ? 'M' : ' L')+fmt(cpts[cj].x)+' '+fmt(cpts[cj].y);
                                     }
-                                }
+                                });
                                 if (cd) parts.push('<path d="'+cd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round" stroke-linejoin="round"/>');
                             }
                         } else {
                             // Clipped: per-line paths
-                            for (var ck = 0; ck < cnL; ck++) {
-                                var ca = (csOff + ck * spacing) / cw;
-                                var cpts = [];
-                                for (var cj=0; cj<cnp; cj++) cpts.push({x:cell.innerPts[cj].x+(cell.outerPts[cj].x-cell.innerPts[cj].x)*ca, y:cell.innerPts[cj].y+(cell.outerPts[cj].y-cell.innerPts[cj].y)*ca});
+                            cnAllPts.forEach(function(cpts) {
                                 var cclipped=[];
                                 for (var cj=0; cj<cpts.length-1; cj++) {
                                     var csegs=[{x1:cpts[cj].x,y1:cpts[cj].y,x2:cpts[cj+1].x,y2:cpts[cj+1].y}];
@@ -820,7 +828,7 @@ window.sketches['whirls'] = function(p) {
                                     cclipped.forEach(function(seg){if(Math.hypot(seg.x1-clx,seg.y1-cly)>0.5)cpd+=' M'+fmt(seg.x1)+' '+fmt(seg.y1);cpd+=' L'+fmt(seg.x2)+' '+fmt(seg.y2);clx=seg.x2;cly=seg.y2;});
                                     parts.push('<path d="'+cpd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round" stroke-linejoin="round"/>');
                                 }
-                            }
+                            });
                         }
                     }
                     return;
