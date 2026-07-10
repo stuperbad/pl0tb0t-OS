@@ -17,6 +17,8 @@ window.sketches['whirls'] = function(p) {
         overlapMode: 'erase',
         fillStyles: ['hatch'],
         laneVariability: 0,
+        cellLenVariability: 0,
+        divergentEnds: false,
         symbolScale: 1.0,
         viewMode: 'normal',
         penWidthMm: 0.4,
@@ -69,6 +71,8 @@ window.sketches['whirls'] = function(p) {
               _toInternal: function(v) { return v / 10; } },
             { id: 'laneVariability', label: 'Lane width variability', type: 'range', min: 0, max: 10, step: 1, value: 0,
               _toInternal: function(v) { return v / 10; } },
+            { id: 'cellLenVariability', label: 'Cell length variability', type: 'range', min: 0, max: 10, step: 1, value: 0,
+              _toInternal: function(v) { return v / 10; } },
             { id: 'fieldScale', label: 'Turbulence',  type: 'range', min: 1,   max: 12,  step: 1,   value: 3,
               _toInternal: function(v) { return v / 1000; } },
             { id: 'pathMode', label: 'Path mode', type: 'select', value: 'flow',
@@ -80,6 +84,9 @@ window.sketches['whirls'] = function(p) {
             { id: 'swirlStrength', label: 'Swirl pull', type: 'range', min: 0, max: 100, step: 1, value: 70,
               visibleWhen: { param: 'pathMode', values: ['sharedSwirl', 'curlyq'] },
               _toInternal: function(v) { return v / 100; } },
+            { id: 'divergentEnds', label: 'Diverging ends', type: 'select', value: 'off',
+              tip: 'Off: current gentle-curve paths. On: the path direction snaps directly to the flow field every step, with no turn-rate smoothing -- matches the original "noodles" algorithm this sketch is based on, which follows the field more literally and looks more erratic/spread, especially near the ends.',
+              options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
             { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'textures',
               options: [
                 { value: 'contour', label: 'Contour' },
@@ -117,6 +124,8 @@ window.sketches['whirls'] = function(p) {
             if (name === 'rowsBase')    PARAMS.rowsBase = Number(val);
             if (name === 'rowsSpread')  PARAMS.rowsSpread = val;
             if (name === 'laneVariability') PARAMS.laneVariability = val;
+            if (name === 'cellLenVariability') PARAMS.cellLenVariability = val;
+            if (name === 'divergentEnds') PARAMS.divergentEnds = val === 'on';
             if (name === 'fieldScale')  PARAMS.fieldScale = val;
             if (name === 'pathMode')    PARAMS.pathMode = val;
             if (name === 'swirlStrength') PARAMS.swirlStrength = val;
@@ -133,7 +142,7 @@ window.sketches['whirls'] = function(p) {
             if (name === 'viewMode')    PARAMS.viewMode = val;
             if (name === 'palette')     { PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette; }
             if (name === '_renderMode') { p.redraw(); }
-            var rebuilds = ['whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','fieldScale','pathMode','swirlStrength','paperSize','margin'];
+            var rebuilds = ['whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
             if (rebuilds.indexOf(name) !== -1) buildAllWhirls();
         },
         saveSVG: function() { exportSVG(); },
@@ -221,8 +230,19 @@ window.sketches['whirls'] = function(p) {
                 var swirlAng = orbitAng + radialError * center.dir * 0.7;
                 fieldAng = mixAngles(fieldAng, swirlAng, PARAMS.swirlStrength);
             }
-            var diff = normAngleDiff(fieldAng, ang);
-            ang += diff * (center ? 0.22 : 0.15) * _sm;
+            if (PARAMS.divergentEnds) {
+                // Original "noodles" algorithm (main2.py, construct_points()) sets the
+                // direction directly to the field angle every step -- no turn-rate
+                // easing at all: `angle = field.get_angle(...)`. That zero-inertia
+                // following is what makes those paths visibly more erratic/spread,
+                // especially near their ends where the least path history has
+                // accumulated to average out the field's local jumpiness. Replicated
+                // faithfully here rather than tuned by eye.
+                ang = fieldAng;
+            } else {
+                var diff = normAngleDiff(fieldAng, ang);
+                ang += diff * (center ? 0.22 : 0.15) * _sm;
+            }
             x += Math.cos(ang) * cl;
             y += Math.sin(ang) * cl;
             pts.push({x:x, y:y});
@@ -250,7 +270,8 @@ window.sketches['whirls'] = function(p) {
         var cells = [];
 
         var MICRO = 4;
-        var segsPerCell = Math.max(2, Math.round(PARAMS.cellLen / MICRO));
+        var baseSegsPerCell = Math.max(2, Math.round(PARAMS.cellLen / MICRO));
+        var cellLenVar = PARAMS.cellLenVariability || 0;
         // Per-row widths: randomised if laneVariability > 0, else uniform
         var rowWidths = [];
         if (laneVar < 0.01) {
@@ -262,7 +283,17 @@ window.sketches['whirls'] = function(p) {
             for (var r=0; r<rows; r++) rowWidths.push(Math.max(cw*0.15, _rawW[r]*_rscale));
         }
         var totalRowW = rowWidths.reduce(function(a,b){return a+b;},0);
-        for (var ci=0; ci+segsPerCell<path.length; ci+=segsPerCell) {
+        var ci = 0, cellIdx = 0;
+        while (ci + baseSegsPerCell < path.length) {
+            // Per-cell length: randomised if cellLenVariability > 0, else the fixed
+            // base length -- mirrors how rowWidths above randomises per-row width.
+            var segsPerCell = baseSegsPerCell;
+            if (cellLenVar > 0.01) {
+                var _lf = 1 + (rowsRng()-0.5)*2*cellLenVar;
+                segsPerCell = Math.max(2, Math.round(baseSegsPerCell * Math.max(0.15, _lf)));
+            }
+            if (ci + segsPerCell >= path.length) segsPerCell = path.length - 1 - ci;
+            if (segsPerCell < 2) break;
             var tangAng = Math.atan2(path[ci+1].y-path[ci].y, path[ci+1].x-path[ci].x);
             var endPi = ci + segsPerCell;
             var tangAngEnd = (endPi+1 < path.length)
@@ -283,11 +314,13 @@ window.sketches['whirls'] = function(p) {
                     innerPts: innerPts,
                     outerPts: outerPts,
                     quad: [innerPts[0], outerPts[0], outerPts[_np-1], innerPts[_np-1]],
-                    colorIdx: cellColorIdx(zIndex, Math.floor(ci/segsPerCell), r),
+                    colorIdx: cellColorIdx(zIndex, cellIdx, r),
                     tangAng: tangAng,
                     tangAngEnd: tangAngEnd
                 });
             }
+            ci += segsPerCell;
+            cellIdx++;
         }
         if (!cells.length) return null;
 
