@@ -175,6 +175,70 @@ window.sketches['whirls'] = function(p) {
         return {x:-dy/len, y:dx/len};
     }
 
+    // Approximate local radius of curvature at path[i], from the turn angle
+    // between the two adjacent segments. Offsetting a curve outward by more
+    // than its own local radius folds the offset copy back on itself (a
+    // standard offset-curve failure mode) -- used to clamp the whirl's
+    // erase-mask outline so it can't self-intersect at tight turns, which
+    // otherwise breaks erase-mode masking for whatever OTHER whirls are
+    // supposed to clip against it.
+    function localRadiusAt(path, i) {
+        var a=path[Math.max(0,i-1)], b=path[i], c=path[Math.min(path.length-1,i+1)];
+        var d1x=b.x-a.x, d1y=b.y-a.y, d2x=c.x-b.x, d2y=c.y-b.y;
+        var l1=Math.hypot(d1x,d1y), l2=Math.hypot(d2x,d2y);
+        if (l1 < 1e-6 || l2 < 1e-6) return Infinity;
+        var dAng = Math.abs(normAngleDiff(Math.atan2(d2y,d2x), Math.atan2(d1y,d1x)));
+        if (dAng < 1e-4) return Infinity;
+        return ((l1+l2)/2) / dAng;
+    }
+
+    function _segsIntersect(a1,a2,b1,b2) {
+        function cross(o,a,b){ return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x); }
+        var d1=cross(b1,b2,a1), d2=cross(b1,b2,a2), d3=cross(a1,a2,b1), d4=cross(a1,a2,b2);
+        return ((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0));
+    }
+    function _polySelfIntersects(pts) {
+        var n = pts.length;
+        if (n < 4) return false;
+        for (var i=0;i<n;i++) {
+            var a1=pts[i], a2=pts[(i+1)%n];
+            for (var j=i+2;j<n;j++) {
+                if (j===n-1 && i===0) continue;
+                if (_segsIntersect(a1,a2,pts[j],pts[(j+1)%n])) return true;
+            }
+        }
+        return false;
+    }
+    function _buildOffsetSide(path, totalRowW, scale) {
+        var side = [];
+        for (var i=path.length-1; i>=0; i--) {
+            var n=normalAt(path,i);
+            var off = Math.min(totalRowW, localRadiusAt(path,i) * 0.6) * scale;
+            side.push({x:path[i].x+n.x*off, y:path[i].y+n.y*off});
+        }
+        return side;
+    }
+    // Build the whirl's erase-mask outline: path forward at offset 0, path
+    // backward at offset totalRowW. A curve offset by more than its own local
+    // radius folds back on itself -- confirmed live: the raw centerline path
+    // never self-intersects (capped by generatePath's orbit-revolution limit),
+    // but this offset copy sometimes still did, which is what broke erase-mode
+    // masking for whatever OTHER whirls were supposed to clip against it (both
+    // the canvas's nonzero-winding fill and the SVG export's even-odd
+    // point-in-polygon test give wrong "is this point covered" answers inside
+    // a self-intersecting shape's twisted region). The per-point local-radius
+    // clamp above catches most cases; this verifies the WHOLE outline is
+    // actually simple and progressively shrinks the global scale if not --
+    // guarantees a correct mask, at the cost of a tighter one in edge cases.
+    function buildSimpleOutline(path, totalRowW) {
+        var fwd = path.map(function(pt){ return {x:pt.x, y:pt.y}; });
+        var scales = [1, 0.6, 0.35, 0.15, 0.05, 0.01];
+        for (var s = 0; s < scales.length; s++) {
+            var outline = fwd.concat(_buildOffsetSide(path, totalRowW, scales[s]));
+            if (s === scales.length-1 || !_polySelfIntersects(outline)) return outline;
+        }
+    }
+
     function normAngleDiff(target, current) {
         var diff = target - current;
         return diff - Math.PI * 2 * Math.floor((diff + Math.PI) / (Math.PI * 2));
@@ -218,6 +282,22 @@ window.sketches['whirls'] = function(p) {
         maxSteps = Math.min(maxSteps, Math.max(160, Math.round(14000 / Math.max(1, PARAMS.whirlCount))));
         maxSteps = Math.round(maxSteps * PARAMS.cellLen / cl);
         var _sm = cl / PARAMS.cellLen;
+        // Orbit-based modes (sharedSwirl/curlyq) have no natural reason to ever
+        // exit the page bounds -- the center is well inside it -- so without a
+        // cap the path just spirals until maxSteps runs out, which can be 10+
+        // full revolutions around the same center (confirmed live: an 8402-point
+        // outline for a whirl whose orbit radius implies ~150-300 steps per lap).
+        // A path that loops back over itself that many times makes the whirl's
+        // own outline self-intersecting, which breaks the erase-mode masking
+        // (both the canvas's fill-rule-based mask and the SVG export's even-odd
+        // point-in-polygon clip) for whichever OTHER whirls it's supposed to be
+        // clipped against -- that's the "drawing over itself" density the
+        // operator was seeing, worst in sharedSwirl specifically because every
+        // whirl orbits the SAME shared center. Capping total orbital travel
+        // keeps the swirl shape (still gets a full decorative loop-and-a-half)
+        // without the pathological multi-lap tangle.
+        var totalOrbitRad = 0, prevOrbitAng = center ? Math.atan2(sy - center.y, sx - center.x) : 0;
+        var maxOrbitRad = Math.PI * 2 * 1.0;
         for (var i=0; i<maxSteps; i++) {
             var fieldAng = p.noise(x * scale, y * scale) * Math.PI * 2 + fieldAngleOffset;
             if (center) {
@@ -247,6 +327,12 @@ window.sketches['whirls'] = function(p) {
             y += Math.sin(ang) * cl;
             pts.push({x:x, y:y});
             if (x < -120 || x > w+120 || y < -120 || y > h+120) break;
+            if (center) {
+                var curOrbitAng = Math.atan2(y - center.y, x - center.x);
+                totalOrbitRad += Math.abs(normAngleDiff(curOrbitAng, prevOrbitAng));
+                prevOrbitAng = curOrbitAng;
+                if (totalOrbitRad > maxOrbitRad) break;
+            }
         }
         var pad=80, s=0, e=pts.length-1;
         while (s < e && !inBounds(pts[s],w,h,pad)) s++;
@@ -324,12 +410,7 @@ window.sketches['whirls'] = function(p) {
         }
         if (!cells.length) return null;
 
-        var outline=[];
-        for (var i=0; i<path.length; i++) outline.push({x:path[i].x, y:path[i].y});
-        for (var i=path.length-1; i>=0; i--) {
-            var n=normalAt(path,i);
-            outline.push({x:path[i].x+n.x*totalRowW, y:path[i].y+n.y*totalRowW});
-        }
+        var outline = buildSimpleOutline(path, totalRowW);
         return {cells:cells, outline:outline, zIndex:zIndex, rows:rows};
     }
 
