@@ -50,7 +50,13 @@
   "pen_width_mm": 0.4,
   "pens": [],
   "planner_path": "pl0tb0t_toolplan.json",
-  "port": "/dev/ttyUSB0",
+  "port": "/dev/ttyUSB1",
+  "show_palette": [
+    "",
+    "",
+    "",
+    ""
+  ],
   "sig_custom_msg": "Lake Test",
   "sig_enabled": true,
   "sig_font": "ef",

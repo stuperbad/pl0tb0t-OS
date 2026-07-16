@@ -18,5 +18,10 @@ window.__autonomousManifest = [
     { file: "scripts/autonomous_sketches/turing.js" },
     { file: "scripts/autonomous_sketches/girih.js" },
     { file: "scripts/autonomous_sketches/chladni.js" },
-    { file: "scripts/autonomous_sketches/riverdelta.js" }
+    { file: "scripts/autonomous_sketches/riverdelta.js" },
+    { file: "scripts/autonomous_sketches/stitchwork.js" },
+    { file: "scripts/autonomous_sketches/ridgeline.js" },
+    { file: "scripts/autonomous_sketches/circlepack.js" },
+    { file: "scripts/autonomous_sketches/automaton.js" },
+    { file: "scripts/autonomous_sketches/dendrite.js" }
 ];
