@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.171"
+__version__ = "0.5.172"
 import os
 import sys
 import time
@@ -74,7 +74,10 @@ if has_display:
 # Core data + persistence
 # ---------------------------------------------------------------------------
 
-CONFIG_PATH = "pl0tb0t_config.json"   # unified config + tools file
+# Anchored to the script directory, NOT the cwd -- a relative path silently
+# read/wrote a different config when the app was launched from elsewhere
+# (a stale ~/pl0tb0t_config.json from exactly that still exists).
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pl0tb0t_config.json")   # unified config + tools file
 
 
 PEN_TYPES = ["stabilo", "pilot", "micron", "sharpie"]
