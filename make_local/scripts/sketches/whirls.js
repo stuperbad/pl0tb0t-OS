@@ -101,6 +101,7 @@ window.sketches['whirls'] = function(p) {
             { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'textures',
               options: [
                 { value: 'contour', label: 'Contour' },
+                { value: 'spiral', label: 'Spiral' },
                 { value: 'hatch', label: 'Hatch' },
                 { value: 'sketchHatch', label: 'Chaotic hatch' },
                 { value: 'squiggleHatch', label: 'Squiggle hatch' },
@@ -503,8 +504,8 @@ window.sketches['whirls'] = function(p) {
     }
 
     // Generate symbol segments centered at origin (unrotated), given half-size s
-    function effectiveHatchDensity() {
-        return plotFills.getEffectiveDensity();
+    function effectiveHatchDensity(style) {
+        return plotFills.getEffectiveDensity(style);
     }
 
     function getCellFillStyle(cell) {
@@ -544,7 +545,7 @@ window.sketches['whirls'] = function(p) {
     function fillLinesForCell(cell) {
         var style = getCellFillStyle(cell);
         var hatchDeg = cell.tangAng * 180 / Math.PI + 90 + plotFills.getFillAngle();
-        var density = effectiveHatchDensity();
+        var density = effectiveHatchDensity(style);
         var spacing = (paper.DPI / 25.4) / density;
         var phase = (cell.colorIdx % 100000) * 0.001;
         if (style === 'zigzagHatch')   return zigzagQuad(cell.quad, hatchDeg, density, phase);
@@ -758,11 +759,15 @@ window.sketches['whirls'] = function(p) {
             p.stroke(getCellColor(cell));
             p.strokeWeight(strokeW);
             var _hDeg = cell.tangAng*180/Math.PI + 90 + plotFills.getFillAngle();
-            var _dens = effectiveHatchDensity();
+            var _dens = effectiveHatchDensity(_style);
             var _sp = (paper.DPI/25.4)/_dens;
             var _ph = (cell.colorIdx % 100000)*0.001;
             if (_style) {
-            if (_style === 'contour') {
+            if (_style === 'spiral') {
+                var _spoly = cell.innerPts.slice();
+                for (var _sri = cell.outerPts.length - 1; _sri >= 0; _sri--) _spoly.push(cell.outerPts[_sri]);
+                plotFills.drawSpiralPoly(ctx, _spoly, _sp);
+            } else if (_style === 'contour') {
                 var _np = cell.innerPts.length;
                 var _wS = Math.hypot(cell.outerPts[0].x-cell.innerPts[0].x, cell.outerPts[0].y-cell.innerPts[0].y);
                 var _wE = Math.hypot(cell.outerPts[_np-1].x-cell.innerPts[_np-1].x, cell.outerPts[_np-1].y-cell.innerPts[_np-1].y);
@@ -896,10 +901,30 @@ window.sketches['whirls'] = function(p) {
                     return;
                 }
                 var hatchDeg = cell.tangAng*180/Math.PI + 90 + plotFills.getFillAngle();
-                var density = effectiveHatchDensity();
+                var density = effectiveHatchDensity(style);
                 var spacing = (paper.DPI/25.4)/density;
                 var phase = (cell.colorIdx % 100000)*0.001;
                 if (plotFills.getFillProb() < 1 && ((cell.colorIdx >>> 0) % 997) / 997 >= plotFills.getFillProb()) return;
+
+                if (style === 'spiral') {
+                    var spoly = cell.innerPts.slice();
+                    for (var sri = cell.outerPts.length - 1; sri >= 0; sri--) spoly.push(cell.outerPts[sri]);
+                    var spts = plotFills.spiralPolyPts(spoly, spacing);
+                    if (spts.length >= 2) {
+                        var sclip = [];
+                        for (var spj = 0; spj < spts.length - 1; spj++) {
+                            var ssegs = [{ x1: spts[spj].x, y1: spts[spj].y, x2: spts[spj + 1].x, y2: spts[spj + 1].y }];
+                            clipOutlines.forEach(function(ol){var nx=[];ssegs.forEach(function(s){Array.prototype.push.apply(nx,clipLineOutsidePoly(s.x1,s.y1,s.x2,s.y2,ol));});ssegs=nx;});
+                            ssegs.forEach(function(s){var cs=clipLineToRect(s.x1,s.y1,s.x2,s.y2,mp,mp,dims.width-2*mp,dims.height-2*mp);if(cs)sclip.push(cs);});
+                        }
+                        if (sclip.length) {
+                            var spd = 'M'+fmt(sclip[0].x1)+' '+fmt(sclip[0].y1), slx = sclip[0].x1, sly = sclip[0].y1;
+                            sclip.forEach(function(seg){ if (Math.hypot(seg.x1-slx, seg.y1-sly) > 0.5) spd += ' M'+fmt(seg.x1)+' '+fmt(seg.y1); spd += ' L'+fmt(seg.x2)+' '+fmt(seg.y2); slx = seg.x2; sly = seg.y2; });
+                            parts.push('<path d="'+spd+'" fill="none" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round" stroke-linejoin="round"/>');
+                        }
+                    }
+                    return;
+                }
 
                 if (style === 'contour') {
                     var cnp = cell.innerPts.length;

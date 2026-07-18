@@ -690,6 +690,27 @@
                 if (params && !params.some(function(p){return p.id==='fillDensity';}) && !(registeredApi && registeredApi.hideGlobalFillIds && registeredApi.hideGlobalFillIds.indexOf('fillDensity') !== -1)) {
                     params = params.concat([{ id:'fillDensity', label:'Fill density', type:'range', min:30, max:150, step:5, value:50, group:'textures', showModeHidden:true }]);
                 }
+                // Per-fill density multipliers: one appears for each fill that is
+                // currently selected (structural fills watch 'fillStyle', scatter
+                // fills watch 'scatterFill'). Each scales the global Fill density
+                // for just that fill, default 1x.
+                if (params && !(registeredApi && registeredApi.hideGlobalFillIds && registeredApi.hideGlobalFillIds.indexOf('fillDensity') !== -1)) {
+                    var _fillMultDefs = [
+                        {k:'contour',n:'Contour',w:'fillStyle'}, {k:'spiral',n:'Spiral',w:'fillStyle'},
+                        {k:'hatch',n:'Hatch',w:'fillStyle'}, {k:'sketchHatch',n:'Chaotic hatch',w:'fillStyle'},
+                        {k:'squiggleHatch',n:'Squiggle',w:'fillStyle'}, {k:'zigzagHatch',n:'Zigzag',w:'fillStyle'},
+                        {k:'crosshatch',n:'Crosshatch',w:'fillStyle'}, {k:'waves',n:'Waves',w:'fillStyle'},
+                        {k:'sprigFill',n:'Scatter sprig',w:'scatterFill'}, {k:'ribbonFill',n:'Scatter ribbon',w:'scatterFill'},
+                        {k:'crossFill',n:'Scatter cross',w:'scatterFill'}, {k:'asteriskFill',n:'Scatter asterisk',w:'scatterFill'}
+                    ];
+                    _fillMultDefs.forEach(function(fm){
+                        var pid = 'fillMult_' + fm.k;
+                        if (!params.some(function(p){ return p.id === pid; })) {
+                            params = params.concat([{ id:pid, label:fm.n + ' density \u00d7', type:'range', min:0.25, max:3, step:0.25, value:1, group:'textures', showModeHidden:true,
+                                visibleWhen:[{ param: fm.w, values:[fm.k] }] }]);
+                        }
+                    });
+                }
                 if (params && !params.some(function(p){return p.id==='fillProb';}) && !(registeredApi && registeredApi.hideGlobalFillIds && registeredApi.hideGlobalFillIds.indexOf('fillProb') !== -1)) {
                     params = params.concat([{ id:'fillProb', label:'% cells filled', type:'range', min:0, max:100, step:5, value:100, group:'textures', showModeHidden:true }]);
                 }
@@ -1193,6 +1214,7 @@
                             else if (id === 'fillImperfection') window.plotFills.setFillImperfection(Number(pv));
                             else if (id === 'fillDensity') window.plotFills.setFillDensity(Number(pv));
                             else if (id === 'fillProb') window.plotFills.setFillProb(Number(pv) / 100);
+                            else if (id.indexOf('fillMult_') === 0) window.plotFills.setFillMultiplier(id.slice(9), Number(pv));
                             else if (id === 'penLiftFills') window.plotFills.setPenLift(pv === 'on');
                             else if (id === 'scatterFill') { var _sf; try { _sf = JSON.parse(pv); } catch(e) { _sf = [pv]; } if (!Array.isArray(_sf)) _sf = [String(pv)]; window.plotFills.setScatterStyles(_sf.filter(Boolean)); }
                         }
@@ -1724,6 +1746,7 @@
                                     if (pdef.id === 'fillImperfection') { window.plotFills && window.plotFills.setFillImperfection(v); }
                                     if (pdef.id === 'fillDensity')      { window.plotFills && window.plotFills.setFillDensity(v); }
                                     if (pdef.id === 'fillProb')         { window.plotFills && window.plotFills.setFillProb(v / 100); }
+                                    if (pdef.id.indexOf('fillMult_') === 0) { window.plotFills && window.plotFills.setFillMultiplier(pdef.id.slice(9), v); }
                                     if (registeredApi && typeof registeredApi.setParam === 'function') {
                                         try { registeredApi.setParam(pdef.id, v); } catch(e){}
                                     }

@@ -23,9 +23,16 @@ window.plotFills = (function () {
     var _fillDensity = 50;
     function setFillDensity(v) { _fillDensity = Math.max(10, Number(v) || 50); }
     function getFillDensity() { return _fillDensity; }
-    function getEffectiveDensity() {
+    // Per-fill-style density multipliers (default 1x) that scale on top of the
+    // global density, so each selected fill can be made denser/sparser
+    // independently without touching the others.
+    var _fillMult = {};
+    function setFillMultiplier(style, m) { if (style) _fillMult[style] = Math.max(0.25, Math.min(4, Number(m) || 1)); }
+    function getFillMultiplier(style) { return (style && _fillMult[style] != null) ? _fillMult[style] : 1; }
+    function getEffectiveDensity(style) {
         var penMm = Math.max(0.1, Number(window._pl0tPenWidthMm) || 0.4);
-        return _fillDensity / (penMm * 100);
+        var base = _fillDensity / (penMm * 100);
+        return style ? base * getFillMultiplier(style) : base;
     }
 
     var _fillProb = 1.0;
@@ -341,6 +348,39 @@ window.plotFills = (function () {
             }
         }
         return d;
+    }
+
+    // ── Spiral fill (continuous inward spiral of the polygon edges) ──────────
+    // Like contour rings, but the path spirals CONTINUOUSLY inward instead of
+    // drawing stacked closed loops: within each turn it interpolates from one
+    // inset ring toward the next, so it reads as one smooth spiral clipped to
+    // the shape (one continuous pen stroke — plotter-friendly). insetPoly
+    // preserves vertex count, so consecutive rings have matching vertices.
+    function spiralPolyPts(poly, spacing) {
+        if (!poly || poly.length < 3 || !(spacing > 0)) return [];
+        var rings = [poly].concat(contourPolyRows(poly, spacing));
+        var pts = [];
+        for (var k = 0; k < rings.length - 1; k++) {
+            var A = rings[k], B = rings[k + 1], na = A.length, nb = B.length;
+            for (var j = 0; j < na; j++) {
+                var t = j / na, bj = j < nb ? j : nb - 1;
+                pts.push({ x: A[j].x + (B[bj].x - A[j].x) * t, y: A[j].y + (B[bj].y - A[j].y) * t });
+            }
+        }
+        var last = rings[rings.length - 1];
+        for (var m = 0; m < last.length; m++) pts.push({ x: last[m].x, y: last[m].y });
+        return pts;
+    }
+    function spiralPolyPathD(poly, spacing) {
+        var pts = spiralPolyPts(poly, spacing);
+        if (pts.length < 2) return '';
+        var d = 'M' + fmt(pts[0].x) + ' ' + fmt(pts[0].y);
+        for (var i = 1; i < pts.length; i++) d += ' L' + fmt(pts[i].x) + ' ' + fmt(pts[i].y);
+        return d;
+    }
+    function drawSpiralPoly(ctx, poly, spacing) {
+        var d = spiralPolyPathD(poly, spacing);
+        if (d && typeof Path2D !== 'undefined') ctx.stroke(new Path2D(d));
     }
 
     // Canvas: draw contour rows — alternating direction, connected.
@@ -923,6 +963,7 @@ window.plotFills = (function () {
     // Labeled fill styles for sketch param dropdowns.
     var FILL_STYLE_OPTIONS = [
         { value: 'contour',      label: 'Contour' },
+        { value: 'spiral',       label: 'Spiral' },
         { value: 'hatch',        label: 'Hatch' },
         { value: 'sketchHatch',  label: 'Chaotic hatch' },
         { value: 'squiggleHatch',label: 'Squiggle' },
@@ -948,7 +989,8 @@ window.plotFills = (function () {
         arr = arr.filter(function (x) { return x && x !== 'none' && x !== 'plain'; });
         if (!arr.length) return [];
         var idx = Math.abs(seed || 0) % arr.length;
-        return fillPolyD(poly, arr[idx], angleDeg, spacing, seed);
+        var _st = arr[idx], _m = getFillMultiplier(_st);
+        return fillPolyD(poly, _st, angleDeg, _m > 0 ? spacing / _m : spacing, seed);
     }
 
     // Fill one polygon with any shared style. Returns an array of SVG path-d
@@ -962,6 +1004,7 @@ window.plotFills = (function () {
         function pushRows(rows) { var d = connectedPathD(rows); if (d) out.push(d); }
         if (style === 'none') return [];
         if (style === 'contour') { var dc = contourConnectedPathD(contourPolyRows(poly, spacing)); if (dc) out.push(dc); }
+        else if (style === 'spiral') { var dsp = spiralPolyPathD(poly, spacing); if (dsp) out.push(dsp); }
         else if (style === 'waves') { var dw = waveConnectedPathD(poly, angleDeg, spacing, ph); if (dw) out.push(dw); }
         else if (style === 'zigzagHatch') { pushRows(zigzagPolyRows(poly, angleDeg, spacing, ph)); }
         else if (style === 'squiggleHatch') { pushRows(squiggleRows(hatchPolyRows(poly, angleDeg, spacing), spacing * 0.8, ph, spacing * (0.4 + imp))); }
@@ -995,6 +1038,9 @@ window.plotFills = (function () {
         insetPoly:              insetPoly,
         contourPolyRows:        contourPolyRows,
         contourConnectedPathD:  contourConnectedPathD,
+        spiralPolyPts:          spiralPolyPts,
+        spiralPolyPathD:        spiralPolyPathD,
+        drawSpiralPoly:         drawSpiralPoly,
         drawContourRows:        drawContourRows,
         drawContourFlow:        drawContourFlow,
         contourFlowPathD:       contourFlowPathD,
@@ -1013,6 +1059,8 @@ window.plotFills = (function () {
         getFillImperfection:    getFillImperfection,
         setFillDensity:         setFillDensity,
         getFillDensity:         getFillDensity,
+        setFillMultiplier:      setFillMultiplier,
+        getFillMultiplier:      getFillMultiplier,
         getEffectiveDensity:    getEffectiveDensity,
         setFillProb:            setFillProb,
         getFillProb:            getFillProb,
