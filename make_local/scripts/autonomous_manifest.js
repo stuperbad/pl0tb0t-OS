@@ -25,5 +25,6 @@ window.__autonomousManifest = [
     { file: "scripts/autonomous_sketches/automaton.js" },
     { file: "scripts/autonomous_sketches/dendrite.js" },
     { file: "scripts/autonomous_sketches/phyllotaxis.js" },
-    { file: "scripts/autonomous_sketches/penrose.js" }
+    { file: "scripts/autonomous_sketches/penrose.js" },
+    { file: "scripts/autonomous_sketches/lsystem.js" }
 ];
