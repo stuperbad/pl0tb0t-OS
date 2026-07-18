@@ -2011,11 +2011,14 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
-            // The far-left global Settings panel (Paper/Advanced authorship
-            // params) is a Home-mode authoring surface -- it must NOT appear in
-            // Show mode. (The online/web UI can surface paper size separately.)
+            // Three modes:
+            //   full ('Home') - full authoring surface
+            //   fast ('Show') - gallery/performance: no global Settings column
+            //   web           - online: like Show, but KEEPS the global Settings
+            //                   column so paper size etc. are available online
+            var _isWeb = (mode === 'web');
             var _gc = document.getElementById('global-col');
-            if (_gc) _gc.style.display = _isHome ? '' : 'none';
+            if (_gc) _gc.style.display = (_isHome || _isWeb) ? '' : 'none';
             // Lock in / restore hidden numeric params' Show defaults (Edit layout
             // mode). Restoring on the way back to Home mode is what keeps this from
             // clobbering art in progress -- see applyShowModeLockedDefaults above.

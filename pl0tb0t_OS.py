@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.172"
+__version__ = "0.5.173"
 import os
 import sys
 import time
@@ -1593,15 +1593,22 @@ if has_display:
             self._render_mode = 'full'
             self._render_mode_btn = QPushButton('Mode: Home ■ (full hatch)')
             self._render_mode_btn.setToolTip(
-                'Show Mode: canvas-tile fills, fast for live use\n'
-                'Home Mode: full geometry fills, higher quality'
+                'Home: full authoring surface (all settings + global Settings column)\n'
+                'Show: gallery/performance - no global Settings column, home-only params hidden\n'
+                'Web:  mirrors the online studio - like Show, but keeps paper/global Settings'
             )
+            def _mode_label(m):
+                return {'full': 'Mode: Home ■ (full authoring)',
+                        'fast': 'Mode: Show ► (gallery/fast)',
+                        'web':  'Mode: Web ● (online studio)'}.get(m, 'Mode: Home ■')
+
             def _toggle_render_mode():
-                self._render_mode = 'full' if self._render_mode == 'fast' else 'fast'
+                # Cycle Home -> Show -> Web -> Home
+                _order = ['full', 'fast', 'web']
+                _cur = self._render_mode if self._render_mode in _order else 'full'
+                self._render_mode = _order[(_order.index(_cur) + 1) % len(_order)]
                 mode = self._render_mode
-                self._render_mode_btn.setText(
-                    'Mode: Show ► (fast hatch)' if mode == 'fast' else 'Mode: Home ■ (full hatch)'
-                )
+                self._render_mode_btn.setText(_mode_label(mode))
                 self._make_webview.page().runJavaScript(
                     f"window._pl0tMode = '{mode}';"
                     f"if(window.makeSketchApp&&window.makeSketchApp.setRenderMode)"

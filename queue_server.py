@@ -38,10 +38,11 @@ def _gen_job_id(db):
         if not db.execute("SELECT 1 FROM jobs WHERE id=?", (candidate,)).fetchone():
             return candidate
     return str(uuid.uuid4())[:8]  # fallback
-from flask import Flask, request, jsonify, send_file, abort
+from flask import Flask, request, jsonify, send_file, abort, send_from_directory
 
 BASE_DIR  = Path(__file__).parent
 QUEUE_DIR = BASE_DIR / "queue_svgs"
+MAKE_DIR  = BASE_DIR / "make_local"        # the studio UI (same files the desktop Make tab loads)
 DB_PATH   = BASE_DIR / "queue.db"
 API_KEY   = os.environ.get("QUEUE_API_KEY", "pl0tb0t-secret")
 PORT      = int(os.environ.get("QUEUE_PORT", "5001"))
@@ -524,6 +525,36 @@ def plot_request(job_id):
         _machine_state["plot_requested"] = job_id
         _machine_state["updated_at"] = time.time()
     return jsonify({"ok": True, "plot_requested": job_id})
+
+# ── Online studio ─────────────────────────────────────────────────────────────
+# Serves the SAME make_local/ UI the desktop Make tab uses, in 'web' mode.
+# Generation is 100% client-side, so this runs on the visitor's machine and
+# POSTs finished jobs back to /jobs here. Machine control stays Pi-only.
+_STUDIO_INJECT = (
+    "<script>"
+    "window.QUEUE_URL = location.origin;"
+    "window.QUEUE_API_KEY = '__API_KEY__';"
+    "window._pl0tMode = 'web';"
+    "</script>"
+)
+
+
+@app.route("/studio/")
+def studio():
+    index = MAKE_DIR / "index.html"
+    if not index.exists():
+        abort(404)
+    html = index.read_text(encoding="utf-8")
+    # Inject before the first script so QUEUE_URL/_pl0tMode exist for every script.
+    html = html.replace("<head>", "<head>" + _STUDIO_INJECT.replace("__API_KEY__", API_KEY), 1)
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/studio/<path:sub>")
+def studio_assets(sub):
+    # Relative asset paths resolve under /studio/ thanks to the trailing slash.
+    return send_from_directory(str(MAKE_DIR), sub)
+
 
 @app.route("/mobile")
 def mobile():
