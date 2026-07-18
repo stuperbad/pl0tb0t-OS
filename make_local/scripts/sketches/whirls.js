@@ -442,6 +442,7 @@ window.sketches['whirls'] = function(p) {
                     outerPts: outerPts,
                     quad: [innerPts[0], outerPts[0], outerPts[_np-1], innerPts[_np-1]],
                     colorIdx: cellColorIdx(zIndex, cellIdx, r),
+                    fillSeq: cellColorIdx(zIndex, r, cellIdx),
                     tangAng: tangAng,
                     tangAngEnd: tangAngEnd
                 });
@@ -508,11 +509,12 @@ window.sketches['whirls'] = function(p) {
         return plotFills.getEffectiveDensity(style);
     }
 
+    function _mixFill(h) { h = Math.imul((h >>> 0) ^ (h >>> 16), 0x45d9f3b); h = Math.imul(h ^ (h >>> 16), 0x45d9f3b); return (h ^ (h >>> 16)) >>> 0; }
     function getCellFillStyle(cell) {
         var styles = (PARAMS.fillStyles || []).concat(plotFills.getScatterStyles());
         if (!styles.length) return 'hatch';
         if (styles.length === 1) return styles[0];
-        var idx = (Math.abs(cell.colorIdx ^ 0xDEAD5EED) >>> 0) % styles.length;
+        var idx = _mixFill(cell.fillSeq != null ? cell.fillSeq : cell.colorIdx) % styles.length;
         return styles[idx];
     }
 

@@ -706,7 +706,7 @@
                     _fillMultDefs.forEach(function(fm){
                         var pid = 'fillMult_' + fm.k;
                         if (!params.some(function(p){ return p.id === pid; })) {
-                            params = params.concat([{ id:pid, label:fm.n + ' density \u00d7', type:'range', min:0.25, max:3, step:0.25, value:1, group:'textures', showModeHidden:true,
+                            params = params.concat([{ id:pid, label:fm.n + ' density', type:'mult', min:0.25, max:3, step:0.25, value:1, group:'textures', showModeHidden:true,
                                 visibleWhen:[{ param: fm.w, values:[fm.k] }] }]);
                         }
                     });
@@ -1722,6 +1722,30 @@
                                 _inp.addEventListener('input', _syncChips);
                             })(input, _segCtrl, pdef.options || [], _multi, !!pdef.requireOne);
                             input._segCtrl = _segCtrl;
+                        } else if (pdef.type === 'mult') {
+                            // Compact [-] value x [+] stepper (tiny multiplier buttons),
+                            // instead of a full-width slider per fill. Hidden input holds
+                            // the value; the visible control is appended via _segCtrl.
+                            input = document.createElement('input');
+                            input.type = 'hidden';
+                            var _mmin = (typeof pdef.min !== 'undefined') ? pdef.min : 0.25;
+                            var _mmax = (typeof pdef.max !== 'undefined') ? pdef.max : 3;
+                            var _mstep = (typeof pdef.step !== 'undefined') ? pdef.step : 0.25;
+                            input.value = (typeof pdef.value !== 'undefined') ? String(pdef.value) : '1';
+                            var _stp = document.createElement('div');
+                            _stp.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+                            function _mkMultBtn(t) { var b = document.createElement('button'); b.type = 'button'; b.textContent = t; b.style.cssText = 'width:22px;height:22px;line-height:1;border:1px solid #ccc;border-radius:4px;background:#f5f5f5;cursor:pointer;font-size:14px;padding:0;'; return b; }
+                            var _dec = _mkMultBtn('\u2212'), _inc = _mkMultBtn('+');
+                            var _disp = document.createElement('span'); _disp.style.cssText = 'min-width:36px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums;';
+                            function _fmtMult(v) { return (Math.round(v * 100) / 100) + '\u00d7'; }
+                            function _setMult(v) { v = Math.max(_mmin, Math.min(_mmax, Math.round(v / _mstep) * _mstep)); input.value = String(v); _disp.textContent = _fmtMult(v); input.dispatchEvent(new Event('input')); }
+                            _disp.textContent = _fmtMult(Number(input.value));
+                            _dec.addEventListener('click', function() { _setMult(Number(input.value) - _mstep); });
+                            _inc.addEventListener('click', function() { _setMult(Number(input.value) + _mstep); });
+                            input.addEventListener('input', function() { _disp.textContent = _fmtMult(Number(input.value)); });
+                            _stp.appendChild(_dec); _stp.appendChild(_disp); _stp.appendChild(_inc);
+                            input._segCtrl = _stp;
+                            if (spanValue) spanValue.style.display = 'none';
                         } else if (pdef.type === 'color') {
                             input = document.createElement('input');
                             input.type = 'color';
@@ -1764,6 +1788,7 @@
                                 routePaperChange(pdef.id, val);
                                 if (pdef.id === 'plotHorizontal') { window._pl0tPlotHorizontal = (val === 'on'); if (typeof window._pl0tApplyOrientation === 'function') window._pl0tApplyOrientation(); }
                                 if (pdef.id === 'drawOrder')      { window._pl0tDrawOrder = val; }
+                                if (pdef.id.indexOf('fillMult_') === 0) { window.plotFills && window.plotFills.setFillMultiplier(pdef.id.slice(9), Number(val)); }
                                 if (pdef.id === 'delayRender')    { window._pl0tDelayRender = (val === 'on'); var _rb = document.getElementById('renderNow'); if (_rb) _rb.style.display = (val === 'on') ? '' : 'none'; }
                                 if (registeredApi && typeof registeredApi.setParam === 'function') {
                                     try { registeredApi.setParam(pdef.id, val); } catch(e){}
@@ -1986,6 +2011,11 @@
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _isHome ? '' : 'none';
             });
+            // The far-left global Settings panel (Paper/Advanced authorship
+            // params) is a Home-mode authoring surface -- it must NOT appear in
+            // Show mode. (The online/web UI can surface paper size separately.)
+            var _gc = document.getElementById('global-col');
+            if (_gc) _gc.style.display = _isHome ? '' : 'none';
             // Lock in / restore hidden numeric params' Show defaults (Edit layout
             // mode). Restoring on the way back to Home mode is what keeps this from
             // clobbering art in progress -- see applyShowModeLockedDefaults above.
