@@ -378,6 +378,34 @@ window.plotFills = (function () {
         for (var i = 1; i < pts.length; i++) d += ' L' + fmt(pts[i].x) + ' ' + fmt(pts[i].y);
         return d;
     }
+    // Spiral segments CLIPPED to the source polygon. insetPoly is not robust
+    // when a shape's offset edges self-intersect (e.g. a whirl cell on a tight
+    // curve, where the ribbon width exceeds the bend radius) -- the inset rings
+    // can then wander outside the shape. Clipping every segment back to the
+    // source polygon guarantees the fill respects the shape edges no matter
+    // what the inset produced.
+    function spiralPolySegs(poly, spacing) {
+        var pts = spiralPolyPts(poly, spacing), out = [];
+        for (var i = 0; i + 1 < pts.length; i++) {
+            var pieces = _clipSegToPoly(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, poly);
+            for (var k = 0; k < pieces.length; k++) out.push(pieces[k]);
+        }
+        return out;
+    }
+    // Canvas: draw the clipped spiral (connected where segments are contiguous).
+    function drawSpiralPolyClipped(ctx, poly, spacing) {
+        var segs = spiralPolySegs(poly, spacing);
+        if (!segs.length) return;
+        ctx.beginPath();
+        var lx = null, ly = null;
+        for (var i = 0; i < segs.length; i++) {
+            var g = segs[i];
+            if (lx === null || Math.hypot(g.x1 - lx, g.y1 - ly) > 0.5) ctx.moveTo(g.x1, g.y1);
+            ctx.lineTo(g.x2, g.y2);
+            lx = g.x2; ly = g.y2;
+        }
+        ctx.stroke();
+    }
     function drawSpiralPoly(ctx, poly, spacing) {
         var d = spiralPolyPathD(poly, spacing);
         if (d && typeof Path2D !== 'undefined') ctx.stroke(new Path2D(d));
@@ -1039,6 +1067,8 @@ window.plotFills = (function () {
         contourPolyRows:        contourPolyRows,
         contourConnectedPathD:  contourConnectedPathD,
         spiralPolyPts:          spiralPolyPts,
+        spiralPolySegs:         spiralPolySegs,
+        drawSpiralPolyClipped:  drawSpiralPolyClipped,
         spiralPolyPathD:        spiralPolyPathD,
         drawSpiralPoly:         drawSpiralPoly,
         drawContourRows:        drawContourRows,

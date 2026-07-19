@@ -768,7 +768,7 @@ window.sketches['whirls'] = function(p) {
             if (_style === 'spiral') {
                 var _spoly = cell.innerPts.slice();
                 for (var _sri = cell.outerPts.length - 1; _sri >= 0; _sri--) _spoly.push(cell.outerPts[_sri]);
-                plotFills.drawSpiralPoly(ctx, _spoly, _sp);
+                plotFills.drawSpiralPolyClipped(ctx, _spoly, _sp);
             } else if (_style === 'contour') {
                 var _np = cell.innerPts.length;
                 var _wS = Math.hypot(cell.outerPts[0].x-cell.innerPts[0].x, cell.outerPts[0].y-cell.innerPts[0].y);
@@ -911,11 +911,11 @@ window.sketches['whirls'] = function(p) {
                 if (style === 'spiral') {
                     var spoly = cell.innerPts.slice();
                     for (var sri = cell.outerPts.length - 1; sri >= 0; sri--) spoly.push(cell.outerPts[sri]);
-                    var spts = plotFills.spiralPolyPts(spoly, spacing);
-                    if (spts.length >= 2) {
+                    var sbase = plotFills.spiralPolySegs(spoly, spacing);   // already clipped to the cell
+                    if (sbase.length) {
                         var sclip = [];
-                        for (var spj = 0; spj < spts.length - 1; spj++) {
-                            var ssegs = [{ x1: spts[spj].x, y1: spts[spj].y, x2: spts[spj + 1].x, y2: spts[spj + 1].y }];
+                        for (var spj = 0; spj < sbase.length; spj++) {
+                            var ssegs = [{ x1: sbase[spj].x1, y1: sbase[spj].y1, x2: sbase[spj].x2, y2: sbase[spj].y2 }];
                             clipOutlines.forEach(function(ol){var nx=[];ssegs.forEach(function(s){Array.prototype.push.apply(nx,clipLineOutsidePoly(s.x1,s.y1,s.x2,s.y2,ol));});ssegs=nx;});
                             ssegs.forEach(function(s){var cs=clipLineToRect(s.x1,s.y1,s.x2,s.y2,mp,mp,dims.width-2*mp,dims.height-2*mp);if(cs)sclip.push(cs);});
                         }
