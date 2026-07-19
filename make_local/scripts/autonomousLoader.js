@@ -55,6 +55,9 @@
         if (!active) return;
         var P = {};
         Object.keys(active.paramState).forEach(function (k) { P[k] = active.paramState[k]; });
+        // One shared white artboard across all AI sketches, regardless of each
+        // sketch's own bgColor preset/default.
+        P.bgColor = '#ffffff';
         var svg;
         try {
             svg = active.entry.generate(active.seed, P);
@@ -63,6 +66,25 @@
             return;
         }
         svg = String(svg).replace(/^\s*<\?xml[^>]*\?>\s*/, '');
+
+        // AI sketches render straight to SVG (no p5 canvas), so the usual
+        // canvas-based drawSignaturePreview overlay (see makeSketch.js's
+        // _drawSignatureOverlay) doesn't apply here -- build the same signature
+        // as a real SVG <g> and splice it into the markup before it's injected.
+        if (window._signatureConfig && window._signatureConfig.enabled &&
+            window._signatureConfig.showPreview &&
+            window.Signature && typeof window.Signature.buildSignatureSVG === 'function' &&
+            window.makeSketchUtils) {
+            var dims = window.makeSketchUtils.getPaperPixels(P.paperSize);
+            var marginPx = window.makeSketchUtils.getMarginPixels(parseFloat(P.margin || 0.75));
+            var mmToPx = function (mm) { return window.makeSketchUtils.mmToPixels(mm); };
+            var _pal = Array.isArray(P.palette) ? P.palette : null;
+            var _sigCol = window.Signature.pickSignatureColor ? window.Signature.pickSignatureColor(_pal) : '#000000';
+            var sigG = window.Signature.buildSignatureSVG(window._signatureConfig, dims.width, dims.height,
+                marginPx, mmToPx, active.entry.name, active.seed, _sigCol);
+            if (sigG) svg = svg.replace(/<\/svg>\s*$/, sigG + '\n</svg>');
+        }
+
         var container = document.getElementById('make-sketch');
         if (container) container.innerHTML = svg;
     }
@@ -137,6 +159,7 @@
 
         window.sketchAPI = {
             regenerate: render,
+            redraw: render,
             reseed: reseed,
             randomize: randomize,
             togglePause: function () { return false; },
