@@ -6,20 +6,23 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# UTC, ISO8601 -- this log gets read cross-machine (the dashboard runs on the
+# PC, in a different timezone than the Pi), so a local-time string like
+# "01:34 BST" is ambiguous to whoever parses it. UTC with an explicit Z isn't.
 if [ -n "$(git status --porcelain)" ]; then
-  echo "$(date '+%F %T') uncommitted changes present, skipping auto-sync."
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) uncommitted changes present, skipping auto-sync."
   exit 0
 fi
 
 git fetch --quiet
 BEFORE=$(git rev-parse HEAD)
 git pull --ff-only --quiet 2>/dev/null || {
-  echo "$(date '+%F %T') pull skipped (not fast-forwardable or offline)."
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pull skipped (not fast-forwardable or offline)."
   exit 0
 }
 AFTER=$(git rev-parse HEAD)
 if [ "$BEFORE" != "$AFTER" ]; then
-  echo "$(date '+%F %T') pulled $BEFORE -> $AFTER"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pulled $BEFORE -> $AFTER"
 else
-  echo "$(date '+%F %T') already up to date."
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) already up to date."
 fi
