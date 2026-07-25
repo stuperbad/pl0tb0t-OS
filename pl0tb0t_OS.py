@@ -2914,18 +2914,25 @@ if has_display:
             root = Path(__file__).resolve().parent
             candidates = []  # (datetime, source_label, detail)
 
+            # Both sources are UTC (see _write_sync_marker and auto_sync.sh) --
+            # keep everything timezone-aware so comparisons can't silently go
+            # wrong the way a naive-local-time mix did during testing.
+            utc_now = datetime.datetime.now(datetime.timezone.utc)
+
             marker = root / "scripts" / ".last_launch_sync.json"
             try:
                 m = json.loads(marker.read_text())
-                candidates.append((datetime.datetime.fromisoformat(m["ts"]), "launch", m.get("outcome", "")))
+                ts = datetime.datetime.strptime(m["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                candidates.append((ts, "launch", m.get("outcome", "")))
             except Exception:
                 pass
 
             log = root / "scripts" / "auto_sync.log"
             try:
                 last_line = log.read_text().strip().splitlines()[-1]
-                ts_str = last_line[:19]  # "YYYY-MM-DD HH:MM:SS"
-                candidates.append((datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S"), "background", last_line[20:]))
+                ts_str = last_line[:20]  # "YYYY-MM-DDTHH:MM:SSZ"
+                ts = datetime.datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                candidates.append((ts, "background", last_line[21:]))
             except Exception:
                 pass
 
@@ -2936,7 +2943,7 @@ if has_display:
 
             candidates.sort(key=lambda c: c[0])
             when, source, detail = candidates[-1]
-            age_min = (datetime.datetime.now() - when).total_seconds() / 60
+            age_min = (utc_now - when).total_seconds() / 60
             age_str = f"{int(age_min)}m ago" if age_min < 60 else f"{age_min / 60:.1f}h ago"
 
             has_bg_timer = log.exists()
@@ -2944,7 +2951,7 @@ if has_display:
             icon = "⚠️" if stale else "🔄"
             self.sync_label.setText(f"{icon} synced {age_str}")
             self.sync_label.setToolTip(
-                f"Last git auto-sync: {source} ({detail}) at {when.strftime('%Y-%m-%d %H:%M:%S')}."
+                f"Last git auto-sync: {source} ({detail}) at {when.strftime('%Y-%m-%d %H:%M:%S')} UTC."
                 + ("\nNo background auto-sync timer detected on this machine (expected on the PC, not the Pi)."
                    if not has_bg_timer else
                    "\nBackground timer looks stale (expected every ~10 min) -- check `systemctl status pl0tb0t-autosync.timer`."
@@ -6462,7 +6469,11 @@ def _write_sync_marker(outcome, detail=""):
         marker = Path(__file__).resolve().parent / "scripts" / ".last_launch_sync.json"
         marker.parent.mkdir(exist_ok=True)
         marker.write_text(json.dumps({
-            "ts": datetime.datetime.now().isoformat(),
+            # UTC, matching auto_sync.log's format -- this file and that log get
+            # compared against each other in _refresh_sync_indicator, and against
+            # the dashboard's own clock on a different machine, so naive local
+            # time would be ambiguous (caught live: produced a negative age).
+            "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "outcome": outcome,
             "detail": detail[:200],
         }))
