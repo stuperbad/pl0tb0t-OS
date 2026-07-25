@@ -25,3 +25,4 @@ fix_*.py
 calibrate_estimator.py
 *.log
 *.pid
+scripts/.last_launch_sync.json

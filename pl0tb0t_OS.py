@@ -1113,6 +1113,11 @@ if has_display:
             self._status_timer.timeout.connect(self._poll_status)
             self._status_timer.start(500)
 
+            self._sync_indicator_timer = QTimer()
+            self._sync_indicator_timer.timeout.connect(self._refresh_sync_indicator)
+            self._sync_indicator_timer.start(120000)  # every 2 min -- background timer runs every ~10
+            self._refresh_sync_indicator()
+
             screen = QApplication.primaryScreen().size()
             self.resize(min(1400, screen.width() - 40), min(900, screen.height() - 60))
             self.setMinimumSize(900, 600)
@@ -1429,6 +1434,10 @@ if has_display:
             self._fullscreen_btn.setStyleSheet("QPushButton { border: 1px solid #aaa; border-radius: 4px; }")
             self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
             layout.addWidget(self._fullscreen_btn)
+
+            self.sync_label = QLabel("🔄 —")
+            self.sync_label.setFont(QFont("Arial", 9))
+            layout.addWidget(self.sync_label)
 
             ver = QLabel(f"v{__version__}")
             ver.setFont(QFont("Arial", 9))
@@ -2893,6 +2902,54 @@ if has_display:
             # Daemon pushes status automatically; this timer is kept for compat
             # but is a no-op unless daemon is unavailable.
             pass
+
+        def _refresh_sync_indicator(self):
+            """Shows how current this checkout is with GitHub: the more recent of
+            (a) this run's own launch-time pull (see _write_sync_marker) and
+            (b) the Pi's background systemd timer (scripts/auto_sync.log, only
+            present where that timer is installed). Green/normal when recent,
+            amber when the background timer looks stale (it runs every ~10 min,
+            so >30 min with no entry means it's probably not running)."""
+            import datetime
+            root = Path(__file__).resolve().parent
+            candidates = []  # (datetime, source_label, detail)
+
+            marker = root / "scripts" / ".last_launch_sync.json"
+            try:
+                m = json.loads(marker.read_text())
+                candidates.append((datetime.datetime.fromisoformat(m["ts"]), "launch", m.get("outcome", "")))
+            except Exception:
+                pass
+
+            log = root / "scripts" / "auto_sync.log"
+            try:
+                last_line = log.read_text().strip().splitlines()[-1]
+                ts_str = last_line[:19]  # "YYYY-MM-DD HH:MM:SS"
+                candidates.append((datetime.datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S"), "background", last_line[20:]))
+            except Exception:
+                pass
+
+            if not candidates:
+                self.sync_label.setText("🔄 no sync data")
+                self.sync_label.setToolTip("Neither a launch-time nor background auto-sync record was found.")
+                return
+
+            candidates.sort(key=lambda c: c[0])
+            when, source, detail = candidates[-1]
+            age_min = (datetime.datetime.now() - when).total_seconds() / 60
+            age_str = f"{int(age_min)}m ago" if age_min < 60 else f"{age_min / 60:.1f}h ago"
+
+            has_bg_timer = log.exists()
+            stale = has_bg_timer and age_min > 30
+            icon = "⚠️" if stale else "🔄"
+            self.sync_label.setText(f"{icon} synced {age_str}")
+            self.sync_label.setToolTip(
+                f"Last git auto-sync: {source} ({detail}) at {when.strftime('%Y-%m-%d %H:%M:%S')}."
+                + ("\nNo background auto-sync timer detected on this machine (expected on the PC, not the Pi)."
+                   if not has_bg_timer else
+                   "\nBackground timer looks stale (expected every ~10 min) -- check `systemctl status pl0tb0t-autosync.timer`."
+                   if stale else "")
+            )
 
         def _update_position_internal(self):
             """Read current position from daemon's last known state and refresh UI."""
@@ -6396,6 +6453,23 @@ def main():
         sys.exit(app.exec())
 
 
+def _write_sync_marker(outcome, detail=""):
+    """Records the outcome of a sync attempt so the UI's status-bar indicator
+    (see PlotterApp._refresh_sync_indicator) can show it without re-running
+    git itself. Best-effort -- a failure to write this never affects startup."""
+    try:
+        import datetime
+        marker = Path(__file__).resolve().parent / "scripts" / ".last_launch_sync.json"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text(json.dumps({
+            "ts": datetime.datetime.now().isoformat(),
+            "outcome": outcome,
+            "detail": detail[:200],
+        }))
+    except Exception:
+        pass
+
+
 def _self_update():
     """Pull latest committed changes before starting, so a plain restart is
     enough to pick up whatever the orchestrator (or the Pi's own auto-sync
@@ -6414,6 +6488,7 @@ def _self_update():
             return  # not a git checkout, or git unavailable -- nothing to do
         if status.stdout.strip():
             print("pl0tb0t-OS: uncommitted local changes present, skipping auto-update.")
+            _write_sync_marker("skipped_dirty", "uncommitted local changes")
             return
         subprocess.run(["git", "fetch", "--quiet"], cwd=repo_dir, timeout=15)
         pull = subprocess.run(
@@ -6422,10 +6497,13 @@ def _self_update():
         )
         if pull.returncode == 0:
             print("pl0tb0t-OS: checked for updates, starting.")
+            _write_sync_marker("ok", "pulled at launch")
         else:
             print(f"pl0tb0t-OS: auto-update skipped ({pull.stderr.strip()[:200]})")
+            _write_sync_marker("error", pull.stderr.strip())
     except Exception as e:
         print(f"pl0tb0t-OS: auto-update check failed ({e}), starting with current code.")
+        _write_sync_marker("error", str(e))
 
 
 if __name__ == "__main__":
