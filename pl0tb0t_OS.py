@@ -6396,5 +6396,38 @@ def main():
         sys.exit(app.exec())
 
 
+def _self_update():
+    """Pull latest committed changes before starting, so a plain restart is
+    enough to pick up whatever the orchestrator (or the Pi's own auto-sync
+    timer) has already pushed to GitHub. Safe by construction: only runs
+    before any app state exists, and skips entirely rather than risking
+    anything if there's uncommitted local work or git/network isn't
+    available -- worst case, we just start with whatever code is already
+    on disk, same as before this existed."""
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo_dir,
+            capture_output=True, text=True, timeout=5,
+        )
+        if status.returncode != 0:
+            return  # not a git checkout, or git unavailable -- nothing to do
+        if status.stdout.strip():
+            print("pl0tb0t-OS: uncommitted local changes present, skipping auto-update.")
+            return
+        subprocess.run(["git", "fetch", "--quiet"], cwd=repo_dir, timeout=15)
+        pull = subprocess.run(
+            ["git", "pull", "--ff-only", "--quiet"], cwd=repo_dir,
+            capture_output=True, text=True, timeout=15,
+        )
+        if pull.returncode == 0:
+            print("pl0tb0t-OS: checked for updates, starting.")
+        else:
+            print(f"pl0tb0t-OS: auto-update skipped ({pull.stderr.strip()[:200]})")
+    except Exception as e:
+        print(f"pl0tb0t-OS: auto-update check failed ({e}), starting with current code.")
+
+
 if __name__ == "__main__":
+    _self_update()
     main()
