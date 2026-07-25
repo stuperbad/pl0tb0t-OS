@@ -296,7 +296,7 @@
                 if (glyph.d) {
                     var charY = centY - h / 2;
                     parts.push('<g transform="translate(' + cx.toFixed(2) + ',' + charY.toFixed(2) +
-                               ') scale(' + h.toFixed(3) + ')">');
+                               ') scale(' + h.toFixed(3) + ')" stroke-width="' + (h > 0 ? (sw / h) : sw).toFixed(5) + '">');
                     parts.push('<path d="' + glyph.d.replace(/Z/gi, "") + '"/>');
                     parts.push('</g>');
                 }
