@@ -57,7 +57,7 @@ if has_display:
         QSplitter, QScrollArea, QSizePolicy, QToolBar,
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
         QDialog, QDialogButtonBox, QStackedWidget, QProgressDialog,
-        QRadioButton, QButtonGroup, QColorDialog,
+        QRadioButton, QButtonGroup, QColorDialog, QSpinBox,
     )
     from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
@@ -2770,6 +2770,27 @@ if has_display:
 
             layout.addLayout(_override_row("Draw:", "feed_override_slider"))
             layout.addLayout(_override_row("TC:", "tc_override_slider"))
+
+            # --- resume-from-line (recovery after a crash mid-draw) ---
+            resume_row = QHBoxLayout()
+            self.resume_line_cb = QCheckBox("Resume from line:")
+            self.resume_line_cb.setToolTip(
+                "For recovering after a crash/disconnect mid-draw. Skips to this line "
+                "instead of running the file from the start -- you're responsible for "
+                "jogging to the right position and loading the right tool/pen first. "
+                "A short G21/G90/G17 safety preamble is sent before resuming so units/"
+                "absolute-mode/plane are correct even if the controller was reset.")
+            self.resume_line_cb.toggled.connect(
+                lambda on: self.resume_line_spin.setEnabled(on))
+            resume_row.addWidget(self.resume_line_cb)
+            self.resume_line_spin = QSpinBox()
+            self.resume_line_spin.setRange(1, 100_000_000)
+            self.resume_line_spin.setValue(1)
+            self.resume_line_spin.setEnabled(False)
+            self.resume_line_spin.setFixedWidth(100)
+            resume_row.addWidget(self.resume_line_spin)
+            resume_row.addStretch()
+            layout.addLayout(resume_row)
 
             # --- run controls pinned to bottom ---
             btn_row = QHBoxLayout()
@@ -5911,6 +5932,10 @@ if has_display:
         def load_gcode_file(self, file_path: str, artboard_mm=None):
             self.gcode_path = file_path
             self.gcode_entry.setText(file_path)
+            # A resume-line from a previously loaded file is meaningless (or dangerous)
+            # against a different file -- don't let it carry over silently.
+            if getattr(self, "resume_line_cb", None) is not None:
+                self.resume_line_cb.setChecked(False)
             self._load_gcode_lines(file_path)
             self._build_plot_layer_bounds(file_path)
             self.parse_gcode_for_preview(file_path, artboard_mm=artboard_mm)
@@ -6198,13 +6223,26 @@ if has_display:
                     import tempfile
                     with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f_in:
                         raw_lines = f_in.readlines()
+                    cleaned = [c for c in (self._clean_gcode_line(r) for r in raw_lines) if c]
+                    # "Line N" here matches the G-code Text Viewer's numbering (cleaned,
+                    # non-blank/non-comment lines only, 1-indexed) -- same convention the
+                    # existing Send Selected/Next Line debug tool already uses.
+                    resume_active = self.resume_line_cb.isChecked()
+                    start_idx = 0
+                    if resume_active:
+                        start_idx = max(0, min(self.resume_line_spin.value() - 1, len(cleaned)))
+                        _debug_log(f"runner: resuming from cleaned-line {start_idx + 1}/{len(cleaned)}")
                     with tempfile.NamedTemporaryFile(
                             mode="w", suffix=".gcode", delete=False, encoding="utf-8") as f_tmp:
                         self._gcode_tmp_path = f_tmp.name
-                        for raw in raw_lines:
-                            line = self._clean_gcode_line(raw)
-                            if not line:
-                                continue
+                        if resume_active and start_idx > 0:
+                            # Re-establish modal state (units/absolute/plane) in case the
+                            # controller was reset since the crash -- same preamble this
+                            # codebase already uses when writing standalone G-code files.
+                            f_tmp.write("G21 ; mm mode\n")
+                            f_tmp.write("G90 ; absolute mode\n")
+                            f_tmp.write("G17 ; XY plane\n")
+                        for line in cleaned[start_idx:]:
                             line = self._apply_feed_override(line)
                             f_tmp.write(line + "\n")
                     _debug_log(f"runner: streaming {self._gcode_tmp_path}")
@@ -6233,6 +6271,11 @@ if has_display:
             self.gcode_pause_btn.setEnabled(False)
             self.gcode_pause_btn.setText("⏸ Pause")
             self.gcode_stop_btn.setEnabled(False)
+            # Auto-clear after every run (success, error, or stop) -- a resume point left
+            # checked would silently skip the start of the next plot, which is a much
+            # worse failure than having to re-enter it after an actual crash recovery.
+            if getattr(self, "resume_line_cb", None) is not None:
+                self.resume_line_cb.setChecked(False)
             if hasattr(self, "_queue_cards_vlay"):
                 self._queue_rebuild_cards(list(getattr(self, "_queue_jobs_cache", {}).values()))
 
