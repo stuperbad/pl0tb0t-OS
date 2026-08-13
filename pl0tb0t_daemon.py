@@ -129,7 +129,7 @@ class GrblDaemon:
                     self._ser.write((line.strip() + "\n").encode("utf-8"))
                 if not wait_ok:
                     return [], None
-                lines, err = [], None
+                lines, err, got_ok = [], None, False
                 deadline = time.time() + timeout
                 while time.time() < deadline:
                     try:
@@ -139,6 +139,7 @@ class GrblDaemon:
                     lines.append(resp)
                     rl = resp.lower()
                     if rl.startswith("ok"):
+                        got_ok = True
                         break
                     if rl.startswith("[msg:"):
                         # Informational message, ignore
@@ -151,6 +152,10 @@ class GrblDaemon:
                     if rl.startswith("alarm"):
                         err = resp
                         break
+                # If we were waiting for ok but never got it, that's an error
+                if wait_ok and not got_ok:
+                    if not err:
+                        err = "timeout: no response from controller"
                 return lines, err
             finally:
                 self._capturing = False
@@ -297,7 +302,10 @@ class GrblDaemon:
             self._homed = True
             _log("Homing complete")
             self._broadcast_status()
-        return {"ok": not bool(err), "response": "\n".join(resp_lines), "error": err}
+            return {"ok": True, "response": "\n".join(resp_lines)}
+        else:
+            _log(f"Homing failed: {err}")
+            return {"ok": False, "error": err, "response": "\n".join(resp_lines)}
 
     def _h_status(self, _):
         return {
