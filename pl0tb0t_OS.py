@@ -906,11 +906,12 @@ if has_display:
             'error':    ('#aa0000', '#fff0f0'),
         }
 
-        def __init__(self, job: dict, parent=None, locked: bool = False):
+        def __init__(self, job: dict, parent=None, locked: bool = False, has_archived_gcode: bool = False):
             super().__init__(parent)
             self.job = job
             self.job_id = job['id']
             self.locked = locked
+            self.has_archived_gcode = has_archived_gcode
             self._setup_ui()
 
         def _setup_ui(self):
@@ -979,6 +980,12 @@ if has_display:
             status_lbl = QLabel(f'● {status}  ·  {age}')
             status_lbl.setStyleSheet(f'color: {dot_color}; font-size: 11px;')
             root.addWidget(status_lbl)
+
+            if self.has_archived_gcode:
+                gcode_lbl = QLabel('⚙ gcode archived — Load Archived Gcode to resume this exact run')
+                gcode_lbl.setStyleSheet('color: #4477bb; font-size: 10px;')
+                gcode_lbl.setWordWrap(True)
+                root.addWidget(gcode_lbl)
 
             if job.get('notes'):
                 notes_lbl = QLabel(job['notes'])
@@ -4699,6 +4706,15 @@ if has_display:
             self._queue_plot_btn.clicked.connect(self._queue_load_into_vpype)
             lay.addWidget(self._queue_plot_btn)
 
+            self._queue_load_archive_btn = QPushButton("⏮  Load Archived Gcode")
+            self._queue_load_archive_btn.setEnabled(False)
+            self._queue_load_archive_btn.setToolTip(
+                "Load the exact gcode this job plotted last time, without regenerating "
+                "it -- use this before Resume From Line (Machine tab) so the line "
+                "numbers match a previous run instead of a fresh one.")
+            self._queue_load_archive_btn.clicked.connect(self._queue_load_archived_gcode)
+            lay.addWidget(self._queue_load_archive_btn)
+
             self._queue_selected_id = None
             self._queue_jobs_cache  = {}
             self._plot_request_dialog_open = False
@@ -4979,7 +4995,8 @@ if has_display:
                     item.widget().deleteLater()
             locked = bool(getattr(self, "gcode_running", False))
             for job in jobs:
-                card = JobCard(job, locked=False)
+                has_gcode = self._queue_gcode_archive_path_for_job(job.get("id", "")).exists()
+                card = JobCard(job, locked=False, has_archived_gcode=has_gcode)
                 card.deleted.connect(self._queue_delete)
                 card.selected.connect(self._queue_select)
                 if job["id"] == self._queue_selected_id:
@@ -4991,6 +5008,29 @@ if has_display:
                 self._queue_jobs_cache.get(
                     self._queue_selected_id, {}).get("status") == "queued")
             self._queue_plot_btn.setEnabled((not locked) and queued_sel)
+            self._queue_update_archive_btn()
+
+        def _queue_update_archive_btn(self):
+            job_id = self._queue_selected_id
+            has_archive = bool(job_id) and self._queue_gcode_archive_path_for_job(job_id).exists()
+            if hasattr(self, "_queue_load_archive_btn"):
+                self._queue_load_archive_btn.setEnabled(has_archive)
+
+        def _queue_load_archived_gcode(self):
+            job_id = self._queue_selected_id
+            if not job_id:
+                return
+            path = self._queue_gcode_archive_path_for_job(job_id)
+            if not path.exists():
+                QMessageBox.information(
+                    self, "No archived gcode",
+                    "This job hasn't been plotted yet, so there's no archived "
+                    "gcode to load. Use SVG → Gcode (or Plot from the queue) first.")
+                return
+            self.load_gcode_file(str(path))
+            self._queue_status_lbl.setText(
+                f"Loaded archived gcode for {job_id} — ready for Resume From Line "
+                "on the Machine tab.")
 
         def _queue_select(self, job_id):
             self._queue_selected_id = job_id
@@ -5081,6 +5121,34 @@ if has_display:
             if not path.exists():
                 path.write_text(recipe_text, encoding="utf-8")
             return path
+
+        def _queue_gcode_archive_dir(self):
+            import pathlib
+            path = pathlib.Path(__file__).parent / "Gcode Archive"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        def _queue_gcode_archive_path_for_job(self, job_id: str):
+            return self._queue_gcode_archive_dir() / f"{job_id}.gcode"
+
+        def _queue_archive_gcode(self, job_id: str, gcode_path):
+            """Copy freshly-generated gcode into a stable archive keyed by job_id.
+            Unlike the SVG/recipe archives (write-once, first plot wins), this
+            OVERWRITES every time -- if a job gets re-plotted (e.g. after
+            changing pens), the archive should reflect the gcode that's
+            actually about to run, not a stale first draft. This is what makes
+            Resume From Line survive an app restart or a fresh Plot click:
+            the machine tab loads from this durable path, not the throwaway
+            OS temp folder the SVG->gcode pipeline generates into."""
+            import shutil
+            if not job_id:
+                return None
+            dest = self._queue_gcode_archive_path_for_job(job_id)
+            try:
+                shutil.copyfile(str(gcode_path), str(dest))
+            except Exception:
+                return None
+            return dest
 
         def _queue_archive_recipe_if_available(self, job: dict, base_url=None, key=None):
             if not job or not job.get("has_recipe"):
@@ -5412,8 +5480,14 @@ if has_display:
             the pen moves. Returns True to proceed with plotting, False if the
             user cancelled.
             """
+            # Archive into a stable path keyed by job_id BEFORE loading, so
+            # self.gcode_path (and Resume From Line) point at a copy that
+            # survives past this run -- not the ephemeral OS temp folder
+            # the SVG->gcode generation wrote into.
+            archived = self._queue_archive_gcode(job_id, gcode_path)
+            load_path = str(archived) if archived else gcode_path
             try:
-                self.load_gcode_file(gcode_path, artboard_mm=paper_mm)
+                self.load_gcode_file(load_path, artboard_mm=paper_mm)
             except Exception:
                 pass
 
@@ -5475,7 +5549,9 @@ if has_display:
                 self._queue_status_lbl.setText(f"Plot cancelled for {job_id}")
                 return
 
-            self.gcode_path = gcode_path
+            # self.gcode_path is already set correctly by _confirm_gcode_preview
+            # (points at the archived copy, not this ephemeral tmp path -- don't
+            # overwrite it back here).
             if self.port:
                 self.signals.update_status.emit("__q_autorun__")
             else:
