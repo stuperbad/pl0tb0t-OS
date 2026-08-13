@@ -10,9 +10,10 @@
   var DEFAULTS = {
     enabled: false, showPreview: true, suppressExport: false, showLogo: true, showSeedName: true,
     onlySignature: false,   // suppress the sketch's own art; canvas + exported/queued SVG show only the signature band
+    markType: 'logo',   // 'logo' | 'handwritten' -- which mark renders in the right-side slot
     font: 'ef', customMsg: '', heightMm: 2.0, scale: 1.0, fromMarginMm: -1,
     hPadMm: 0.0, penWidthMm: 0.4, logoScale: 1.0, sepScale: 1.3, sepPad: 1.3,
-    logoOffsetPct: 80   // logo fill: each inset pass steps in by this % of pen width
+    logoOffsetPct: 80   // logo fill: each inset pass steps in by this % of pen width (logo mark only)
   };
 
   function load() {
@@ -40,7 +41,7 @@
     ['enabled', 'Enable signature'],
     ['showPreview', 'Show preview on canvas'],
     ['suppressExport', 'Suppress from SVG export'],
-    ['showLogo', 'Include 90% logo'],
+    ['showLogo', 'Show right-side mark'],
     ['showSeedName', 'Include seed name'],
     ['onlySignature', 'Signature only (suppress art)']
   ];
@@ -50,7 +51,7 @@
     ['fromMarginMm', 'Offset into margin (mm)', 0.1],
     ['hPadMm', 'Band padding (mm)', 0.1],
     ['penWidthMm', 'Pen width (mm)', 0.05],
-    ['logoScale', 'Logo scale', 0.1],
+    ['logoScale', 'Mark scale', 0.1],
     ['logoOffsetPct', 'Logo fill offset (%)', 5],
     ['sepScale', 'Separator scale', 0.1],
     ['sepPad', 'Separator padding (em)', 0.1]
@@ -96,6 +97,14 @@
     });
     fs.value = config.font; fs.addEventListener('change', function () { set('font', fs.value); });
     fr.appendChild(fs); body.appendChild(fr);
+
+    var mtr = row('Right-side mark');
+    var mts = document.createElement('select'); mts.style.cssText = 'font-size:12px;';
+    [['logo', '90% logo'], ['handwritten', 'Handwritten signature']].forEach(function (o) {
+      var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; mts.appendChild(op);
+    });
+    mts.value = config.markType; mts.addEventListener('change', function () { set('markType', mts.value); });
+    mtr.appendChild(mts); body.appendChild(mtr);
 
     var mr = row('Custom message');
     var mi = document.createElement('input'); mi.type = 'text'; mi.value = config.customMsg;

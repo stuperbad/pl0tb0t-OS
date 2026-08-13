@@ -324,6 +324,97 @@
         return w;
     }
 
+    // ── handwritten signature (alternative right-side mark) ──────────────────
+    // Extracted from Evan's traced signature (Google Drive "Signature.svg",
+    // pl0tb0t/Settings Tools and Documentation) -- 7 disconnected stroke paths
+    // (pen-lifts in the cursive trace), each with its own transform, stripped
+    // of the ~960KB of embedded ICC color-profile + no-op clip-rect bloat the
+    // original Inkscape export carried. See assets/signature_handwritten.svg
+    // for a small, editable reference copy of just these paths.
+    var SIG_PATHS = [
+        { d: 'm 0,0 c -3.771,-1.334 -7.517,-2.744 -11.322,-3.97 -2.032,-0.655 -4.128,-1.257 -6.338,-0.872 -0.449,0.078 -0.852,0.114 -1.252,0.411 -0.834,0.619 -1.71,0.469 -2.615,0.031 -0.982,-0.476 -2.006,-0.871 -3.033,-1.245 -0.574,-0.209 -1.191,-0.261 -1.795,-0.011 -0.034,0.282 0.439,0.36 0.23,0.78 -0.366,0.375 -0.847,0.159 -1.328,0.05 -2.524,-0.575 -4.919,-1.531 -7.298,-2.516 -0.265,-0.109 -0.437,-0.244 -0.703,-0.108', transform: 'matrix(1.3333333,0,0,-1.3333333,228.55191,102.80278)' },
+        { d: 'm 0,0 c -5.777,0.002 -5.203,-1.725 -6.729,-1.669 -0.772,0.118 -0.351,1.61 -1.215,1.656 -0.302,0.002 -2.288,-2.946 -2.489,-3.113 -1.283,-0.489 -0.955,1.217 -1.599,1.401 -0.926,0.265 -3.653,-2.376 -1.762,-2.41 0.347,-0.006 2.397,1.259 1.762,1.681 -0.295,0.195 -0.32,0.795 -1.826,0.392 -1.801,-0.48 -3.362,-3.252 -4.848,-3.123 -0.3,0.027 -0.718,0.171 -1.19,0.724', transform: 'matrix(1.3333333,0,0,-1.3333333,197.32337,100.69464)' },
+        { d: 'm 0,0 c -4.1,-1.49 -7.896,-3.606 -11.728,-5.652 -2.195,-1.172 -3.085,-0.426 -5.292,-1.577', transform: 'matrix(1.3333333,0,0,-1.3333333,182.56751,107.03318)' },
+        { d: 'M 0,0 C 0.726,0.787 1.74,1.116 2.621,1.655', transform: 'matrix(1.3333333,0,0,-1.3333333,176.68137,115.67904)' },
+        { d: 'M 0,0 C 1.058,0.965 2.115,1.932 3.173,2.896 3.662,3.343 4.009,3.858 4.027,4.695 3.045,4.761 2.102,5.059 1.104,4.966', transform: 'matrix(1.3333333,0,0,-1.3333333,180.36044,113.28704)' },
+        { d: 'M 0,0 C -1.629,-1.947 -4.759,-4.045 -6.578,-5.776', transform: 'matrix(1.3333333,0,0,-1.3333333,165.27777,111.81571)' },
+        { d: 'm 0,0 c -4.422,0.045 -8.768,-0.637 -13.105,-1.382 -5.239,-0.9 -22.046,-5.024 -25.113,-5.911 -3.902,-1.129 -14.871,-4.063 -15.291,-4.206 -2.596,-0.881 -13.586,-3.802 -15.191,-4.231 -1.088,-0.291 -2.208,-0.364 -3.312,-0.547 -0.28,-0.046 -0.531,0.003 -0.738,0.384 2.345,1.713 8.025,4.215 8.025,4.215 0,0 -1.562,0.224 -3.362,-0.077 -0.628,-0.104 -3.373,-0.523 -3.373,-0.523 0,0 3.514,1.448 4.418,1.784 3.752,1.394 7.483,2.832 11.033,4.7', transform: 'matrix(1.3333333,0,0,-1.3333333,249.88911,92.134778)' }
+    ];
+
+    // Bounding box of the combined, transform-applied strokes -- computed once
+    // via the browser's own SVG engine (same trick _samplePathD uses below)
+    // rather than hand-measuring, so positioning stays correct if the paths
+    // are ever retraced/edited without needing a magic-number update (unlike
+    // the logo's hardcoded "213" right-edge below, inherited from its own
+    // pre-existing convention).
+    var _sigBBoxCache = null;
+    function _sigBBox() {
+        if (_sigBBoxCache) return _sigBBoxCache;
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(svgNS, 'svg');
+        svg.style.cssText = 'position:absolute;left:-99999px;width:1px;height:1px;overflow:hidden;';
+        var g = document.createElementNS(svgNS, 'g');
+        SIG_PATHS.forEach(function(p) {
+            var el = document.createElementNS(svgNS, 'path');
+            el.setAttribute('d', p.d);
+            el.setAttribute('transform', p.transform);
+            g.appendChild(el);
+        });
+        svg.appendChild(g);
+        document.body.appendChild(svg);
+        var bb;
+        try { bb = g.getBBox(); } catch (e) { bb = { x: 0, y: 0, width: 100, height: 30 }; }
+        document.body.removeChild(svg);
+        _sigBBoxCache = bb;
+        return bb;
+    }
+
+    // x,y: top-left of the rendered mark; size: rendered height px (mirrors
+    // _renderLogoSVG's (x,y,size) contract so buildSignatureSVG can treat
+    // either mark type identically).
+    function _renderHandwrittenSigSVG(x, y, size, penWidthPx, color) {
+        var bb = _sigBBox();
+        var sc = bb.height > 0 ? size / bb.height : 0;
+        var col = color || '#000';
+        var sw  = Math.max(0.5, penWidthPx || 1).toFixed(2);
+        var tx  = x - bb.x * sc, ty = y - bb.y * sc;
+        var parts = ['<g transform="translate(' + tx.toFixed(2) + ',' + ty.toFixed(2) +
+                     ') scale(' + sc.toFixed(5) + ')" fill="none" stroke="' + col +
+                     '" stroke-width="' + (sc > 0 ? (parseFloat(sw) / sc).toFixed(3) : sw) +
+                     '" stroke-linecap="round" stroke-linejoin="round">'];
+        SIG_PATHS.forEach(function(p) {
+            parts.push('<path d="' + p.d + '" transform="' + p.transform + '"/>');
+        });
+        parts.push('</g>');
+        return parts.join('');
+    }
+
+    // Canvas-preview equivalent of _renderHandwrittenSigSVG. SVG matrix(a,b,c,d,e,f)
+    // and canvas ctx.transform(a,b,c,d,e,f) use the identical 6-value convention,
+    // so each path's transform string can be applied directly.
+    function _drawHandwrittenSigPreview(ctx, x, y, size, color) {
+        var bb = _sigBBox();
+        var sc = bb.height > 0 ? size / bb.height : 0;
+        var tx = x - bb.x * sc, ty = y - bb.y * sc;
+        ctx.save();
+        ctx.strokeStyle = color || '#000';
+        ctx.lineCap  = 'round';
+        ctx.lineJoin = 'round';
+        ctx.translate(tx, ty);
+        ctx.scale(sc, sc);
+        ctx.lineWidth = sc > 0 ? 1.4 / sc : 1.4;
+        SIG_PATHS.forEach(function(p) {
+            var m = p.transform.match(/matrix\(([^)]*)\)/);
+            if (!m) return;
+            var v = m[1].split(',').map(parseFloat);
+            ctx.save();
+            ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
+            ctx.stroke(new Path2D(p.d));
+            ctx.restore();
+        });
+        ctx.restore();
+    }
+
     // ── logo SVG rendering ────────────────────────────────────────────────────
     function _renderLogoSVG(x, y, size, penWidthPx, color, offsetPct) {
         // x,y: top-left; size: logo height px (logo is square-ish)
@@ -394,10 +485,22 @@
         var leftText = _leftParts.join('|');
         if (cfg.customMsg) leftText += '|' + cfg.customMsg;
 
-        // Logo
+        // Right-side mark (logo or handwritten signature)
+        var markType = cfg.markType || 'logo';
         var logoH    = heightPx * 1.1 * (cfg.logoScale || 1.0);
-        // 213 = rightmost x of logo content in 300-unit space (ring 1 right edge)
-        var logoX    = svgW - marginPx - hPad - 213 * (logoH / 300);
+        var logoX;
+        if (markType === 'handwritten') {
+            // _renderHandwrittenSigSVG treats its x-arg as the LEFT edge of the
+            // bbox (it internally re-anchors via `x - bb.x*sc`, unlike the logo's
+            // raw origin-translate below), so justifying the right edge only
+            // needs the content WIDTH, not bb.x -- don't add bb.x here.
+            var _bb = _sigBBox();
+            var _sc = _bb.height > 0 ? logoH / _bb.height : 0;
+            logoX = svgW - marginPx - hPad - _bb.width * _sc;
+        } else {
+            // 213 = rightmost x of logo content in 300-unit space (ring 1 right edge)
+            logoX = svgW - marginPx - hPad - 213 * (logoH / 300);
+        }
         var logoY    = bandY + (heightPx - logoH) / 2;
         var penPx    = mmToPixels ? mmToPixels(cfg.penWidthMm || 0.4) : 1.5;
 
@@ -406,9 +509,13 @@
         // Left text
         parts.push(_renderTextSVG(leftText, font, textX, textY, heightPx, _sigCol, penPx, cfg.sepScale || 1.0, cfg.sepPad !== undefined ? cfg.sepPad : 1.3));
 
-        // Right logo
+        // Right mark
         if (cfg.showLogo !== false) {
-            parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, _sigCol, cfg.logoOffsetPct));
+            if (markType === 'handwritten') {
+                parts.push(_renderHandwrittenSigSVG(logoX, logoY, logoH, penPx, _sigCol));
+            } else {
+                parts.push(_renderLogoSVG(logoX, logoY, logoH, penPx, _sigCol, cfg.logoOffsetPct));
+            }
         }
 
         parts.push('</g>');
@@ -471,8 +578,14 @@
             ctx.fillText(leftText, marginPx, bandY + heightPx * 0.85);
         }
 
-        // Logo preview outline
-        if (cfg.showLogo !== false) {
+        // Right mark preview
+        if (cfg.showLogo !== false && (cfg.markType || 'logo') === 'handwritten') {
+            var _hH = heightPx * 1.1 * (cfg.logoScale || 1.0);
+            var _hbb = _sigBBox();
+            var _hsc = _hbb.height > 0 ? _hH / _hbb.height : 0;
+            var _hX  = svgW - marginPx - hPad - _hbb.width * _hsc;
+            _drawHandwrittenSigPreview(ctx, _hX, bandY + (heightPx - _hH) / 2, _hH, _col);
+        } else if (cfg.showLogo !== false) {
             var logoH = heightPx * 1.1 * (cfg.logoScale || 1.0);
             var logoX = svgW - marginPx - hPad - 213 * (logoH / 300);
             var sc    = logoH / 300;
@@ -533,6 +646,7 @@
         showPreview: true,
         suppressExport: false,
         showLogo: true,
+        markType: 'logo',   // 'logo' | 'handwritten'
         font: 'ef',
         customMsg: '',
         heightMm: 2.0,
