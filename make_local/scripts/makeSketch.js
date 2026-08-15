@@ -1867,8 +1867,19 @@
                         var _genBody = ensureGroup('general');
                         var _pRow = document.createElement('div'); _pRow.className = 'mb-3'; _pRow.setAttribute('data-param-id', '__stylePreset');
                         var _pLab = document.createElement('label'); _pLab.className = 'control-label';
-                        var _pSpan = document.createElement('span'); _pSpan.className = 'param-label-text'; _pSpan.textContent = 'Preset';
+                        var _pSpan = document.createElement('span'); _pSpan.className = 'param-label-text';
+                        // Label is sketch-overridable (registeredApi.presetLabel) so a
+                        // sketch can name it something clearer than the generic "Preset"
+                        // -- e.g. svgUpload calls it "Quick setup". Optional one-line
+                        // help (registeredApi.presetHelp) renders under the dropdown.
+                        _pSpan.textContent = registeredApi.presetLabel || 'Preset';
                         _pLab.appendChild(_pSpan); _pRow.appendChild(_pLab);
+                        if (registeredApi.presetHelp) {
+                            var _pHelp = document.createElement('div');
+                            _pHelp.style.cssText = 'font-size:11px;color:#777;margin:2px 0 5px;line-height:1.35;';
+                            _pHelp.textContent = registeredApi.presetHelp;
+                            _pRow.appendChild(_pHelp);
+                        }
                         var _pSel = document.createElement('select'); _pSel.id = '__stylePreset'; _pSel.className = 'form-control form-control-sm';
                         _pSel.addEventListener('change', function() {
                             var ps = registeredApi.stylePresets[Number(this.value)];
