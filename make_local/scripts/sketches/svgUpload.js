@@ -23,7 +23,7 @@ window.sketches['svgUpload'] = function(p) {
         offsetY: 0,
         rotation: 0,
         recolor: 'nearest',
-        isolate: 'all',   // 'all' = plot every colour; or a lowercased source-colour hex = plot ONLY that layer
+        hiddenColors: [],   // lowercased source colours toggled OFF; empty = draw every colour
         trimXPct: 0,
         trimYPct: 0,
         // Texture Closed Shapes
@@ -297,8 +297,8 @@ window.sketches['svgUpload'] = function(p) {
         var spacingSvg = Math.max(0.3, paper.mmToPixels(Math.max(0.5, PARAMS.fillSpacing)) / scale);
         var stepSvg = Math.max(spacingSvg / 6, spacingSvg * 0.25);
         var raw = generateFill(shapes, Number(PARAMS.fillAngle) || 0, spacingSvg, stepSvg, PARAMS.fillCrosshatch === 'on', pens[0] || '#000000');
-        // "Draw only" isolate: drop fill for every source colour except the soloed one
-        if (isolateActive()) raw = raw.filter(function(seg) { return (seg.color || '').toLowerCase() === PARAMS.isolate; });
+        // Colour toggles: drop fills for any source colour switched off.
+        if (filterActive()) raw = raw.filter(function(seg) { return colorEnabled(seg.color); });
         // recolor each segment's source fill onto a pen
         raw.forEach(function(seg) {
             if (PARAMS.recolor === 'single') seg.pen = pens[0] || '#000000';
@@ -407,7 +407,7 @@ window.sketches['svgUpload'] = function(p) {
         parseSvg(txt);
         // New file has its own colour set — a "Draw only" pick from the previous
         // file is meaningless (or would silently drop everything). Reset to All.
-        PARAMS.isolate = 'all';
+        PARAMS.hiddenColors = [];
         // Pre-fill the margin trim from detected exporter metadata (still a
         // manual override below); reset to 0 for files without it.
         PARAMS.trimXPct = detectedTrimX != null ? detectedTrimX : 0;
@@ -478,7 +478,7 @@ window.sketches['svgUpload'] = function(p) {
         // "original" leaves svgText untouched \u2014 that mode's whole point is
         // to keep the SVG's own colors, so there's nothing to remap.
         if (!svgText) return svgText;
-        if (isolateActive()) return isolatedGroup(null, true);
+        if (filterActive()) return filteredGroup(null, true);
         var mode = PARAMS.recolor, pens = selectedPens();
         if (mode === 'single') {
             var col = pens[0] || '#000000', sw = strokePxFor(col).toFixed(2);
@@ -509,28 +509,23 @@ window.sketches['svgUpload'] = function(p) {
         return c;   // 'original' — kept as-is
     }
 
-    // "Draw only" isolate: is one specific source colour soloed right now?
-    function isolateActive() {
-        return PARAMS.isolate && PARAMS.isolate !== 'all'
-            && svgColors.map(function(c){ return c.toLowerCase(); }).indexOf(PARAMS.isolate) !== -1;
+    // Colour toggles: which of the file's source colours are switched on/off.
+    function colorEnabled(c) {
+        return (PARAMS.hiddenColors || []).indexOf(String(c || '').toLowerCase()) === -1;
     }
-    // Build a plot <g> that draws ONLY the isolated source colour, recoloured
-    // onto the pen the current Recolor mode would give it; every other source
-    // colour's stroke is rewritten to "none" so it doesn't plot. Reuses the same
-    // per-colour regex-replace machinery the "nearest" path already relies on
-    // (each entry in svgColors was scanned FROM a real stroke token, so these
-    // replaces hit every drawable stroke) -- big-file safe, no DOM parse.
-    function isolatedGroup(L, forPreview) {
-        var pens = selectedPens();
-        var iso = PARAMS.isolate;
-        var penCol = _pl0tResolvePenFor(iso, PARAMS.recolor, pens);
+    function filterActive() {
+        var hid = PARAMS.hiddenColors || [];
+        if (!hid.length) return false;
+        return svgColors.some(function(c){ return hid.indexOf(c.toLowerCase()) !== -1; });
+    }
+    // Build a plot <g> that draws only the ENABLED source colours (each
+    // recoloured onto the pen the current Recolor mode gives it); disabled
+    // colours are rewritten to "none" so they don't plot. Two-phase sentinel
+    // swap avoids a recolor collision (a source colour resolving onto another
+    // source colour). Big-file safe, no DOM parse.
+    function filteredGroup(L, forPreview) {
+        var pens = selectedPens(), mode = PARAMS.recolor;
         var out = svgInner;
-        // Two-phase to avoid a recolor collision: if the isolate colour resolves
-        // onto a pen that is ALSO one of the file's own source colours (e.g. solo
-        // cyan drawn with a black pen, in a file that also has black strokes), a
-        // single-pass "cyan->black, black->none" loop would re-blank the cyan we
-        // just recoloured. Phase 1 swaps every source stroke for a unique,
-        // non-colour sentinel; phase 2 resolves sentinels (isolate->pen, rest->none).
         svgColors.forEach(function(c, i) {
             var e = escapeRe(c), s = '__PL0TISO' + i + '__';
             out = out.replace(new RegExp('stroke\\s*=\\s*"\\s*' + e + '\\s*"', 'gi'), 'stroke="' + s + '"');
@@ -538,80 +533,65 @@ window.sketches['svgUpload'] = function(p) {
             out = out.replace(new RegExp('stroke\\s*:\\s*' + e, 'gi'), 'stroke:' + s);
         });
         svgColors.forEach(function(c, i) {
-            var repl = (c.toLowerCase() === iso) ? penCol : 'none';
+            var repl = colorEnabled(c) ? _pl0tResolvePenFor(c, mode, pens) : 'none';
             out = out.split('__PL0TISO' + i + '__').join(repl);
         });
-        var sw = strokePxFor(penCol).toFixed(2);
-        if (forPreview) return previewOpen + '<g fill="none" stroke-width="' + sw + '">' + out + '</g></svg>';
-        return '<g transform="' + transformStr(L) + '" fill="none" stroke-width="' + sw + '">' + out + '</g>';
+        if (forPreview) return previewOpen + '<g fill="none">' + out + '</g></svg>';
+        return '<g transform="' + transformStr(L) + '" fill="none">' + out + '</g>';
     }
 
     function renderColorMap(wrap) {
         if (!wrap) return;
         if (!svgText || !svgColors.length) { wrap.innerHTML = ''; return; }
         var mode = PARAMS.recolor, pens = selectedPens();
-        var skip = (window._pl0tSkippedLayers || []).map(function(c) { return String(c).toLowerCase(); });
         var modeLabel = mode === 'single' ? 'Single pen' : mode === 'nearest' ? 'Nearest pen' : 'Kept as-is';
-        var iso = isolateActive() ? PARAMS.isolate : 'all';
-
-        // "Draw only" selector \u2014 the clear, direct way to plot a single source
-        // colour without fighting the palette/recolor interaction. Lives here (not
-        // as a static param row) because its options are the just-uploaded file's
-        // own colours, which change per file.
-        var drawOnly = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">'
-            + '<span style="font-size:11px;font-weight:600;color:#555;">Draw only:</span>'
-            + '<select id="svgIsolateSel" style="font-size:11px;flex:1;">'
-            + '<option value="all"' + (iso === 'all' ? ' selected' : '') + '>All colours</option>'
-            + svgColors.map(function(c) {
-                var cl = c.toLowerCase();
-                return '<option value="' + cl + '"' + (iso === cl ? ' selected' : '') + '>' + c + '</option>';
-            }).join('')
-            + '</select></div>';
+        var anyOff = svgColors.some(function(c){ return !colorEnabled(c); });
 
         var rows = svgColors.map(function(c) {
-            var cl = c.toLowerCase();
+            var cl = c.toLowerCase(), on = colorEnabled(c);
             var resolved = _pl0tResolvePenFor(c, mode, pens);
-            var mutedByIso = (iso !== 'all' && cl !== iso);
-            var isSkipped = !mutedByIso && skip.indexOf(String(resolved).toLowerCase()) !== -1;
-            var note = mutedByIso ? 'muted \u2014 Draw only is on'
-                     : isSkipped ? 'skipped \u2014 will not plot'
-                     : (iso !== 'all' ? 'DRAW ONLY \u2014 plots' : modeLabel);
-            return '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;' + (mutedByIso || isSkipped ? 'opacity:0.4;' : '') + '">'
-                + '<div style="width:16px;height:16px;border-radius:3px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
-                + '<span style="font-size:11px;color:#999;">&rarr;</span>'
-                + '<div style="width:16px;height:16px;border-radius:3px;border:1px solid #ccc;background:' + resolved + ';flex-shrink:0;"></div>'
-                + '<span style="font-size:11px;color:' + (iso !== 'all' && cl === iso ? '#1a7f37' : '#666') + ';font-weight:' + (iso !== 'all' && cl === iso ? '700' : '400') + ';">' + note + '</span>'
+            return '<div class="svgc-row" data-c="' + cl + '" title="Tap to toggle this colour on/off" style="display:flex;align-items:center;gap:7px;margin-bottom:5px;cursor:pointer;user-select:none;' + (on ? '' : 'opacity:0.42;') + '">'
+                + '<span style="font-size:13px;width:14px;text-align:center;color:' + (on ? '#1a7f37' : '#c0392b') + ';">' + (on ? '✓' : '✕') + '</span>'
+                + '<div style="width:18px;height:18px;border-radius:3px;border:1px solid #ccc;background:' + c + ';flex-shrink:0;"></div>'
+                + '<span style="font-size:11px;color:#888;font-family:monospace;">' + c + '</span>'
+                + '<span style="font-size:11px;color:#bbb;">&rarr;</span>'
+                + '<div style="width:18px;height:18px;border-radius:3px;border:1px solid #ccc;background:' + resolved + ';flex-shrink:0;"></div>'
+                + '<span style="font-size:11px;color:' + (on ? '#666' : '#c0392b') + ';">' + (on ? modeLabel : "won't plot") + '</span>'
                 + '</div>';
         }).join('');
 
-        // Collapse warning \u2014 the exact footgun: a multi-colour file, Recolor =
-        // "Snap to nearest", but the selected pens resolve every colour onto a
-        // SINGLE pen, so the whole drawing silently prints in one colour.
+        var actions = '<div style="display:flex;gap:6px;margin-bottom:8px;">'
+            + '<button id="svgcAll" type="button" style="font-size:11px;padding:2px 9px;border:1px solid #ccc;border-radius:4px;background:#f5f5f5;cursor:pointer;">All on</button>'
+            + '<button id="svgcNone" type="button" style="font-size:11px;padding:2px 9px;border:1px solid #ccc;border-radius:4px;background:#f5f5f5;cursor:pointer;">All off</button>'
+            + '</div>';
+
         var warn = '';
-        if (iso === 'all' && mode === 'nearest' && svgColors.length > 1) {
+        if (!anyOff && mode === 'nearest' && svgColors.length > 1) {
             var resolvedSet = {};
             svgColors.forEach(function(c) { resolvedSet[String(_pl0tResolvePenFor(c, mode, pens)).toLowerCase()] = 1; });
             if (Object.keys(resolvedSet).length === 1) {
                 var onePen = _pl0tResolvePenFor(svgColors[0], mode, pens);
                 warn = '<div style="font-size:11px;color:#8a5a00;background:#fff6e5;border:1px solid #f0d089;border-radius:5px;padding:6px 8px;margin-bottom:8px;line-height:1.4;">'
-                    + '\u26a0 All ' + svgColors.length + ' colours will draw with one pen (<b>' + onePen + '</b>) \u2014 the whole drawing prints in that colour. '
-                    + 'To keep colours apart, select more pens in <b>Pens (colors)</b> or switch <b>Recolor</b> to \u201cKeep original\u201d. '
-                    + 'To plot just one colour, use <b>Draw only</b> above.</div>';
+                    + '⚠ All ' + svgColors.length + ' colours resolve to one pen (<b>' + onePen + '</b>) — the whole drawing would print in that colour. '
+                    + 'Select more pens in <b>Pens (colors)</b>, or set <b>Recolor</b> to “Keep original”.</div>';
             }
         }
 
-        wrap.innerHTML = '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">Colour Mapping</div>'
-            + '<div style="font-size:11px;color:#777;margin-bottom:8px;">Each colour found in the uploaded SVG, and the pen it will draw with. Use <b>Draw only</b> to plot a single colour on its own.</div>'
-            + drawOnly + warn + rows;
+        wrap.innerHTML = '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">Colours in this file</div>'
+            + '<div style="font-size:11px;color:#777;margin-bottom:8px;">Tap a colour to switch it on/off — only ticked colours are drawn. Left swatch = the source colour, right = the pen it plots with.</div>'
+            + actions + warn + rows;
 
-        var sel = document.getElementById('svgIsolateSel');
-        if (sel) sel.addEventListener('change', function() { setIsolate(this.value); });
+        Array.prototype.forEach.call(wrap.querySelectorAll('.svgc-row'), function(el) {
+            el.addEventListener('click', function() { toggleColor(el.getAttribute('data-c')); });
+        });
+        var aOn = wrap.querySelector('#svgcAll'), aOff = wrap.querySelector('#svgcNone');
+        if (aOn) aOn.addEventListener('click', function(){ setAllColors(true); });
+        if (aOff) aOff.addEventListener('click', function(){ setAllColors(false); });
     }
 
-    // Central handler for the "Draw only" selector: update state, invalidate the
-    // fill cache, refresh the Pi preview + Skip panel + this panel, and redraw.
-    function setIsolate(val) {
-        PARAMS.isolate = (val === 'all') ? 'all' : String(val).toLowerCase();
+    // Refresh everything a colour toggle affects: fill cache, Pi preview, the
+    // Skip panel, this panel, and the on-canvas draw.
+    function _afterColorToggle() {
         invalidateFill();
         if (window._pl0tRecolorPreviewTimer) clearTimeout(window._pl0tRecolorPreviewTimer);
         window._pl0tRecolorPreviewTimer = setTimeout(function() { buildPreview(lastPreviewW); }, 250);
@@ -619,10 +599,21 @@ window.sketches['svgUpload'] = function(p) {
         renderColorMap(document.getElementById('svgColorMapWrap'));
         p.redraw();
     }
+    function toggleColor(cl) {
+        cl = String(cl).toLowerCase();
+        var hid = PARAMS.hiddenColors || (PARAMS.hiddenColors = []);
+        var i = hid.indexOf(cl);
+        if (i === -1) hid.push(cl); else hid.splice(i, 1);
+        _afterColorToggle();
+    }
+    function setAllColors(on) {
+        PARAMS.hiddenColors = on ? [] : svgColors.map(function(c){ return c.toLowerCase(); });
+        _afterColorToggle();
+    }
 
     function recoloredGroup(L) {
         if (!svgText) return '';
-        if (isolateActive()) return isolatedGroup(L, false);
+        if (filterActive()) return filteredGroup(L, false);
         var t = transformStr(L), mode = PARAMS.recolor, pens = selectedPens();
         if (mode === 'single') {
             var col = pens[0] || '#000000', sw = strokePxFor(col).toFixed(2);
@@ -788,14 +779,10 @@ window.sketches['svgUpload'] = function(p) {
             var pens = selectedPens();
             if (!svgText || !svgColors.length) return pens.map(function(c) { return { color: c, label: c }; });
             var mode = PARAMS.recolor;
-            // When one colour is soloed via "Draw only", the plot has exactly that
-            // one resolved pen — Skip Layers / the pen-confirm dialog should reflect it.
-            if (isolateActive()) {
-                var only = _pl0tResolvePenFor(PARAMS.isolate, mode, pens);
-                return [{ color: only, label: only }];
-            }
+            // Only the colours toggled ON contribute a pen to the plot.
             var seen = {}, out = [];
             svgColors.forEach(function(c) {
+                if (!colorEnabled(c)) return;
                 var resolved = _pl0tResolvePenFor(c, mode, pens);
                 var key = String(resolved).toLowerCase();
                 if (!seen[key]) { seen[key] = 1; out.push({ color: resolved, label: resolved }); }
