@@ -1267,7 +1267,7 @@
                                 return _activeVals.some(function(v){return allowedValues.indexOf(v)!==-1;});
                             });
                             row.style.display = _vwAllMatch ? '' : 'none';
-                        } else if (isShowHidden(pdef) && (window._pl0tMode || 'fast') !== 'full') {
+                        } else if (isShowHidden(pdef) && (window._pl0tMode || 'fast') === 'fast') {
                             row.style.display = 'none';
                         } else {
                             row.style.display = '';
@@ -1339,7 +1339,7 @@
                         // the sketch/code's own hardcoded showModeHidden flag.
                         if (isShowHidden(pdef)) {
                             row.dataset.showModeHidden = '1';
-                            if ((window._pl0tMode || 'fast') !== 'full') row.style.display = 'none';
+                            if ((window._pl0tMode || 'fast') === 'fast') row.style.display = 'none';
                         }
                         if (isSuppressed(pdef)) row.classList.add('param-suppressed');
 
@@ -2016,10 +2016,15 @@
         },
         setRenderMode: function(mode) {
             window._pl0tMode = mode;
-            // Toggle paper params and group for show vs home mode
+            // Toggle paper params and group for Show mode ONLY -- Web mode
+            // keeps them (it's "like Show but keeps the global Settings
+            // column", see _isWeb below). This used to key off "mode !==
+            // full", which lumped Web in with Show and hid paper size etc.
+            // on the /studio page even though the column itself was visible.
             var _isHome = (mode === 'full');
+            var _hideShowOnly = (mode === 'fast');
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
-                el.style.display = _isHome ? '' : 'none';
+                el.style.display = _hideShowOnly ? 'none' : '';
             });
             // Three modes:
             //   full ('Home') - full authoring surface

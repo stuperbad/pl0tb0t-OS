@@ -68,20 +68,17 @@
     var mount = document.getElementById('globalAuthorParams');
     if (!mount || document.getElementById('sigSettingsPanel')) return;
 
-    var panel = document.createElement('div');
+    // Matches the same <details class="param-group"> disclosure used by every
+    // other params group (paper/advanced/etc, see index.html .param-group CSS)
+    // instead of a one-off boxed panel, so it reads as part of the same list.
+    var panel = document.createElement('details');
     panel.id = 'sigSettingsPanel';
-    panel.style.cssText = 'border:1px solid #e4e7ec;border-radius:6px;margin:8px 0;background:#fff;';
+    panel.className = 'param-group';
 
-    var open = false;
-    var head = document.createElement('div');
-    head.textContent = '▸ Signature';
-    head.style.cssText = 'font-size:12px;font-weight:700;color:#475467;padding:8px 10px;cursor:pointer;user-select:none;';
+    var head = document.createElement('summary');
+    head.textContent = 'Signature';
     var body = document.createElement('div');
-    body.style.cssText = 'padding:0 10px 8px;display:none;';
-    head.addEventListener('click', function () {
-      open = !open; body.style.display = open ? 'block' : 'none';
-      head.textContent = (open ? '▾' : '▸') + ' Signature';
-    });
+    body.className = 'param-group-body';
 
     CHECKS.forEach(function (c) {
       var r = row(c[1]);
