@@ -2,55 +2,63 @@
 // Upload a photo/image, decompose it onto your selected pens (either a true
 // CMYK-style mix of continuous per-ink density layers, or DrawingBotV3
 // "Color Match"-style nearest-pen classification), then trace each ink's
-// density map using one of seven DrawingBotV3-inspired Path Finding Module
+// density map using one of eight DrawingBotV3-inspired Path Finding Module
 // families: Sketch, Streamlines, Spiral, Hatch, Voronoi (Stippling),
-// Adaptive, and LBG.
+// Adaptive, LBG, and Grid.
 //
-// PROVENANCE / confidence labelling (audited against real DBV3 source, both
-// the decompiled Premium jar AND the actual public GPL "Basic" edition repo,
-// github.com/SonarSonic/DrawingBotV3 -- cloned and read directly this pass):
-// every mode/style/preset label below is tagged with one of three tiers --
+// PROVENANCE / confidence labelling (audited against real DBV3 source: the
+// user's decompiled Premium jar, C:\Users\evanf\decompile\DrawingBotV3\src
+// \drawingbot -- 1084 files, full Premium package including the point-
+// sampler/encoder combinator architecture -- AND the public GPL "Basic"
+// edition repo, github.com/SonarSonic/DrawingBotV3, cloned and read directly.
+// Every mode/style/preset label below is tagged with one of three tiers --
 //   (v3)     Verified against REAL, accessible DBV3 source and matches it
-//            closely (function-for-function, not just "similar"). Only
-//            Sketch Lines, Sketch Squares (decompiled Premium source,
-//            drawingbot.k.e.d.*) and the base Spiral engine (public
-//            PFMSpiralBasic.java, byte-checked against traceSpiralReal this
-//            pass) qualify -- these are the only PFMs with ANY real
-//            implementation available anywhere, open or closed.
-//   (v3.1)   No accessible implementation exists (see below), but the
-//            setting names/ranges/behaviour are taken from DBV3's own real
-//            documentation (docs/source/pfms.rst) or bundled preset-default
-//            JSON, OR the code is an independent implementation of the
-//            exact real, named external algorithm DBV3's own docs cite for
-//            that PFM (e.g. Linde-Buzo-Gray for LBG). Adapted/rebuilt from
+//            closely (function-for-function, not just "similar"). Covers:
+//            Sketch Lines/Squares, the base Spiral engine, Voronoi Stippling
+//            (drawingbot.k.e.c.a.p sampler), Grid (drawingbot.k.e.c.a.g,
+//            verbatim), and the shared Shapes/Triangulation/Tree/Stippling/
+//            Dashes/Diagram render encoders (drawingbot.k.e.c.b.*) used by
+//            Voronoi/Adaptive/LBG/Grid alike.
+//   (v3.1)   No accessible implementation exists, but the setting names/
+//            ranges/behaviour are taken from DBV3's own real documentation
+//            or bundled preset-default JSON, OR the code is an independent
+//            implementation of the exact real, named external algorithm
+//            DBV3's own docs/source cite for that PFM (e.g. Linde-Buzo-Gray
+//            1980 for LBG's split/merge sampler, or a standard nearest-
+//            neighbour+2-opt solver for TSP in place of DBV3's own
+//            SuperPixel-based tour construction). Adapted/rebuilt from
 //            something real and verifiable -- not copied, but not guessed.
+//            Adaptive's point sampler is v3.1 for a different reason: its
+//            real disk-packing engine (drawingbot.k.e.b.a, "AIS") did NOT
+//            survive decompilation -- a Windows case-insensitive-filesystem
+//            collision clobbered it with an unrelated same-named class, so
+//            only 339 bytes of garbage came out where the real algorithm
+//            should be. That sampler here is an honest from-scratch
+//            Poisson-disc packer instead of a claimed port.
 //   (approx) No real DBV3 source, doc, or cited spec was matched -- an
 //            original approximation invented to produce a similar-feeling
 //            result under that family's name. Treat as a placeholder style,
 //            not a port.
-// THE BIG FINDING THIS PASS: Streamlines, Hatch, Voronoi/Stippling,
-// Adaptive, and LBG are 100% Premium-only in real DBV3 -- confirmed via the
-// free edition's own PremiumPluginDummy.java, which registers every one of
-// their real PFMs (Streamlines Edge/Flow/Superformula Field, Hatch Sawtooth
-// /Circular Scribbles, all 9 Adaptive/LBG/Voronoi sub-styles, Grid, Mosaic)
-// as an empty DummyPFM with a no-op run() -- there is NO public source for
-// any of them, and the user's decompiled dump only covers the Sketch
-// package, so there's nothing to decompile either. So for those five
-// families "increase fidelity" cannot mean "port the real algorithm" (there
-// is no real algorithm to read, anywhere) -- it means: match DBV3's real,
-// documented settings/behaviour as closely as possible, and be honest via
-// the (v3.1)/(approx) tags about which parts of the current implementation
-// are actually grounded in that documentation vs. invented.
-// Deliberately NOT implemented at all: Grid PFMs, Composite/Mosaic PFMs,
-// ECS Drawing, and the Letters/Diagram/TSP/Triangulation/Tree render styles
-// (font rendering, true Voronoi/Delaunay diagrams, and TSP solving are each
-// substantial standalone features).
+// Streamlines and Hatch remain Premium-only with no accessible source (the
+// free edition's PremiumPluginDummy.java registers their real PFMs as empty
+// no-op stubs) -- those two families are still (v3.1)/(approx) by necessity.
+// Deliberately NOT implemented at all: Composite/Mosaic PFMs, ECS Drawing,
+// the Letters render style (real AWT/Batik font-glyph outline rendering --
+// a substantial standalone feature requiring real vector font data), and
+// Circular Scribbles (DBV3's real organic curve engine with velocity/
+// acceleration vectors and tone mapping -- also a substantial standalone
+// feature, not something to fake under the real name).
 //
 // Architecture: PARAMS.mode selects a family; each family has its own
 // traceXxx() function operating on a per-ink density weight map, fed by the
 // shared pipeline (load -> downscale -> ink decomposition -> per-ink trace ->
-// paper layout -> export). Sub-style pickers (e.g. sketchStyle, fieldType)
-// reuse a family's core tracer and post-process the resulting polylines.
+// paper layout -> export). Sub-style pickers (e.g. sketchStyle, fieldType,
+// pointEncoder) reuse a family's core tracer and post-process the resulting
+// polylines. Voronoi/Adaptive/LBG/Grid mirror real DBV3's own combinator
+// architecture (drawingbot.k.e.c.c): a per-family point sampler paired with
+// one shared set of render encoders selected by pointEncoder -- see the
+// "Voronoi / Adaptive / LBG / Grid: shared real-geometry engine" comment
+// further down for the full per-function breakdown.
 //
 // Big-image safety + compute safety: the working image is downscaled to
 // WORK_MAX on load. Every new iterative/recursive algorithm added this pass
@@ -78,9 +86,7 @@ window.sketches['imageTrace'] = function (p) {
         fieldType: 'edge',
         spiralStyle: 'archimedean',
         hatchStyle: 'straight',
-        stippleShape: 'dot',
-        lbgShape: 'dot',
-        adaptiveShape: 'square',
+        pointEncoder: 'shapes',   // shared Voronoi/Adaptive/LBG/Grid render encoder (real DBV3 Shapes/Triangulation/Tree/Stippling/Dashes/Diagram/TSP -- drawingbot.k.e.c.b.*)
 
         seedSpacing: 6,      // "Min Spacing"
         maxSpacing: 14,      // "Max Spacing"
@@ -174,17 +180,42 @@ window.sketches['imageTrace'] = function (p) {
         hatchVelocityMin: 20,
         hatchVelocityMax: 60,
 
-        pointDensity: 30,
         pointLimit: 800,
         stippleRadiusMin: 0.4,
         stippleRadiusMax: 1.4,
-        luminancePower: 10,
-        voronoiIterations: 4,
+        luminancePower: 2,      // real DBV3 "Density Power" (Voronoi sampler only -- LBG's own cell analysis fixes this at 1, matching the real k.b.i.e code)
+        voronoiIterations: 4,   // shared Voronoi Lloyd-relaxation / LBG split-merge iteration count
+        voronoiAccuracy: 0.5,   // real DBV3 "Voronoi Accuracy": cell centroid/mass scan step (shared by Voronoi + LBG)
 
         minSampleRadius: 4,
         maxSampleRadius: 24,
+        adaptiveMaxPoints: 1200,
         adaptiveBrightness: 100,
         adaptiveContrast: 100,
+
+        lbgMinDiameter: 2,          // real DBV3 LBG "Min Cell Diameter"
+        lbgMaxDiameter: 20,         // real DBV3 LBG "Max Cell Diameter"
+        lbgDensityBlend: 0.5,       // real DBV3 LBG "Density Blend"
+        lbgHysteresis: 0.3,         // real DBV3 LBG "Hysteresis"
+        lbgHysteresisGrowth: 0.05,  // real DBV3 LBG "Hysteresis Growth"
+
+        gridCellWidth: 12,   // real DBV3 Grid "Cell Width"
+        gridCellHeight: 12,  // real DBV3 Grid "Cell Height"
+        gridSquare: 'on',    // real DBV3 Grid "Square"
+        gridStagger: 'off',  // real DBV3 Grid "Stagger"
+        gridNoise: 0,        // real DBV3 Grid "Noise"
+        gridRadiusScale: 0.8,
+
+        // Shared render-encoder sub-params (Voronoi/Adaptive/LBG/Grid; real
+        // DBV3 encoder settings, drawingbot.k.e.c.b.*)
+        pointShapeType: 'circle',
+        triangulationCloseBorder: 'off',
+        stipplingDotRadius: 0.8,
+        dashAlignToEdge: 'on',
+        dashMinRotation: 0,
+        dashMaxRotation: 180,
+        dashDistortion: 0,
+        tspMaxOptPoints: 350,
 
         ignoreWhite: 'off',
 
@@ -1528,241 +1559,531 @@ window.sketches['imageTrace'] = function (p) {
         }
         return points;
     }
-    function traceStipple(weightMap, w, h, pointDensity, radiusMin, radiusMax, pointLimit, luminancePower, voronoiIterations, shape) {
-        var spacing = Math.max(2, Math.min(60, 200 / Math.max(1, pointDensity)));
-        var biasExp = Math.max(0.3, 3 - (Math.max(1, Math.min(50, luminancePower)) / 50) * 2.7); // higher power -> stronger dark bias
-        var candidates = [];
-        for (var sy = spacing / 2; sy < h; sy += spacing) {
-            for (var sx = spacing / 2; sx < w; sx += spacing) {
-                var jx = sx + (Math.random() - 0.5) * spacing * 0.8;
-                var jy = sy + (Math.random() - 0.5) * spacing * 0.8;
-                var xi = Math.floor(jx), yi = Math.floor(jy);
-                if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue;
-                var dens = weightMap[yi * w + xi] || 0;
-                if (dens <= 0.04) continue;
-                var biased = Math.pow(dens, biasExp);
-                if (Math.random() > biased) continue;
-                candidates.push({ x: jx, y: jy, d: dens });
-            }
-        }
-        candidates.sort(function (a, b) { return b.d - a.d; });
-        if (candidates.length > pointLimit) candidates.length = pointLimit;
-        relaxPoints(candidates, weightMap, w, h, voronoiIterations, Math.max(2, spacing * 0.7));
-        var polylines = [];
-        for (var i = 0; i < candidates.length; i++) {
-            var c = candidates[i];
-            var r = radiusMin + (radiusMax - radiusMin) * c.d;
-            if (shape === 'dash') {
-                var ang = Math.random() * Math.PI;
-                polylines.push([{ x: c.x - Math.cos(ang) * r, y: c.y - Math.sin(ang) * r }, { x: c.x + Math.cos(ang) * r, y: c.y + Math.sin(ang) * r }]);
-            } else if (shape === 'square') {
-                polylines.push([{ x: c.x - r, y: c.y - r }, { x: c.x + r, y: c.y - r }, { x: c.x + r, y: c.y + r }, { x: c.x - r, y: c.y + r }, { x: c.x - r, y: c.y - r }]);
-            } else {
-                var pts = []; var segs = 8;
-                for (var s = 0; s <= segs; s++) { var a = (s / segs) * Math.PI * 2; pts.push({ x: c.x + Math.cos(a) * r, y: c.y + Math.sin(a) * r }); }
-                polylines.push(pts);
-            }
-        }
-        return polylines;
-    }
+    // ---- Voronoi / Adaptive / LBG / Grid: shared real-geometry engine ----
+    // Real DBV3 builds all four families from ONE combinator architecture
+    // (drawingbot.k.e.c.c): a "positional encoder" (sampler) that places
+    // points, paired with a shared "encoder" that renders the same 8ish
+    // named geometries -- Shapes / Triangulation / Tree / Stippling /
+    // Dashes / Diagram / TSP (Letters and Circular Scribbles omitted this
+    // pass: real font-outline plotting and the real organic curve-builder
+    // are each substantial standalone features, not something to fake under
+    // the real name -- see the tips on those encoders below). Ported
+    // directly from the decompiled Premium classes: drawingbot.k.e.c.a.p
+    // (Voronoi sampler), drawingbot.k.e.c.a.k (LBG sampler), drawingbot.
+    // k.e.c.a.g (Grid sampler, verbatim), drawingbot.k.e.c.b.{f,B,z,x,k,m}
+    // (Shapes/Triangulation/Tree/Stippling/Dashes/Diagram encoders), and
+    // drawingbot.k.b.i.e/f + drawingbot.k.e.c.a.a.e's shared weighted-
+    // centroid-with-orientation formula (identical in the real Voronoi
+    // sampler and the real LBG cell analysis -- ported once, used by both).
+    // Adaptive's real disk-packing engine (drawingbot.k.e.b.a, "AIS") did
+    // NOT survive decompilation intact -- Windows' case-insensitive
+    // filesystem collided it with an unrelated class also named "a" in the
+    // same package (a thin FutureTask wrapper), so only 339 bytes of
+    // unrelated code came out where the real packing algorithm should be.
+    // Adaptive's sampler here is therefore an honest from-scratch
+    // Poisson-disc packer (v3.1), not a port; everything downstream of it
+    // (the 6 shared encoders) is still the real, verified rendering code.
+    // TSP tours use a real, standard nearest-neighbour + bounded 2-opt
+    // solver (not DBV3's own SuperPixel-based tour construction, whose
+    // dependency chain wasn't staged this pass) -- a genuine, correct TSP
+    // heuristic, just not a byte-identical port.
+    // Bounded throughout: point counts, Delaunay/Voronoi rebuilds per
+    // iteration, and 2-opt passes are all hard-capped independent of user
+    // sliders, consistent with every other tracer in this file.
 
-    // ---- LBG family (mode: 'lbg') -- (v3.1): real DBV3 LBG PFMs are just as
-    // closed-source/Premium-only as Adaptive and Voronoi (confirmed via
-    // PremiumPluginDummy.java), so there's still no real code to port -- BUT
-    // DBV3's own docs (pfms.rst) name the real technique they're built on:
-    // "LBS (Linde Buzo Gray) PFMs combine the speed of Adaptive PFMs with
-    // the Quality of Voronoi PFMs". Linde-Buzo-Gray (1980) is a real, well-
-    // known vector-quantization algorithm, and that's genuinely what this
-    // implements: iteratively assign density mass to the nearest point, move
-    // each point to its density-weighted centroid (Lloyd step), then SPLIT
-    // high-mass points and REMOVE low-mass ones so the point count adapts to
-    // the image's density. Real DBV3's own settings (Stipple Radius Min/Max,
-    // Max Iterations) match this tracer's names/behaviour too. Not a port of
-    // DBV3's actual (inaccessible) code, but a genuine independent
-    // implementation of the correct, named, real algorithm their docs cite
-    // -- earns (v3.1), not (approx).
-    // Bounded by a downscaled work grid (LBG_MAX), capped iterations, and a
-    // hard point cap; validated well under a second on a 480px working image.
-    function traceLBG(weightMap, w, h, pointDensity, radiusMin, radiusMax, pointLimit, iterations, shape) {
-        var LBG_MAX = 200;
-        var scale = Math.min(1, LBG_MAX / Math.max(w, h));
-        var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
-        var N = cw * ch;
-        var dens = new Float32Array(N);
-        var totalMass = 0;
-        for (var cy = 0; cy < ch; cy++) {
-            var y0 = Math.floor(cy / ch * h), y1 = Math.max(y0 + 1, Math.floor((cy + 1) / ch * h));
-            for (var cx = 0; cx < cw; cx++) {
-                var x0 = Math.floor(cx / cw * w), x1 = Math.max(x0 + 1, Math.floor((cx + 1) / cw * w));
-                var sum = 0, cnt = 0;
-                for (var yy = y0; yy < y1 && yy < h; yy++) { var ro = yy * w; for (var xx = x0; xx < x1 && xx < w; xx++) { sum += weightMap[ro + xx] || 0; cnt++; } }
-                var d = cnt ? sum / cnt : 0;
-                dens[cy * cw + cx] = d; totalMass += d;
+    function polyBBox(poly) {
+        var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (var i = 0; i < poly.length; i++) {
+            var p = poly[i];
+            if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+            if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+        }
+        return { x0: x0, y0: y0, x1: x1, y1: y1 };
+    }
+    function pointInPolygon(px, py, poly) {
+        var inside = false;
+        for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            var xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+            if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function clipPolygonToRect(poly, x0, y0, x1, y1) {
+        if (!poly || poly.length < 3) return poly;
+        function clipEdge(pts, inside, intersect) {
+            var out = [];
+            for (var i = 0; i < pts.length; i++) {
+                var cur = pts[i], prev = pts[(i + pts.length - 1) % pts.length];
+                var curIn = inside(cur), prevIn = inside(prev);
+                if (curIn) { if (!prevIn) out.push(intersect(prev, cur)); out.push(cur); }
+                else if (prevIn) out.push(intersect(prev, cur));
+            }
+            return out;
+        }
+        var pts = poly;
+        pts = clipEdge(pts, function (p) { return p.x >= x0; }, function (a, b) { var t = (x0 - a.x) / (b.x - a.x); return { x: x0, y: a.y + t * (b.y - a.y) }; });
+        pts = clipEdge(pts, function (p) { return p.x <= x1; }, function (a, b) { var t = (x1 - a.x) / (b.x - a.x); return { x: x1, y: a.y + t * (b.y - a.y) }; });
+        pts = clipEdge(pts, function (p) { return p.y >= y0; }, function (a, b) { var t = (y0 - a.y) / (b.y - a.y); return { x: a.x + t * (b.x - a.x), y: y0 }; });
+        pts = clipEdge(pts, function (p) { return p.y <= y1; }, function (a, b) { var t = (y1 - a.y) / (b.y - a.y); return { x: a.x + t * (b.x - a.x), y: y1 }; });
+        return pts;
+    }
+    // Bowyer-Watson incremental Delaunay triangulation. O(n^2) worst case;
+    // every caller caps point counts (see MAX_* constants below) well
+    // under where that matters on a Pi.
+    function delaunayTriangulate(pts) {
+        var n = pts.length;
+        if (n < 3) return [];
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (var i = 0; i < n; i++) { if (pts[i].x < minX) minX = pts[i].x; if (pts[i].x > maxX) maxX = pts[i].x; if (pts[i].y < minY) minY = pts[i].y; if (pts[i].y > maxY) maxY = pts[i].y; }
+        var dmax = Math.max(maxX - minX, maxY - minY, 1) * 20;
+        var midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
+        var work = pts.slice();
+        var superStart = work.length;
+        work.push({ x: midX - dmax, y: midY - dmax }, { x: midX, y: midY + dmax }, { x: midX + dmax, y: midY - dmax });
+        function circumcircle(a, b, c) {
+            var ax = a.x, ay = a.y, bx = b.x, by = b.y, cx = c.x, cy = c.y;
+            var d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+            if (Math.abs(d) < 1e-9) return null;
+            var ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+            var uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+            return { x: ux, y: uy, r2: (ax - ux) * (ax - ux) + (ay - uy) * (ay - uy) };
+        }
+        var triangles = [[superStart, superStart + 1, superStart + 2]];
+        for (var pi = 0; pi < superStart; pi++) {
+            var p = work[pi], bad = [];
+            for (var ti = 0; ti < triangles.length; ti++) {
+                var t = triangles[ti], cc = circumcircle(work[t[0]], work[t[1]], work[t[2]]);
+                if (cc && ((p.x - cc.x) * (p.x - cc.x) + (p.y - cc.y) * (p.y - cc.y)) <= cc.r2 * 1.0000001) bad.push(ti);
+            }
+            var edgeCount = {};
+            for (var bi = 0; bi < bad.length; bi++) {
+                var t2 = triangles[bad[bi]], edges = [[t2[0], t2[1]], [t2[1], t2[2]], [t2[2], t2[0]]];
+                for (var ei = 0; ei < 3; ei++) { var key = Math.min(edges[ei][0], edges[ei][1]) + '_' + Math.max(edges[ei][0], edges[ei][1]); edgeCount[key] = (edgeCount[key] || 0) + 1; }
+            }
+            var boundary = [];
+            for (var bi2 = 0; bi2 < bad.length; bi2++) {
+                var t3 = triangles[bad[bi2]], edges2 = [[t3[0], t3[1]], [t3[1], t3[2]], [t3[2], t3[0]]];
+                for (var ei2 = 0; ei2 < 3; ei2++) { var key2 = Math.min(edges2[ei2][0], edges2[ei2][1]) + '_' + Math.max(edges2[ei2][0], edges2[ei2][1]); if (edgeCount[key2] === 1) boundary.push(edges2[ei2]); }
+            }
+            var keep = [];
+            for (var ti2 = 0; ti2 < triangles.length; ti2++) if (bad.indexOf(ti2) < 0) keep.push(triangles[ti2]);
+            for (var bo = 0; bo < boundary.length; bo++) keep.push([boundary[bo][0], boundary[bo][1], pi]);
+            triangles = keep;
+        }
+        var out = [];
+        for (var fi = 0; fi < triangles.length; fi++) { var tt = triangles[fi]; if (tt[0] < superStart && tt[1] < superStart && tt[2] < superStart) out.push(tt); }
+        return out;
+    }
+    // Real Voronoi cells as the dual of the Delaunay triangulation
+    // (triangle circumcenters around each site, angle-sorted, clipped to the
+    // working canvas) -- same diagram real DBV3 gets from JTS's
+    // VoronoiDiagramBuilder (Voronoi sampler) or OpenCV's Subdiv2D (LBG's
+    // cell analysis); this file has neither library, so it's built directly.
+    function voronoiCellsFromDelaunay(points, triangles, w, h) {
+        var n = points.length, cellsFor = new Array(n);
+        for (var i = 0; i < n; i++) cellsFor[i] = [];
+        for (var ti = 0; ti < triangles.length; ti++) {
+            var t = triangles[ti], a = points[t[0]], b = points[t[1]], c = points[t[2]];
+            var ax = a.x, ay = a.y, bx = b.x, by = b.y, cx = c.x, cy = c.y;
+            var d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+            var cc;
+            if (Math.abs(d) < 1e-9) cc = { x: (ax + bx + cx) / 3, y: (ay + by + cy) / 3 };
+            else cc = {
+                x: ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d,
+                y: ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+            };
+            cellsFor[t[0]].push(cc); cellsFor[t[1]].push(cc); cellsFor[t[2]].push(cc);
+        }
+        var polys = new Array(n);
+        for (var i2 = 0; i2 < n; i2++) {
+            var pc = points[i2], pts2 = cellsFor[i2];
+            if (pts2.length < 3) { polys[i2] = null; continue; }
+            pts2.sort(function (p1, p2) { return Math.atan2(p1.y - pc.y, p1.x - pc.x) - Math.atan2(p2.y - pc.y, p2.x - pc.x); });
+            var clean = [];
+            for (var k = 0; k < pts2.length; k++) { var pp = pts2[k], last = clean[clean.length - 1]; if (!last || Math.hypot(pp.x - last.x, pp.y - last.y) > 0.01) clean.push(pp); }
+            polys[i2] = clipPolygonToRect(clean, 0, 0, w, h);
+        }
+        return polys;
+    }
+    // Density-weighted cell centroid + orientation -- the EXACT formula real
+    // DBV3 uses in both places it needs one: the Voronoi sampler's Lloyd-
+    // relaxation step (drawingbot.k.e.c.a.p's static method `a`) and LBG's
+    // per-cell mass/orientation analysis (drawingbot.k.b.i.e's method `a`) --
+    // both decompile to the identical image-moment formula, ported once here
+    // and shared by both families below, matching the real architecture.
+    // `accuracy` scales scan step size (DBV3's real "Voronoi Accuracy").
+    function weightedCentroidInPoly(poly, bb, weightMap, w, h, densityPower, accuracy) {
+        var x0 = Math.max(0, Math.floor(bb.x0)), x1 = Math.min(w - 1, Math.ceil(bb.x1));
+        var y0 = Math.max(0, Math.floor(bb.y0)), y1 = Math.min(h - 1, Math.ceil(bb.y1));
+        if (x1 <= x0 || y1 <= y0) return null;
+        var step = Math.max(1, Math.round(1 / Math.max(0.05, accuracy)));
+        var dSum = 0, xSum = 0, ySum = 0, xySum = 0, xxSum = 0, yySum = 0;
+        for (var y = y0; y <= y1; y += step) {
+            for (var x = x0; x <= x1; x += step) {
+                if (poly && !pointInPolygon(x, y, poly)) continue;
+                var lum = 255 * (1 - (weightMap[y * w + x] || 0));
+                var dens = Math.pow(255 - lum, densityPower);
+                dSum += dens; xSum += x * dens; ySum += y * dens; xySum += x * y * dens; xxSum += x * x * dens; yySum += y * y * dens;
             }
         }
-        if (totalMass < 1e-6) return [];
-        var target = Math.max(4, Math.min(pointLimit, Math.round(pointDensity * 4)));
-        var pts = [];
-        var tries = 0, maxTries = target * 40;
-        while (pts.length < target && tries < maxTries) {
-            tries++;
-            var rx = Math.random() * cw, ry = Math.random() * ch;
-            var dd = dens[Math.floor(ry) * cw + Math.floor(rx)] || 0;
-            if (dd > 0.03 && Math.random() < dd) pts.push({ x: rx, y: ry });
-        }
-        if (pts.length < 2) return [];
-        var K = Math.max(1, Math.min(15, Math.round(iterations) || 4));
-        for (var it = 0; it < K; it++) {
-            var gcell = Math.max(1, Math.sqrt((cw * ch) / Math.max(1, pts.length)));
-            var gw = Math.max(1, Math.ceil(cw / gcell)), gh = Math.max(1, Math.ceil(ch / gcell));
-            var grid = new Array(gw * gh);
-            for (var gi = 0; gi < pts.length; gi++) {
-                var gk = Math.min(gh - 1, (pts[gi].y / gcell) | 0) * gw + Math.min(gw - 1, (pts[gi].x / gcell) | 0);
-                (grid[gk] = grid[gk] || []).push(gi);
+        if (dSum <= 0) return null;
+        var cx = xSum / dSum, cy = ySum / dSum;
+        var mxx = xxSum / dSum - cx * cx, mxy = (xySum / dSum - cx * cy) * 2, myy = yySum / dSum - cy * cy;
+        return { x: cx, y: cy, orientation: Math.atan2(mxy, mxx - myy) / 2, mass: dSum };
+    }
+    // Real Minimum Spanning Tree (Prim's algorithm; DBV3's own MST builder
+    // seeds its candidate edges from a Delaunay triangulation as a
+    // performance optimization since the true MST is always a Delaunay
+    // subgraph -- a real optimization, not an accuracy difference. This
+    // computes the same, correct MST directly in O(n^2), fine at the point
+    // counts this file caps samplers to).
+    function minimumSpanningTree(points) {
+        var n = points.length;
+        if (n < 2) return [];
+        var inTree = new Uint8Array(n), dist = new Float64Array(n).fill(Infinity), parent = new Int32Array(n).fill(-1);
+        dist[0] = 0;
+        var edges = [];
+        for (var iter = 0; iter < n; iter++) {
+            var u = -1, best = Infinity;
+            for (var i = 0; i < n; i++) if (!inTree[i] && dist[i] < best) { best = dist[i]; u = i; }
+            if (u < 0) break;
+            inTree[u] = 1;
+            if (parent[u] >= 0) edges.push([parent[u], u]);
+            for (var v = 0; v < n; v++) {
+                if (inTree[v]) continue;
+                var dx = points[u].x - points[v].x, dy = points[u].y - points[v].y, d2 = dx * dx + dy * dy;
+                if (d2 < dist[v]) { dist[v] = d2; parent[v] = u; }
             }
-            var mass = new Float64Array(pts.length), sx = new Float64Array(pts.length), sy = new Float64Array(pts.length);
-            for (var py = 0; py < ch; py++) {
-                for (var px = 0; px < cw; px++) {
-                    var dv = dens[py * cw + px];
-                    if (dv <= 0.02) continue;
-                    var gx = Math.min(gw - 1, (px / gcell) | 0), gy = Math.min(gh - 1, (py / gcell) | 0);
-                    var best = -1, bd = Infinity;
-                    for (var r = 0; r <= 3 && best < 0; r++) {
-                        for (var dy = -r; dy <= r; dy++) {
-                            var yy2 = gy + dy; if (yy2 < 0 || yy2 >= gh) continue;
-                            for (var dx = -r; dx <= r; dx++) {
-                                if (r > 0 && Math.abs(dx) < r && Math.abs(dy) < r) continue;
-                                var xx2 = gx + dx; if (xx2 < 0 || xx2 >= gw) continue;
-                                var b = grid[yy2 * gw + xx2]; if (!b) continue;
-                                for (var bi = 0; bi < b.length; bi++) {
-                                    var j = b[bi], ex = pts[j].x - px, ey = pts[j].y - py, e2 = ex * ex + ey * ey;
-                                    if (e2 < bd) { bd = e2; best = j; }
-                                }
-                            }
-                        }
+        }
+        return edges;
+    }
+    // Real, standard TSP heuristic: nearest-neighbour construction + bounded
+    // 2-opt local search (not DBV3's own SuperPixel-based tour, see header
+    // note above) -- a genuinely correct single continuous tour, just not a
+    // byte-identical port of their construction method.
+    function nearestNeighborTour(points) {
+        var n = points.length;
+        if (n < 2) return points.map(function (_, i) { return i; });
+        var visited = new Uint8Array(n), tour = [0];
+        visited[0] = 1;
+        for (var s = 1; s < n; s++) {
+            var cur = tour[tour.length - 1], best = -1, bd = Infinity;
+            for (var i = 0; i < n; i++) {
+                if (visited[i]) continue;
+                var dx = points[cur].x - points[i].x, dy = points[cur].y - points[i].y, d2 = dx * dx + dy * dy;
+                if (d2 < bd) { bd = d2; best = i; }
+            }
+            tour.push(best); visited[best] = 1;
+        }
+        return tour;
+    }
+    function twoOptImprove(tour, points, maxPasses) {
+        var n = tour.length;
+        if (n < 4) return tour;
+        function d(a, b) { var dx = points[a].x - points[b].x, dy = points[a].y - points[b].y; return Math.sqrt(dx * dx + dy * dy); }
+        var improved = true, passes = 0;
+        while (improved && passes < maxPasses) {
+            improved = false; passes++;
+            for (var i = 0; i < n - 2; i++) {
+                for (var j = i + 2; j < n - (i === 0 ? 1 : 0); j++) {
+                    var a = tour[i], b = tour[i + 1], c = tour[j], dd = tour[(j + 1) % n];
+                    if (a === c || b === dd) continue;
+                    if (d(a, c) + d(b, dd) < d(a, b) + d(c, dd) - 1e-6) {
+                        var seg = tour.slice(i + 1, j + 1).reverse();
+                        for (var k = 0; k < seg.length; k++) tour[i + 1 + k] = seg[k];
+                        improved = true;
                     }
-                    if (best >= 0) { mass[best] += dv; sx[best] += dv * px; sy[best] += dv * py; }
                 }
             }
-            var tgt = totalMass / pts.length;
+        }
+        return tour;
+    }
+
+    // ---- Point samplers (one per family) ----------------------------------
+    // Voronoi (real, direct port of drawingbot.k.e.c.a.p): weighted-
+    // rejection point sampling by local darkness (real formula:
+    // rand <= (255-lum)^densityPower / 255^(densityPower-1)), then N Lloyd-
+    // relaxation iterations against a real recomputed Voronoi diagram each
+    // pass, moving every point to its cell's density-weighted centroid.
+    function sampleVoronoiPoints(weightMap, w, h, opts) {
+        var target = Math.max(4, Math.min(opts.maxPoints, opts.pointCount));
+        var pts = [], tries = 0, maxTries = target * 300;
+        var minLum = 255, maxLum = 0;
+        for (var i = 0; i < weightMap.length; i++) { var lum = 255 * (1 - weightMap[i]); if (lum < minLum) minLum = lum; if (lum > maxLum) maxLum = lum; }
+        var lumRange = Math.max(1, maxLum - minLum);
+        while (pts.length < target && tries < maxTries) {
+            tries++;
+            var rx = Math.random() * w, ry = Math.random() * h;
+            var lum = 255 * (1 - (weightMap[(ry | 0) * w + (rx | 0)] || 0));
+            var thresh = Math.pow(255 - lum, opts.densityPower) / Math.pow(255, Math.max(0, opts.densityPower - 1));
+            if (Math.random() * lumRange <= thresh) pts.push({ x: rx, y: ry });
+        }
+        if (pts.length < 3) return { points: pts, cells: null };
+        var iterations = Math.max(0, Math.min(12, opts.iterations));
+        var cells = null;
+        for (var it = 0; it <= iterations; it++) {
+            var tri = delaunayTriangulate(pts);
+            cells = voronoiCellsFromDelaunay(pts, tri, w, h);
+            if (it === iterations) break;
+            for (var pi = 0; pi < pts.length; pi++) {
+                var poly = cells[pi]; if (!poly || poly.length < 3) continue;
+                var c = weightedCentroidInPoly(poly, polyBBox(poly), weightMap, w, h, opts.densityPower, opts.accuracy);
+                if (c) { pts[pi].x = c.x; pts[pi].y = c.y; pts[pi].orientation = c.orientation; }
+            }
+        }
+        return { points: pts, cells: cells };
+    }
+    // Adaptive (v3.1 -- see header note: real AIS packer unrecoverable).
+    // From-scratch Poisson-disc packer: candidate disks at random positions,
+    // local radius interpolated Max->Min Sample Radius by local darkness,
+    // accepted only if they don't overlap an already-placed disk.
+    function sampleAdaptiveDisks(weightMap, w, h, opts) {
+        var minR = Math.max(0.5, opts.minRadius), maxR = Math.max(minR + 0.5, opts.maxRadius);
+        var cell = Math.max(1, minR);
+        var gw = Math.max(1, Math.ceil(w / cell)), gh = Math.max(1, Math.ceil(h / cell));
+        var grid = new Array(gw * gh);
+        var pts = [];
+        var MAX_DISKS = Math.min(opts.maxPoints || 2500, 2500);
+        var tries = 0, maxTries = MAX_DISKS * 80;
+        function densityAt(x, y) { var xi = x | 0, yi = y | 0; if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0; return weightMap[yi * w + xi] || 0; }
+        function radiusAt(x, y) { return maxR - (maxR - minR) * densityAt(x, y); }
+        function overlaps(x, y, r) {
+            var gx = (x / cell) | 0, gy = (y / cell) | 0, rc = Math.max(1, Math.ceil((r + maxR) / cell));
+            for (var dy = -rc; dy <= rc; dy++) {
+                var yy = gy + dy; if (yy < 0 || yy >= gh) continue;
+                for (var dx = -rc; dx <= rc; dx++) {
+                    var xx = gx + dx; if (xx < 0 || xx >= gw) continue;
+                    var b = grid[yy * gw + xx]; if (!b) continue;
+                    for (var bi = 0; bi < b.length; bi++) { var o = pts[b[bi]], ddx = o.x - x, ddy = o.y - y, mind = (o.r + r) * (o.r + r); if (ddx * ddx + ddy * ddy < mind) return true; }
+                }
+            }
+            return false;
+        }
+        while (pts.length < MAX_DISKS && tries < maxTries) {
+            tries++;
+            var x = Math.random() * w, y = Math.random() * h;
+            if (densityAt(x, y) <= 0.03) continue;
+            var r = radiusAt(x, y);
+            if (overlaps(x, y, r)) continue;
+            var gx = (x / cell) | 0, gy = (y / cell) | 0, gk = gy * gw + gx;
+            (grid[gk] = grid[gk] || []).push(pts.length);
+            pts.push({ x: x, y: y, r: r });
+        }
+        return { points: pts, cells: null };
+    }
+    // LBG (real, direct port of drawingbot.k.e.c.a.k's iterative split/merge
+    // -- Linde-Buzo-Gray 1980): each iteration rebuilds a real Voronoi
+    // diagram, computes each cell's mass + weighted centroid (shared formula
+    // above), derives a target diameter per cell from its mean density (Min/
+    // Max Cell Diameter blended by Density Blend, the real l/m/n fields),
+    // then SPLITS cells whose mass exceeds that target's area (2 new points
+    // offset along the cell's real orientation), MERGES cells below it
+    // (drop), or recentres (Lloyd step) otherwise. Hysteresis/Hysteresis
+    // Growth (real q/r fields) widen the keep-band each iteration so the
+    // point count converges instead of oscillating. `easeOutQuad` stands in
+    // for DBV3's own easing helper (drawingbot.e.b.a.i) -- that one specific
+    // curve wasn't recoverable from the decompile, this is the standard
+    // shape it's almost certainly matching.
+    function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
+    function lbgTargetDiameter(meanDensity, minDiam, maxDiam, blend) {
+        var yProgress = 1 - (easeOutQuad(meanDensity) * blend + meanDensity * (1 - blend));
+        return minDiam + yProgress * (maxDiam - minDiam);
+    }
+    function sampleLBGPoints(weightMap, w, h, opts) {
+        // Hard, unconditional point ceiling independent of opts.maxPoints --
+        // NOT just the real l/m/n hysteresis-band logic below (which only
+        // throttles NEW splits within a single iteration and can't shrink an
+        // already-oversized population). On a small/bright min-diameter with
+        // a dense image, the real split/merge dynamics alone can converge to
+        // thousands of points well past the user's Point Limit, and every
+        // iteration re-triangulates the whole set (O(n^2)) -- exactly the
+        // unbounded-compute pattern this file's header warns against, so it
+        // gets a real, independent backstop like every other sampler here.
+        var HARD_CAP = Math.min(opts.maxPoints, 2000);
+        var pts = [], startCount = Math.max(4, Math.min(HARD_CAP, Math.round(opts.pointCount * 0.3)));
+        var tries = 0, maxTries = startCount * 200;
+        while (pts.length < startCount && tries < maxTries) {
+            tries++;
+            var x = Math.random() * w, y = Math.random() * h;
+            if ((weightMap[(y | 0) * w + (x | 0)] || 0) > 0.05) pts.push({ x: x, y: y });
+        }
+        if (pts.length < 3) return { points: pts, cells: null };
+        var iterations = Math.max(1, Math.min(20, opts.iterations)), cells = null;
+        for (var it = 0; it < iterations; it++) {
+            var tri = delaunayTriangulate(pts);
+            cells = voronoiCellsFromDelaunay(pts, tri, w, h);
+            var hysteresis = opts.hysteresis + it * opts.hysteresisGrowth;
             var next = [];
-            for (var i = 0; i < pts.length; i++) {
-                if (mass[i] < 1e-6) continue;
-                var mx = sx[i] / mass[i], my = sy[i] / mass[i];
-                if (mass[i] > 1.8 * tgt && next.length < pointLimit - 1) {
-                    next.push({ x: mx - 0.8, y: my - 0.4 });
-                    next.push({ x: mx + 0.8, y: my + 0.4 });
-                } else if (mass[i] < 0.35 * tgt) {
-                    // drop low-mass point
-                } else {
-                    next.push({ x: mx, y: my });
+            for (var pi = 0; pi < pts.length; pi++) {
+                var poly = cells[pi];
+                if (!poly || poly.length < 3) continue;
+                var bb = polyBBox(poly);
+                var c = weightedCentroidInPoly(poly, bb, weightMap, w, h, 1, opts.accuracy);
+                if (!c || c.mass <= 0) continue;
+                var pixCount = Math.max(1, (bb.x1 - bb.x0) * (bb.y1 - bb.y0));
+                var meanDensity = Math.min(1, c.mass / pixCount);
+                var diameter = lbgTargetDiameter(meanDensity, opts.minDiameter, opts.maxDiameter, opts.densityBlend);
+                var targetArea = Math.PI * (diameter / 2) * (diameter / 2);
+                var minMass = (1 - hysteresis / 2) * targetArea, maxMass = (1 + hysteresis / 2) * targetArea;
+                if (c.mass < minMass) { continue; }
+                else if (c.mass < maxMass || next.length >= HARD_CAP - 1) { next.push({ x: c.x, y: c.y }); }
+                else {
+                    var area = Math.max(c.mass, 1), radius = Math.sqrt(area / Math.PI) / 2, ang = c.orientation;
+                    next.push({ x: Math.max(0, Math.min(w - 1, c.x - radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y - radius * Math.sin(ang))) });
+                    next.push({ x: Math.max(0, Math.min(w - 1, c.x + radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y + radius * Math.sin(ang))) });
                 }
             }
             if (next.length < 2) break;
+            // Backstop: trim any residual overshoot from the last iteration's
+            // trailing splits (the per-cell check above can only over/undershoot
+            // by ~1 cell, but this keeps the bound exact and independent of it).
+            if (next.length > HARD_CAP) next = next.slice(0, HARD_CAP);
             pts = next;
         }
-        var invx = w / cw, invy = h / ch;
-        var polylines = [];
-        for (var q = 0; q < pts.length; q++) {
-            var fx = pts[q].x * invx, fy = pts[q].y * invy;
-            var xi = Math.max(0, Math.min(w - 1, fx | 0)), yi = Math.max(0, Math.min(h - 1, fy | 0));
-            var dloc = weightMap[yi * w + xi] || 0;
-            var rr = radiusMin + (radiusMax - radiusMin) * dloc;
-            if (shape === 'dash') {
-                var ang = Math.random() * Math.PI;
-                polylines.push([{ x: fx - Math.cos(ang) * rr, y: fy - Math.sin(ang) * rr }, { x: fx + Math.cos(ang) * rr, y: fy + Math.sin(ang) * rr }]);
-            } else if (shape === 'square') {
-                polylines.push([{ x: fx - rr, y: fy - rr }, { x: fx + rr, y: fy - rr }, { x: fx + rr, y: fy + rr }, { x: fx - rr, y: fy + rr }, { x: fx - rr, y: fy - rr }]);
-            } else {
-                var pp = [], segs = 8;
-                for (var sgi = 0; sgi <= segs; sgi++) { var a = (sgi / segs) * Math.PI * 2; pp.push({ x: fx + Math.cos(a) * rr, y: fy + Math.sin(a) * rr }); }
-                polylines.push(pp);
+        var tri2 = delaunayTriangulate(pts);
+        cells = voronoiCellsFromDelaunay(pts, tri2, w, h);
+        return { points: pts, cells: cells };
+    }
+    // Grid (real, direct port of drawingbot.k.e.c.a.g): regular rows/columns
+    // by Cell Width/Height (optionally square-locked), optional hex-stagger
+    // (odd rows offset by half a cell), optional positional noise, radius
+    // scaled by local darkness.
+    function sampleGridPoints(weightMap, w, h, opts) {
+        var cw = Math.max(1, opts.cellWidth), ch = opts.square ? cw : Math.max(1, opts.cellHeight);
+        var columns = Math.max(1, Math.floor((w - 1) / cw)), rows = Math.max(1, Math.floor((h - 1) / ch));
+        var offsetX = (w - 1 - (columns - 1) * cw) / 2, offsetY = (h - 1 - (rows - 1) * ch) / 2;
+        var maxR = Math.max(cw, ch) / 2 * opts.radiusScale;
+        var pts = [];
+        for (var y = 0; y < rows; y++) {
+            for (var x = 0; x < columns; x++) {
+                var xPos = offsetX + x * cw, yPos = offsetY + y * ch;
+                if (opts.stagger) { xPos += (y % 2 === 0) ? 0 : cw / 2; if (y % 2 !== 0 && x === columns - 1) continue; }
+                if (opts.noise > 0) { xPos += (Math.random() - 0.5) * opts.noise; yPos += (Math.random() - 0.5) * opts.noise; }
+                var xi = Math.max(0, Math.min(w - 1, xPos | 0)), yi = Math.max(0, Math.min(h - 1, yPos | 0));
+                var dens = weightMap[yi * w + xi] || 0;
+                if (dens <= 0.02) continue;
+                pts.push({ x: xPos, y: yPos, r: maxR * dens });
             }
         }
-        return polylines;
+        return { points: pts, cells: null };
     }
 
-    // ---- Adaptive family (mode: 'adaptive') -- (approx), see adaptiveShape
-    // tip above: real DBV3 Adaptive PFMs are 100% Premium/closed-source with
-    // no public implementation, and use a real Voronoi-relaxation + tone-
-    // mapping pipeline (verified via pfms.rst), not quadtree subdivision.
-    // Recursive quadtree subdivision: split cells with high local variance
-    // or oversized cells, stop at Min Sample Radius; one shape per leaf.
-    // "Min/Max Sample Radius" happen to be real DBV3 setting names (used by
-    // the real "Adaptive Circular Scribbles" PFM specifically), reused here
-    // as this tracer's own cell-size bounds -- same names, different PFM,
-    // different algorithm underneath.
-    // Hard-capped by both a total-cell limit and a total-work-item limit so
-    // a very small Min Sample Radius degrades (fewer, coarser cells kept)
-    // rather than exploding into unbounded recursion.
-    function traceAdaptive(weightMap, w, h, minRadius, maxRadius, shape) {
-        var CELL_CAP = 3000, WORK_CAP = 20000;
-        function avgDensity(x, y, size) {
-            var x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
-            var x1 = Math.min(w, Math.ceil(x + size)), y1 = Math.min(h, Math.ceil(y + size));
-            if (x1 <= x0 || y1 <= y0) return 0;
-            var stepPx = Math.max(1, Math.floor(size / 6));
-            var sum = 0, cnt = 0;
-            for (var yy = y0; yy < y1; yy += stepPx) for (var xx = x0; xx < x1; xx += stepPx) { sum += weightMap[yy * w + xx] || 0; cnt++; }
-            return cnt ? sum / cnt : 0;
-        }
-        function varianceOf(x, y, size) {
-            var half = size / 2;
-            var a = avgDensity(x, y, half), b = avgDensity(x + half, y, half), c = avgDensity(x, y + half, half), d = avgDensity(x + half, y + half, half);
-            var m = (a + b + c + d) / 4;
-            return Math.sqrt(((a - m) * (a - m) + (b - m) * (b - m) + (c - m) * (c - m) + (d - m) * (d - m)) / 4);
-        }
-        var minR = Math.max(1, minRadius), maxR = Math.max(minR * 1.2, maxRadius);
-        var stack = [{ x: 0, y: 0, size: Math.max(w, h) }];
-        var cells = [], work = 0;
-        while (stack.length && cells.length < CELL_CAP && work < WORK_CAP) {
-            work++;
-            var cell = stack.pop();
-            if (cell.x >= w || cell.y >= h) continue;
-            var size = cell.size;
-            var dens = avgDensity(cell.x, cell.y, size);
-            var canSubdivide = size > minR * 2;
-            var shouldSubdivide = canSubdivide && (size > maxR * 2 || varianceOf(cell.x, cell.y, size) > 0.06);
-            if (shouldSubdivide) {
-                var half = size / 2;
-                // Push order is shuffled: a LIFO stack pops the LAST-pushed
-                // child first, so a fixed push order (TL,TR,BL,BR) always
-                // dove into the bottom-right quadrant first at every level.
-                // On a busy image where CELL_CAP/WORK_CAP truncates before
-                // full coverage, that meant bottom-right got fully detailed
-                // while the opposite corner was starved of cells entirely.
-                var children = [
-                    { x: cell.x, y: cell.y, size: half },
-                    { x: cell.x + half, y: cell.y, size: half },
-                    { x: cell.x, y: cell.y + half, size: half },
-                    { x: cell.x + half, y: cell.y + half, size: half }
-                ];
-                for (var ci = children.length - 1; ci > 0; ci--) {
-                    var cj = Math.floor(Math.random() * (ci + 1));
-                    var ctmp = children[ci]; children[ci] = children[cj]; children[cj] = ctmp;
-                }
-                for (var cpi = 0; cpi < children.length; cpi++) stack.push(children[cpi]);
-            } else if (dens > 0.05) {
-                cells.push({ cx: cell.x + size / 2, cy: cell.y + size / 2, size: size, density: dens });
-            }
-        }
+    // ---- Shared encoders (real, direct ports of drawingbot.k.e.c.b.*) -----
+    function encodeShapesPolylines(points, radii, shapeType) {
         var out = [];
-        cells.forEach(function (c) {
-            var r = Math.max(1, c.size * 0.35 * (0.4 + 0.6 * c.density));
-            if (shape === 'circle') {
-                var pts = []; var segs = 10;
-                for (var s = 0; s <= segs; s++) { var a = (s / segs) * Math.PI * 2; pts.push({ x: c.cx + Math.cos(a) * r, y: c.cy + Math.sin(a) * r }); }
-                out.push(pts);
-            } else if (shape === 'dash') {
-                var ang = Math.random() * Math.PI;
-                out.push([{ x: c.cx - Math.cos(ang) * r, y: c.cy - Math.sin(ang) * r }, { x: c.cx + Math.cos(ang) * r, y: c.cy + Math.sin(ang) * r }]);
-            } else if (shape === 'scribble') {
-                out.push(scribbleCircleAt(c.cx, c.cy, r));
-            } else {
-                out.push([{ x: c.cx - r, y: c.cy - r }, { x: c.cx + r, y: c.cy - r }, { x: c.cx + r, y: c.cy + r }, { x: c.cx - r, y: c.cy + r }, { x: c.cx - r, y: c.cy - r }]);
-            }
-        });
+        for (var i = 0; i < points.length; i++) {
+            var p = points[i], r = radii[i];
+            if (!(r > 0)) continue;
+            if (shapeType === 'square') out.push([{ x: p.x - r, y: p.y - r }, { x: p.x + r, y: p.y - r }, { x: p.x + r, y: p.y + r }, { x: p.x - r, y: p.y + r }, { x: p.x - r, y: p.y - r }]);
+            else if (shapeType === 'triangle') { var a0 = -Math.PI / 2, tri = []; for (var k = 0; k <= 3; k++) { var a = a0 + (k % 3) * (Math.PI * 2 / 3); tri.push({ x: p.x + Math.cos(a) * r, y: p.y + Math.sin(a) * r }); } out.push(tri); }
+            else if (shapeType === 'cross') { out.push([{ x: p.x - r, y: p.y }, { x: p.x + r, y: p.y }]); out.push([{ x: p.x, y: p.y - r }, { x: p.x, y: p.y + r }]); }
+            else { var pts = [], segs = 14; for (var s = 0; s <= segs; s++) { var a2 = (s / segs) * Math.PI * 2; pts.push({ x: p.x + Math.cos(a2) * r, y: p.y + Math.sin(a2) * r }); } out.push(pts); }
+        }
         return out;
+    }
+    function encodeStipplingPolylines(points, dotRadius) {
+        var out = [];
+        for (var i = 0; i < points.length; i++) {
+            var p = points[i], r = dotRadius;
+            out.push([{ x: p.x - r, y: p.y - r }, { x: p.x + r, y: p.y - r }, { x: p.x + r, y: p.y + r }, { x: p.x - r, y: p.y + r }, { x: p.x - r, y: p.y - r }]);
+        }
+        return out;
+    }
+    function encodeDashesPolylines(points, radii, weightMap, w, h, alignToEdge, minRotDeg, maxRotDeg, distortion01) {
+        var out = [];
+        function lumAt(x, y) { var xi = x | 0, yi = y | 0; if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 255; return 255 * (1 - (weightMap[yi * w + xi] || 0)); }
+        for (var i = 0; i < points.length; i++) {
+            var p = points[i], r = Math.max(1, radii[i]), bestAngle;
+            if (alignToEdge) {
+                var samples = 16, lowestVar = Infinity, bestA = 0;
+                for (var s = 0; s < samples; s++) {
+                    var ang = s * Math.PI / samples;
+                    var v = Math.abs(lumAt(p.x + Math.cos(ang) * r, p.y + Math.sin(ang) * r) - lumAt(p.x - Math.cos(ang) * r, p.y - Math.sin(ang) * r));
+                    if (v <= lowestVar) { lowestVar = v; bestA = ang; }
+                }
+                bestAngle = bestA;
+            } else bestAngle = (minRotDeg + Math.random() * (maxRotDeg - minRotDeg)) * Math.PI / 180;
+            var length = (1 - lumAt(p.x, p.y) / 255) * (r * 2);
+            var x1 = p.x + Math.cos(bestAngle) * length / 2, y1 = p.y + Math.sin(bestAngle) * length / 2;
+            var x2 = p.x - Math.cos(bestAngle) * length / 2, y2 = p.y - Math.sin(bestAngle) * length / 2;
+            if (distortion01 > 0) {
+                var adj = bestAngle + Math.PI / 2, nOff = (Math.random() * 2 - 1) * r * distortion01;
+                out.push(catmullRomResampleT([{ x: x1, y: y1 }, { x: x1 + Math.cos(adj) * nOff, y: y1 + Math.sin(adj) * nOff }, { x: x2 + Math.cos(adj) * nOff, y: y2 + Math.sin(adj) * nOff }, { x: x2, y: y2 }], 3, 0));
+            } else out.push([{ x: x1, y: y1 }, { x: x2, y: y2 }]);
+        }
+        return out;
+    }
+    function encodeTriangulationPolylines(points, w, h, closeBorder) {
+        var pts = points.slice();
+        if (closeBorder) pts = pts.concat([{ x: 0, y: 0 }, { x: 0, y: h - 1 }, { x: w - 1, y: 0 }, { x: w - 1, y: h - 1 }]);
+        var tri = delaunayTriangulate(pts), seen = {}, out = [];
+        for (var i = 0; i < tri.length; i++) {
+            var t = tri[i], edges = [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]];
+            for (var e = 0; e < 3; e++) {
+                var a = edges[e][0], b = edges[e][1], key = Math.min(a, b) + '_' + Math.max(a, b);
+                if (seen[key]) continue;
+                seen[key] = 1;
+                out.push([{ x: pts[a].x, y: pts[a].y }, { x: pts[b].x, y: pts[b].y }]);
+            }
+        }
+        return out;
+    }
+    function encodeTreePolylines(points) {
+        var edges = minimumSpanningTree(points), out = [];
+        for (var i = 0; i < edges.length; i++) { var a = points[edges[i][0]], b = points[edges[i][1]]; out.push([{ x: a.x, y: a.y }, { x: b.x, y: b.y }]); }
+        return out;
+    }
+    function encodeDiagramPolylines(cells) {
+        var out = [];
+        if (!cells) return out;
+        for (var i = 0; i < cells.length; i++) { var poly = cells[i]; if (!poly || poly.length < 3) continue; out.push(poly.concat([poly[0]])); }
+        return out;
+    }
+    function encodeTSPPolyline(points, maxOptPoints) {
+        if (points.length < 2) return [];
+        var tour = nearestNeighborTour(points);
+        if (points.length <= maxOptPoints) tour = twoOptImprove(tour, points, 6);
+        return [tour.map(function (i) { return { x: points[i].x, y: points[i].y }; })];
+    }
+    function renderPointFamily(sampled, weightMap, w, h, opts) {
+        var points = sampled.points, cells = sampled.cells;
+        if (!points.length) return [];
+        var radii = new Array(points.length);
+        for (var ri = 0; ri < points.length; ri++) {
+            var p = points[ri];
+            if (p.r != null) { radii[ri] = p.r; continue; }
+            var xi = Math.max(0, Math.min(w - 1, p.x | 0)), yi = Math.max(0, Math.min(h - 1, p.y | 0));
+            radii[ri] = opts.radiusMin + (opts.radiusMax - opts.radiusMin) * (weightMap[yi * w + xi] || 0);
+        }
+        switch (opts.encoder) {
+            case 'triangulation': return encodeTriangulationPolylines(points, w, h, opts.closeBorder);
+            case 'tree': return encodeTreePolylines(points);
+            case 'stippling': return encodeStipplingPolylines(points, opts.dotRadius);
+            case 'dashes': return encodeDashesPolylines(points, radii, weightMap, w, h, opts.dashAlignEdge, opts.dashMinRotation, opts.dashMaxRotation, opts.dashDistortion);
+            case 'diagram': {
+                var cellsForDiagram = cells;
+                if (!cellsForDiagram) { var tri = delaunayTriangulate(points); cellsForDiagram = voronoiCellsFromDelaunay(points, tri, w, h); }
+                return encodeDiagramPolylines(cellsForDiagram);
+            }
+            case 'tsp': return encodeTSPPolyline(points, opts.tspMaxOptPoints || 350);
+            default: return encodeShapesPolylines(points, radii, opts.shapeType);
+        }
+    }
+    function traceVoronoiFamily(weightMap, w, h, opts) {
+        var sampled = sampleVoronoiPoints(weightMap, w, h, opts);
+        return renderPointFamily(sampled, weightMap, w, h, opts);
+    }
+    function traceAdaptiveFamily(weightMap, w, h, opts) {
+        var sampled = sampleAdaptiveDisks(weightMap, w, h, opts);
+        return renderPointFamily(sampled, weightMap, w, h, opts);
+    }
+    function traceLBGFamily(weightMap, w, h, opts) {
+        var sampled = sampleLBGPoints(weightMap, w, h, opts);
+        return renderPointFamily(sampled, weightMap, w, h, opts);
+    }
+    function traceGridFamily(weightMap, w, h, opts) {
+        var sampled = sampleGridPoints(weightMap, w, h, opts);
+        return renderPointFamily(sampled, weightMap, w, h, opts);
     }
 
     function generate() {
@@ -1816,10 +2137,31 @@ window.sketches['imageTrace'] = function (p) {
                             PARAMS.crosshatch === 'on', PARAMS.linkEnds === 'on',
                             PARAMS.hatchStyle, Math.max(0.1, PARAMS.hatchAmplitude), Math.max(1, PARAMS.hatchVelocityMin), Math.max(1, PARAMS.hatchVelocityMax));
                     } else if (mode === 'stipple') {
-                        result[pens[i]] = traceStipple(wMap, workW, workH,
-                            Math.max(5, PARAMS.pointDensity), Math.max(0.1, PARAMS.stippleRadiusMin),
-                            Math.max(PARAMS.stippleRadiusMin, PARAMS.stippleRadiusMax), Math.max(10, PARAMS.pointLimit),
-                            PARAMS.luminancePower, PARAMS.voronoiIterations, PARAMS.stippleShape);
+                        result[pens[i]] = traceVoronoiFamily(wMap, workW, workH, {
+                            pointCount: Math.max(10, PARAMS.pointLimit), maxPoints: Math.max(10, PARAMS.pointLimit),
+                            densityPower: Math.max(0.5, PARAMS.luminancePower), iterations: Math.max(0, PARAMS.voronoiIterations),
+                            accuracy: Math.max(0.05, Math.min(1, PARAMS.voronoiAccuracy)),
+                            radiusMin: Math.max(0.1, PARAMS.stippleRadiusMin), radiusMax: Math.max(PARAMS.stippleRadiusMin, PARAMS.stippleRadiusMax),
+                            encoder: PARAMS.pointEncoder, shapeType: PARAMS.pointShapeType,
+                            closeBorder: PARAMS.triangulationCloseBorder === 'on', dotRadius: Math.max(0.1, PARAMS.stipplingDotRadius),
+                            dashAlignEdge: PARAMS.dashAlignToEdge === 'on', dashMinRotation: Number(PARAMS.dashMinRotation) || 0,
+                            dashMaxRotation: Number(PARAMS.dashMaxRotation) || 180,
+                            dashDistortion: Math.max(0, Math.min(1, (Number(PARAMS.dashDistortion) || 0) / 100)),
+                            tspMaxOptPoints: Math.max(10, PARAMS.tspMaxOptPoints)
+                        });
+                    } else if (mode === 'grid') {
+                        result[pens[i]] = traceGridFamily(wMap, workW, workH, {
+                            cellWidth: Math.max(1, PARAMS.gridCellWidth), cellHeight: Math.max(1, PARAMS.gridCellHeight),
+                            square: PARAMS.gridSquare === 'on', stagger: PARAMS.gridStagger === 'on',
+                            noise: Math.max(0, PARAMS.gridNoise), radiusScale: Math.max(0.05, PARAMS.gridRadiusScale),
+                            radiusMin: 0.5, radiusMax: Math.max(1, PARAMS.gridCellWidth) / 2,
+                            encoder: PARAMS.pointEncoder, shapeType: PARAMS.pointShapeType,
+                            closeBorder: PARAMS.triangulationCloseBorder === 'on', dotRadius: Math.max(0.1, PARAMS.stipplingDotRadius),
+                            dashAlignEdge: PARAMS.dashAlignToEdge === 'on', dashMinRotation: Number(PARAMS.dashMinRotation) || 0,
+                            dashMaxRotation: Number(PARAMS.dashMaxRotation) || 180,
+                            dashDistortion: Math.max(0, Math.min(1, (Number(PARAMS.dashDistortion) || 0) / 100)),
+                            tspMaxOptPoints: Math.max(10, PARAMS.tspMaxOptPoints)
+                        });
                     } else if (mode === 'spiral') {
                         var spiralRaw = traceSpiralReal(wMap, workW, workH, {
                             spiralType: (PARAMS.spiralStyle === 'parabolic') ? 'parabolic' : 'archimedean',
@@ -1833,12 +2175,32 @@ window.sketches['imageTrace'] = function (p) {
                             ? spiralRaw.map(function (l) { return scribbleizeAlong(l, Math.max(3, PARAMS.ringSpacing) * 0.8, PARAMS.spiralAmplitude); })
                             : spiralRaw;
                     } else if (mode === 'lbg') {
-                        result[pens[i]] = traceLBG(wMap, workW, workH,
-                            Math.max(5, PARAMS.pointDensity), Math.max(0.1, PARAMS.stippleRadiusMin),
-                            Math.max(PARAMS.stippleRadiusMin, PARAMS.stippleRadiusMax), Math.max(10, PARAMS.pointLimit),
-                            PARAMS.voronoiIterations, PARAMS.lbgShape);
+                        result[pens[i]] = traceLBGFamily(wMap, workW, workH, {
+                            pointCount: Math.max(10, PARAMS.pointLimit), maxPoints: Math.max(10, PARAMS.pointLimit),
+                            iterations: Math.max(1, PARAMS.voronoiIterations), accuracy: Math.max(0.05, Math.min(1, PARAMS.voronoiAccuracy)),
+                            minDiameter: Math.max(0.5, PARAMS.lbgMinDiameter), maxDiameter: Math.max(PARAMS.lbgMinDiameter, PARAMS.lbgMaxDiameter),
+                            densityBlend: Math.max(0, Math.min(1, PARAMS.lbgDensityBlend)),
+                            hysteresis: Math.max(0, PARAMS.lbgHysteresis), hysteresisGrowth: Math.max(0, PARAMS.lbgHysteresisGrowth),
+                            radiusMin: Math.max(0.1, PARAMS.stippleRadiusMin), radiusMax: Math.max(PARAMS.stippleRadiusMin, PARAMS.stippleRadiusMax),
+                            encoder: PARAMS.pointEncoder, shapeType: PARAMS.pointShapeType,
+                            closeBorder: PARAMS.triangulationCloseBorder === 'on', dotRadius: Math.max(0.1, PARAMS.stipplingDotRadius),
+                            dashAlignEdge: PARAMS.dashAlignToEdge === 'on', dashMinRotation: Number(PARAMS.dashMinRotation) || 0,
+                            dashMaxRotation: Number(PARAMS.dashMaxRotation) || 180,
+                            dashDistortion: Math.max(0, Math.min(1, (Number(PARAMS.dashDistortion) || 0) / 100)),
+                            tspMaxOptPoints: Math.max(10, PARAMS.tspMaxOptPoints)
+                        });
                     } else if (mode === 'adaptive') {
-                        result[pens[i]] = traceAdaptive(wMap, workW, workH, Math.max(1, PARAMS.minSampleRadius), Math.max(2, PARAMS.maxSampleRadius), PARAMS.adaptiveShape);
+                        result[pens[i]] = traceAdaptiveFamily(wMap, workW, workH, {
+                            minRadius: Math.max(0.5, PARAMS.minSampleRadius), maxRadius: Math.max(PARAMS.minSampleRadius + 0.5, PARAMS.maxSampleRadius),
+                            maxPoints: Math.max(10, PARAMS.adaptiveMaxPoints),
+                            radiusMin: Math.max(0.5, PARAMS.minSampleRadius), radiusMax: Math.max(PARAMS.minSampleRadius + 0.5, PARAMS.maxSampleRadius),
+                            encoder: PARAMS.pointEncoder, shapeType: PARAMS.pointShapeType,
+                            closeBorder: PARAMS.triangulationCloseBorder === 'on', dotRadius: Math.max(0.1, PARAMS.stipplingDotRadius),
+                            dashAlignEdge: PARAMS.dashAlignToEdge === 'on', dashMinRotation: Number(PARAMS.dashMinRotation) || 0,
+                            dashMaxRotation: Number(PARAMS.dashMaxRotation) || 180,
+                            dashDistortion: Math.max(0, Math.min(1, (Number(PARAMS.dashDistortion) || 0) / 100)),
+                            tspMaxOptPoints: Math.max(10, PARAMS.tspMaxOptPoints)
+                        });
                     } else if (mode === 'sketch') {
                         var _waveDivX = Number(PARAMS.sketchWaveDivisorX) || 30;
                         var _waveDivY = Number(PARAMS.sketchWaveDivisorY) || 30;
@@ -1939,7 +2301,7 @@ window.sketches['imageTrace'] = function (p) {
         hideGlobalFillIds: ['penLiftFills', 'fillAngle', 'fillImperfection', 'fillDensity', 'fillProb'],
         hideGlobalScatter: true,
         presetAnchorParam: 'mode',
-        presetAnchorByFamily: { param: 'mode', map: { sketch: 'sketchStyle', streamlines: 'fieldType', spiral: 'spiralStyle', hatch: 'hatchStyle', adaptive: 'adaptiveShape', lbg: 'lbgShape' } },
+        presetAnchorByFamily: { param: 'mode', map: { sketch: 'sketchStyle', streamlines: 'fieldType', spiral: 'spiralStyle', hatch: 'hatchStyle', stipple: 'pointEncoder', adaptive: 'pointEncoder', lbg: 'pointEncoder', grid: 'pointEncoder' } },
         // Presets are scoped to a single Path Finding Module (family + its
         // active sub-style), matching DBV3's own UI where the Presets
         // dropdown only ever shows presets belonging to the currently
@@ -2046,41 +2408,33 @@ window.sketches['imageTrace'] = function (p) {
               values: { spiralSize: 1, spiralCentreX: 50, spiralCentreY: 50, ringSpacing: 7, spiralAmplitude: 1, spiralVariableVelocity: 'on', spiralVelocityMin: 50, spiralVelocityMax: 180, spiralConnectedLines: 'on', ignoreWhite: 'off' } },
             { label: 'Default', scope: [{ param: 'mode', values: ['spiral'] }, { param: 'spiralStyle', values: ['scribbles'] }],
               values: { spiralSize: 1, spiralCentreX: 50, spiralCentreY: 50, ringSpacing: 12, spiralAmplitude: 1, spiralVariableVelocity: 'on', spiralVelocityMin: 20, spiralVelocityMax: 60, spiralConnectedLines: 'on', ignoreWhite: 'on' } },
-            { label: 'Fine Stipple', scope: [{ param: 'mode', values: ['stipple'] }, { param: 'stippleShape', values: ['dot'] }],
-              values: { colorMode: 'nearest', pointDensity: 40, pointLimit: 1500, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, luminancePower: 15, voronoiIterations: 6 } },
-            { label: 'Bold Dots', scope: [{ param: 'mode', values: ['stipple'] }, { param: 'stippleShape', values: ['dot'] }],
-              values: { pointDensity: 20, pointLimit: 600, stippleRadiusMin: 0.6, stippleRadiusMax: 2.0, luminancePower: 8, voronoiIterations: 3 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['stipple'] }, { param: 'stippleShape', values: ['dash'] }],
-              values: { pointDensity: 25, pointLimit: 900, stippleRadiusMin: 1.0, stippleRadiusMax: 2.5, luminancePower: 10, voronoiIterations: 4 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['stipple'] }, { param: 'stippleShape', values: ['square'] }],
-              values: { pointDensity: 22, pointLimit: 900, stippleRadiusMin: 0.8, stippleRadiusMax: 2.2, luminancePower: 10, voronoiIterations: 4 } },
-            { label: 'Fine LBG', scope: [{ param: 'mode', values: ['lbg'] }, { param: 'lbgShape', values: ['dot'] }],
-              values: { colorMode: 'nearest', pointDensity: 45, pointLimit: 2000, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, voronoiIterations: 10 } },
-            { label: 'Bold LBG', scope: [{ param: 'mode', values: ['lbg'] }, { param: 'lbgShape', values: ['dot'] }],
-              values: { pointDensity: 22, pointLimit: 700, stippleRadiusMin: 0.6, stippleRadiusMax: 2.2, voronoiIterations: 8 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['lbg'] }, { param: 'lbgShape', values: ['dash'] }],
-              values: { pointDensity: 28, pointLimit: 1000, stippleRadiusMin: 1.0, stippleRadiusMax: 2.6, voronoiIterations: 8 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['lbg'] }, { param: 'lbgShape', values: ['square'] }],
-              values: { pointDensity: 24, pointLimit: 1000, stippleRadiusMin: 0.8, stippleRadiusMax: 2.2, voronoiIterations: 8 } },
-            // Adaptive "Default" presets per shape -- CORRECTION this pass:
-            // previously claimed as "exact values from adaptive_pfm_defaults
-            // .json"; having now actually read that file (it's real and
-            // does exist, unlike the streamlines one above), it has no
-            // Min/Max Sample Radius entries keyed by Square/Circle/Dash/
-            // Scribble the way this maps them -- real DBV3's closest match
-            // is "Stipple Max Radius": 20.0 for Adaptive Shapes (Shape Type
-            // Circle) and Min/Max Sample Radius only appears in "Adaptive
-            // Circular Scribbles" (default Max Sample Radius 16.0, ranging
-            // 16-30 across its presets). So these (approx) values are this
-            // tracer's own tuning, not a verified port of the real defaults.
-            { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['square'] }],
-              values: { minSampleRadius: 1, maxSampleRadius: 20 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['circle'] }],
-              values: { minSampleRadius: 1, maxSampleRadius: 8 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['dash'] }],
-              values: { minSampleRadius: 1, maxSampleRadius: 12 } },
-            { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['scribble'] }],
-              values: { minSampleRadius: 1, maxSampleRadius: 16 } }
+            // Voronoi/Adaptive/LBG/Grid presets are scoped by mode only, not
+            // by pointEncoder -- unlike the old approximation, the real
+            // sampling params (point count, radii, density power, diameter,
+            // iterations/accuracy) are genuinely independent of which of the
+            // 7 shared encoders renders the sampled points, matching real
+            // DBV3's own architecture (see the engine's header comment).
+            { label: 'Fine Voronoi (v3)', scope: [{ param: 'mode', values: ['stipple'] }],
+              values: { colorMode: 'nearest', pointLimit: 1500, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, luminancePower: 3, voronoiIterations: 6, voronoiAccuracy: 0.6 } },
+            { label: 'Bold Voronoi (v3)', scope: [{ param: 'mode', values: ['stipple'] }],
+              values: { pointLimit: 500, stippleRadiusMin: 0.6, stippleRadiusMax: 2.2, luminancePower: 1.5, voronoiIterations: 3, voronoiAccuracy: 0.4 } },
+            { label: 'Fine LBG (v3.1)', scope: [{ param: 'mode', values: ['lbg'] }],
+              values: { colorMode: 'nearest', pointLimit: 2000, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, voronoiIterations: 10, voronoiAccuracy: 0.6, lbgMinDiameter: 1.5, lbgMaxDiameter: 14, lbgDensityBlend: 0.5, lbgHysteresis: 0.2, lbgHysteresisGrowth: 0.04 } },
+            { label: 'Bold LBG (v3.1)', scope: [{ param: 'mode', values: ['lbg'] }],
+              values: { pointLimit: 700, stippleRadiusMin: 0.6, stippleRadiusMax: 2.2, voronoiIterations: 8, voronoiAccuracy: 0.4, lbgMinDiameter: 4, lbgMaxDiameter: 30, lbgDensityBlend: 0.5, lbgHysteresis: 0.3, lbgHysteresisGrowth: 0.05 } },
+            // Adaptive's real AIS disk-packing engine didn't survive
+            // decompilation (see engine header comment -- Windows filesystem
+            // case-collision), so this v3.1 Poisson-disc sampler's Min/Max
+            // Sample Radius defaults are this tracer's own tuning, not a
+            // verified port of DBV3's real adaptive_pfm_defaults.json values.
+            { label: 'Fine Adaptive (v3.1)', scope: [{ param: 'mode', values: ['adaptive'] }],
+              values: { minSampleRadius: 1, maxSampleRadius: 10, adaptiveMaxPoints: 2000 } },
+            { label: 'Bold Adaptive (v3.1)', scope: [{ param: 'mode', values: ['adaptive'] }],
+              values: { minSampleRadius: 3, maxSampleRadius: 30, adaptiveMaxPoints: 500 } },
+            { label: 'Default (v3)', scope: [{ param: 'mode', values: ['grid'] }],
+              values: { gridCellWidth: 12, gridCellHeight: 12, gridSquare: 'on', gridStagger: 'off', gridNoise: 0, gridRadiusScale: 0.8 } },
+            { label: 'Fine Hex Grid (v3)', scope: [{ param: 'mode', values: ['grid'] }],
+              values: { gridCellWidth: 6, gridCellHeight: 6, gridSquare: 'on', gridStagger: 'on', gridNoise: 0, gridRadiusScale: 0.9 } }
         ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'palette', label: 'Pens (colors)', type: 'colorPalette', maxSelect: 8, group: 'color',
@@ -2104,9 +2458,10 @@ window.sketches['imageTrace'] = function (p) {
                 { value: 'streamlines', label: 'Streamlines' },
                 { value: 'spiral', label: 'Spiral' },
                 { value: 'hatch', label: 'Hatch' },
-                { value: 'stipple', label: 'Voronoi / Stippling (approx)' },
-                { value: 'adaptive', label: 'Adaptive (approx)' },
-                { value: 'lbg', label: 'LBG (v3.1)' }
+                { value: 'stipple', label: 'Voronoi / Stippling (v3)' },
+                { value: 'adaptive', label: 'Adaptive (v3.1)' },
+                { value: 'lbg', label: 'LBG (v3.1)' },
+                { value: 'grid', label: 'Grid (v3)' }
               ] },
             { id: 'colorMode', label: 'Color mode', type: 'select', value: 'separate', group: 'color',
               tip: 'CMYK (approx) = the standard textbook RGB->CMYK conversion with full black generation (K=1-max(R,G,B)) — a well-known technique, but DBV3\'s own CMYK splitter is closed-source so this isn\'t verified against their exact code. Separate = linear deficit projection (every pen gets a density layer). Nearest = classify each region to one closest pen, no mixing.',
@@ -2403,48 +2758,127 @@ window.sketches['imageTrace'] = function (p) {
               visibleWhen: [{ param: 'mode', values: ['hatch'] }, { param: 'hatchStyle', values: ['sawtooth'] }],
               tip: 'DBV3 "Max Velocity": maximum frequency of the sawtooth oscillation.' },
 
-            // -- Voronoi / Stippling --
-            { id: 'stippleShape', label: 'Shape', type: 'select', value: 'dot', group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple'] },
-              tip: '(approx) Point-rendering styles roughly matching DBV3\'s real Voronoi Stippling/Dashes/Shapes PFM names, but the point placement underneath (local-repulsion relaxation, not a true recomputed Voronoi diagram) is our own approximation -- see traceStipple comment.',
-              options: [{ value: 'dot', label: 'Stipple (dot)' }, { value: 'dash', label: 'Dash' }, { value: 'square', label: 'Square' }] },
-            { id: 'lbgShape', label: 'Shape', type: 'select', value: 'dot', group: 'general',
-              visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3.1) LBG (Linde-Buzo-Gray) point style: dot / dash / square. The point-generation algorithm itself is a genuine LBG implementation (see traceLBG comment); these render styles are this tracer\'s own simple point shapes, matching real DBV3\'s LBG Stippling/Dashes/Shapes naming.',
-              options: [{ value: 'dot', label: 'Stipple (dot)' }, { value: 'dash', label: 'Dash' }, { value: 'square', label: 'Square' }] },
-            { id: 'pointDensity', label: 'Point Density', type: 'range', min: 5, max: 100, step: 5, value: 30, group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Point Density": higher = more candidate points (finer grid).' },
+            // -- Voronoi / Adaptive / LBG / Grid: shared render encoder --
+            // Real DBV3 builds all four families from one sampler+encoder
+            // combinator (see the engine's header comment above traceVoronoiFamily
+            // for full provenance) -- so one shared dropdown selects which of
+            // the 7 ported encoders (drawingbot.k.e.c.b.*) renders whichever
+            // family's sampled points, exactly like the real architecture.
+            { id: 'pointEncoder', label: 'Render Style', type: 'select', value: 'shapes', group: 'general',
+              visibleWhen: { param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] },
+              tip: '(v3) Direct ports of DBV3\'s real shared encoders (drawingbot.k.e.c.b.{f,B,z,x,k,m}): Shapes/Triangulation/Tree/Stippling/Dashes/Diagram. TSP uses a real, standard nearest-neighbour + 2-opt solver (v3.1) rather than DBV3\'s own SuperPixel-based tour construction. Letters (font outlines) and Circular Scribbles (organic curve engine) are deliberately not implemented -- each is a substantial standalone feature, not something to fake under the real name.',
+              options: [
+                { value: 'shapes', label: 'Shapes (v3)' },
+                { value: 'triangulation', label: 'Triangulation (v3)' },
+                { value: 'tree', label: 'Tree / MST (v3)' },
+                { value: 'stippling', label: 'Stippling (v3)' },
+                { value: 'dashes', label: 'Dashes (v3)' },
+                { value: 'diagram', label: 'Diagram (v3)' },
+                { value: 'tsp', label: 'TSP (v3.1)' }
+              ] },
+            { id: 'pointShapeType', label: 'Shape', type: 'select', value: 'circle', group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['shapes'] }],
+              tip: 'DBV3 real Shapes encoder\'s Shape Type: Circle/Square/Triangle/Cross, diameter driven by each point\'s local radius.',
+              options: [{ value: 'circle', label: 'Circle' }, { value: 'square', label: 'Square' }, { value: 'triangle', label: 'Triangle' }, { value: 'cross', label: 'Cross' }] },
+            { id: 'triangulationCloseBorder', label: 'Close Border', type: 'select', value: 'off', group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['triangulation'] }],
+              tip: 'DBV3 real Triangulation encoder option: adds the 4 canvas corners as extra points so triangles reach the edges.',
+              options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
+            { id: 'stipplingDotRadius', label: 'Dot Radius', type: 'range', min: 0.2, max: 4, step: 0.1, value: 0.8, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['stippling'] }],
+              tip: 'DBV3 real Stippling encoder draws a FIXED-size dot at every point (not scaled by local radius, matching the real drawingbot.k.e.c.b.x behaviour) -- this sets that fixed size.' },
+            { id: 'dashAlignToEdge', label: 'Align To Edges', type: 'select', value: 'on', group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
+              tip: 'DBV3 real Dashes encoder: On scans 16 directions for the lowest local luminance-variance (edge-aligned dashes); Off picks a random angle within Min/Max Rotation instead.',
+              options: [{ value: 'on', label: 'On (edge-aligned)' }, { value: 'off', label: 'Off (random rotation)' }] },
+            { id: 'dashMinRotation', label: 'Min Rotation (deg)', type: 'range', min: -180, max: 180, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
+              tip: 'DBV3 "Min Rotation": lower bound for random dash angle when Align To Edges is off.' },
+            { id: 'dashMaxRotation', label: 'Max Rotation (deg)', type: 'range', min: -180, max: 180, step: 5, value: 180, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
+              tip: 'DBV3 "Max Rotation": upper bound for random dash angle when Align To Edges is off.' },
+            { id: 'dashDistortion', label: 'Dash Distortion (%)', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
+              tip: 'DBV3 real Dashes encoder\'s optional bezier bow-distortion, applied as a Catmull-Rom bulge instead of the real cubic-bezier control points -- same idea, not a byte-identical curve.' },
+            { id: 'tspMaxOptPoints', label: 'TSP 2-opt Point Cap', type: 'range', min: 20, max: 800, step: 10, value: 350, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['tsp'] }],
+              tip: '(v3.1) Above this many points, 2-opt local search is skipped and only the nearest-neighbour tour is used, to keep the Pi responsive -- our own safety cap, not a real DBV3 setting.' },
+
+            // -- Voronoi / Stippling (real, drawingbot.k.e.c.a.p) --
             { id: 'pointLimit', label: 'Point Limit', type: 'range', min: 50, max: 4000, step: 50, value: 800, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Point Limit": maximum total points per pen; weakest points dropped first.' },
-            { id: 'luminancePower', label: 'Luminance Power', type: 'range', min: 1, max: 50, step: 1, value: 10, group: 'general',
+              tip: 'DBV3 "Point Limit": target/maximum point count.' },
+            { id: 'luminancePower', label: 'Density Power', type: 'range', min: 0.5, max: 6, step: 0.5, value: 2, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple'] },
-              tip: 'DBV3 "Luminance Power": how strongly point placement is biased toward darker areas.' },
-            { id: 'voronoiIterations', label: 'Voronoi Iterations', type: 'range', min: 0, max: 20, step: 1, value: 4, group: 'general',
+              tip: '(v3) Real DBV3 "Density Power": the exact exponent from the decompiled rejection-sampling formula, (255-lum)^power / 255^(power-1) -- higher = point placement biased harder toward darker areas.' },
+            { id: 'voronoiIterations', label: 'Voronoi / LBG Iterations', type: 'range', min: 0, max: 20, step: 1, value: 4, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Voronoi Iterations": relaxation passes spreading points more evenly.' },
-            { id: 'stippleRadiusMin', label: 'Stipple Radius Min', type: 'range', min: 0.1, max: 3, step: 0.1, value: 0.4, group: 'general',
+              tip: '(v3) Real DBV3 "Voronoi Iterations": Lloyd-relaxation passes (Voronoi) / split-merge passes (LBG), each rebuilding a real Voronoi diagram.' },
+            { id: 'voronoiAccuracy', label: 'Voronoi Accuracy', type: 'range', min: 0.05, max: 1, step: 0.05, value: 0.5, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Stipple Radius Min": dot size in the lightest inked areas.' },
-            { id: 'stippleRadiusMax', label: 'Stipple Radius Max', type: 'range', min: 0.2, max: 6, step: 0.1, value: 1.4, group: 'general',
+              tip: '(v3) Real DBV3 "Voronoi Accuracy": pixel-scan step size for each cell\'s weighted centroid/mass -- higher = finer, slower.' },
+            { id: 'stippleRadiusMin', label: 'Point Radius Min', type: 'range', min: 0.1, max: 3, step: 0.1, value: 0.4, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Stipple Radius Max": dot size in the densest inked areas.' },
+              tip: 'DBV3 "Stipple Radius Min": point size in the lightest inked areas (Shapes/Triangulation-adjacent encoders).' },
+            { id: 'stippleRadiusMax', label: 'Point Radius Max', type: 'range', min: 0.2, max: 6, step: 0.1, value: 1.4, group: 'general',
+              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
+              tip: 'DBV3 "Stipple Radius Max": point size in the densest inked areas.' },
 
-            // -- Adaptive --
-            { id: 'adaptiveShape', label: 'Shape Type', type: 'select', value: 'square', group: 'general',
-              visibleWhen: { param: 'mode', values: ['adaptive'] },
-              tip: 'Real DBV3 Adaptive PFMs (Shapes/Triangulation/Tree/Stippling/Dashes/Letters/Diagram/Circular Scribbles/TSP) are all closed-source Premium, and sample their points via a real Voronoi-style relaxation + tone-mapping stage, not the quadtree subdivision this tracer uses -- so this whole family is an approximation of the general "adapt to local detail" idea, not a port of any specific real Adaptive PFM. "Circular Scribble" here is our decorative doodle effect, unrelated to DBV3\'s real Chiu et al. Circular Scribbles algorithm.',
-              options: [{ value: 'square', label: 'Square (approx)' }, { value: 'circle', label: 'Circle (approx)' }, { value: 'dash', label: 'Dash (approx)' }, { value: 'scribble', label: 'Circular Scribble (approx)' }] },
+            // -- LBG (real, drawingbot.k.e.c.a.k -- Linde-Buzo-Gray 1980) --
+            { id: 'lbgMinDiameter', label: 'Min Cell Diameter', type: 'range', min: 0.5, max: 20, step: 0.5, value: 2, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Min Cell Diameter": target cell size in the densest areas -- cells smaller than this merge away.' },
+            { id: 'lbgMaxDiameter', label: 'Max Cell Diameter', type: 'range', min: 2, max: 80, step: 1, value: 20, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Max Cell Diameter": target cell size in flat/light areas -- cells larger than this split in two.' },
+            { id: 'lbgDensityBlend', label: 'Density Blend', type: 'range', min: 0, max: 1, step: 0.05, value: 0.5, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3.1) Real DBV3 LBG "Density Blend": blends an eased vs. linear response between local density and target diameter. The specific easing curve (drawingbot.e.b.a.i) wasn\'t recoverable from the decompile; this substitutes the standard ease-out-quad shape it almost certainly matches.' },
+            { id: 'lbgHysteresis', label: 'Hysteresis', type: 'range', min: 0, max: 2, step: 0.05, value: 0.3, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Hysteresis": widens the split/merge keep-band so cells near the threshold don\'t oscillate.' },
+            { id: 'lbgHysteresisGrowth', label: 'Hysteresis Growth', type: 'range', min: 0, max: 1, step: 0.01, value: 0.05, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Hysteresis Growth": widens Hysteresis further each iteration so the point count converges.' },
+
+            // -- Adaptive (v3.1 -- real AIS disk-packer unrecoverable, see
+            // engine header comment: a Windows case-insensitive-filesystem
+            // collision clobbered drawingbot.k.e.b.a during decompilation).
+            // This is an honest from-scratch Poisson-disc packer, not a port.
             { id: 'minSampleRadius', label: 'Min Sample Radius', type: 'range', min: 1, max: 40, step: 1, value: 4, group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
-              tip: 'DBV3 "Min Sample Radius": smallest cell size — controls fine detail retention.' },
+              tip: '(v3.1) Smallest disk radius, placed in the densest areas -- controls fine detail retention.' },
             { id: 'maxSampleRadius', label: 'Max Sample Radius', type: 'range', min: 2, max: 80, step: 1, value: 24, group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
-              tip: 'DBV3 "Max Sample Radius": largest cell size in flat/uniform areas.' },
+              tip: '(v3.1) Largest disk radius, placed in flat/light areas.' },
+            { id: 'adaptiveMaxPoints', label: 'Max Points', type: 'range', min: 100, max: 2500, step: 50, value: 1200, group: 'general',
+              visibleWhen: { param: 'mode', values: ['adaptive'] },
+              tip: 'Hard cap on placed disks, independent of image content, so a dense photo can\'t hang the Pi.' },
+
+            // -- Grid (real, direct port of drawingbot.k.e.c.a.g) --
+            { id: 'gridCellWidth', label: 'Cell Width', type: 'range', min: 2, max: 80, step: 1, value: 12, group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: '(v3) Real DBV3 Grid "Cell Width": column spacing of the regular grid.' },
+            { id: 'gridCellHeight', label: 'Cell Height', type: 'range', min: 2, max: 80, step: 1, value: 12, group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: '(v3) Real DBV3 Grid "Cell Height": row spacing of the regular grid. Ignored while Square is on.' },
+            { id: 'gridSquare', label: 'Square', type: 'select', value: 'on', group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: '(v3) Real DBV3 Grid "Square": locks Cell Height to Cell Width for a uniform square grid.',
+              options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
+            { id: 'gridStagger', label: 'Stagger', type: 'select', value: 'off', group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: '(v3) Real DBV3 Grid "Stagger": offsets alternate rows by half a cell width for a hex-like layout.',
+              options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
+            { id: 'gridNoise', label: 'Noise', type: 'range', min: 0, max: 20, step: 0.5, value: 0, group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: '(v3) Real DBV3 Grid "Noise": random per-point positional jitter, in pixels.' },
+            { id: 'gridRadiusScale', label: 'Radius Scale', type: 'range', min: 0.1, max: 2, step: 0.05, value: 0.8, group: 'general',
+              visibleWhen: { param: 'mode', values: ['grid'] },
+              tip: 'Scales each point\'s radius (half the max cell dimension, times local darkness) before the render encoder draws it.' },
 
             { id: 'ignoreWhite', label: 'Ignore White', type: 'select', value: 'off', group: 'general',
-              visibleWhen: { param: 'mode', values: ['spiral', 'stipple', 'adaptive'] },
+              visibleWhen: { param: 'mode', values: ['spiral'] },
               tip: 'DBV3 "Ignore White": skip drawing entirely in blank/white areas instead of drawing very faint marks.',
               options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
 
@@ -2543,8 +2977,11 @@ window.sketches['imageTrace'] = function (p) {
                       'spiralSize', 'spiralCentreX', 'spiralCentreY',
                       'ringSpacing', 'spiralAmplitude', 'spiralVelocityMin', 'spiralVelocityMax',
                       'hatchSpacing', 'hatchAngle', 'hatchAmplitude', 'hatchVelocityMin', 'hatchVelocityMax',
-                      'pointDensity', 'pointLimit', 'stippleRadiusMin', 'stippleRadiusMax', 'luminancePower', 'voronoiIterations',
-                      'minSampleRadius', 'maxSampleRadius', 'adaptiveBrightness', 'adaptiveContrast',
+                      'pointLimit', 'stippleRadiusMin', 'stippleRadiusMax', 'luminancePower', 'voronoiIterations', 'voronoiAccuracy',
+                      'minSampleRadius', 'maxSampleRadius', 'adaptiveMaxPoints', 'adaptiveBrightness', 'adaptiveContrast',
+                      'lbgMinDiameter', 'lbgMaxDiameter', 'lbgDensityBlend', 'lbgHysteresis', 'lbgHysteresisGrowth',
+                      'gridCellWidth', 'gridCellHeight', 'gridNoise', 'gridRadiusScale',
+                      'stipplingDotRadius', 'dashMinRotation', 'dashMaxRotation', 'dashDistortion', 'tspMaxOptPoints',
                       'brightness', 'contrast', 'rotation', 'offsetX', 'offsetY', 'alpha'].indexOf(name) >= 0) {
                 PARAMS[name] = Number(val);
             } else if (PARAMS.hasOwnProperty(name)) PARAMS[name] = val;
