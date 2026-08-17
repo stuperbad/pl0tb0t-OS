@@ -50,7 +50,7 @@
   "pen_width_mm": 0.4,
   "pens": [],
   "planner_path": "pl0tb0t_toolplan.json",
-  "port": "/dev/pl0tb0t",
+  "port": "/dev/ttyUSB1",
   "show_palette": [
     "",
     "",

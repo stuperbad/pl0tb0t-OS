@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.176"
+__version__ = "0.5.177"
 import os
 import sys
 import time
@@ -6251,6 +6251,42 @@ if has_display:
                 self.preview_widget.set_data([], None, artboard=None)
                 self.gcode_status_label.setText(f"Failed to load: {e}")
 
+        def _resume_preamble(self, cleaned, start_idx):
+            """Reconstruct the machine state needed to resume a plot mid-file.
+            Restoring only modal state (G21/G90/G17) is not enough: after a home,
+            Z sits at the top, so starting straight into a mid-file G1 draws in
+            the air AND rips a line across the sheet from the home position.
+            So we replay the cleaned drawing moves up to the resume point to find
+            the pen's work-coord X/Y/Z there (ignoring G53 tool-change moves,
+            which are machine-coord), then LIFT the pen, RAPID to that position,
+            and RESTORE the pen height active at that line before streaming on."""
+            import re as _re
+            def _n(line, L):
+                m = _re.search(L + r'([-+]?\d*\.?\d+)', line, _re.IGNORECASE)
+                return float(m.group(1)) if m else None
+            x = y = z = 0.0
+            up_z = None
+            have_xy = False
+            for c in cleaned[:start_idx]:
+                u = c.upper()
+                if u.startswith('G53'):
+                    continue
+                if _re.match(r'G0?[01]\b', u):
+                    nx, ny, nz = _n(u, 'X'), _n(u, 'Y'), _n(u, 'Z')
+                    if nx is not None: x = nx; have_xy = True
+                    if ny is not None: y = ny; have_xy = True
+                    if nz is not None:
+                        z = nz
+                        if up_z is None or nz > up_z: up_z = nz
+            if up_z is None or up_z <= z:
+                up_z = z + 3.5   # no travel-Z seen -> safe lift above the draw Z
+            pre = ["G21 ; mm mode", "G90 ; absolute mode", "G17 ; XY plane"]
+            pre.append("G0 Z%.3f ; RESUME: lift pen clear before repositioning" % up_z)
+            if have_xy:
+                pre.append("G0 X%.4f Y%.4f ; RESUME: rapid to the resume position (pen up)" % (x, y))
+            pre.append("G0 Z%.3f ; RESUME: restore pen height active at the resume line" % z)
+            return pre
+
         def run_gcode(self):
             _debug_log(f"run_gcode: port={self.port} path={self.gcode_path} running={self.gcode_running}")
             if not self.port:
@@ -6312,12 +6348,12 @@ if has_display:
                             mode="w", suffix=".gcode", delete=False, encoding="utf-8") as f_tmp:
                         self._gcode_tmp_path = f_tmp.name
                         if resume_active and start_idx > 0:
-                            # Re-establish modal state (units/absolute/plane) in case the
-                            # controller was reset since the crash -- same preamble this
-                            # codebase already uses when writing standalone G-code files.
-                            f_tmp.write("G21 ; mm mode\n")
-                            f_tmp.write("G90 ; absolute mode\n")
-                            f_tmp.write("G17 ; XY plane\n")
+                            # Rebuild modal state AND physically re-establish the pen:
+                            # lift, rapid to the resume position, drop to the draw Z.
+                            # (Modal-only left Z at the post-home height -> drew in the
+                            # air and slashed a line from home. See _resume_preamble.)
+                            for _pl in self._resume_preamble(cleaned, start_idx):
+                                f_tmp.write(_pl + "\n")
                         for line in cleaned[start_idx:]:
                             line = self._apply_feed_override(line)
                             f_tmp.write(line + "\n")
