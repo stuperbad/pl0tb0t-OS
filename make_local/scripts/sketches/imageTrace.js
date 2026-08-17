@@ -2,15 +2,46 @@
 // Upload a photo/image, decompose it onto your selected pens (either a true
 // CMYK-style mix of continuous per-ink density layers, or DrawingBotV3
 // "Color Match"-style nearest-pen classification), then trace each ink's
-// density map using one of six DrawingBotV3-inspired Path Finding Module
-// families: Sketch, Streamlines, Spiral, Hatch, Voronoi (Stippling), and
-// Adaptive. Setting names/ranges are taken from DBV3's own open-source docs
-// (docs/source/pfms.rst) wherever the underlying mechanic genuinely
-// corresponds; a handful of DBV3 settings describe implementation details
-// (true Edge Tangent Flow, full Voronoi diagrams, SLIC segmentation, font
-// rendering) that this tracer approximates with cheaper bounded algorithms
-// rather than reimplementing verbatim -- documented inline where it matters.
-// Deliberately NOT implemented this pass: Grid PFMs, Composite/Mosaic PFMs,
+// density map using one of seven DrawingBotV3-inspired Path Finding Module
+// families: Sketch, Streamlines, Spiral, Hatch, Voronoi (Stippling),
+// Adaptive, and LBG.
+//
+// PROVENANCE / confidence labelling (audited against real DBV3 source, both
+// the decompiled Premium jar AND the actual public GPL "Basic" edition repo,
+// github.com/SonarSonic/DrawingBotV3 -- cloned and read directly this pass):
+// every mode/style/preset label below is tagged with one of three tiers --
+//   (v3)     Verified against REAL, accessible DBV3 source and matches it
+//            closely (function-for-function, not just "similar"). Only
+//            Sketch Lines, Sketch Squares (decompiled Premium source,
+//            drawingbot.k.e.d.*) and the base Spiral engine (public
+//            PFMSpiralBasic.java, byte-checked against traceSpiralReal this
+//            pass) qualify -- these are the only PFMs with ANY real
+//            implementation available anywhere, open or closed.
+//   (v3.1)   No accessible implementation exists (see below), but the
+//            setting names/ranges/behaviour are taken from DBV3's own real
+//            documentation (docs/source/pfms.rst) or bundled preset-default
+//            JSON, OR the code is an independent implementation of the
+//            exact real, named external algorithm DBV3's own docs cite for
+//            that PFM (e.g. Linde-Buzo-Gray for LBG). Adapted/rebuilt from
+//            something real and verifiable -- not copied, but not guessed.
+//   (approx) No real DBV3 source, doc, or cited spec was matched -- an
+//            original approximation invented to produce a similar-feeling
+//            result under that family's name. Treat as a placeholder style,
+//            not a port.
+// THE BIG FINDING THIS PASS: Streamlines, Hatch, Voronoi/Stippling,
+// Adaptive, and LBG are 100% Premium-only in real DBV3 -- confirmed via the
+// free edition's own PremiumPluginDummy.java, which registers every one of
+// their real PFMs (Streamlines Edge/Flow/Superformula Field, Hatch Sawtooth
+// /Circular Scribbles, all 9 Adaptive/LBG/Voronoi sub-styles, Grid, Mosaic)
+// as an empty DummyPFM with a no-op run() -- there is NO public source for
+// any of them, and the user's decompiled dump only covers the Sketch
+// package, so there's nothing to decompile either. So for those five
+// families "increase fidelity" cannot mean "port the real algorithm" (there
+// is no real algorithm to read, anywhere) -- it means: match DBV3's real,
+// documented settings/behaviour as closely as possible, and be honest via
+// the (v3.1)/(approx) tags about which parts of the current implementation
+// are actually grounded in that documentation vs. invented.
+// Deliberately NOT implemented at all: Grid PFMs, Composite/Mosaic PFMs,
 // ECS Drawing, and the Letters/Diagram/TSP/Triangulation/Tree render styles
 // (font rendering, true Voronoi/Delaunay diagrams, and TSP solving are each
 // substantial standalone features).
@@ -61,7 +92,7 @@ window.sketches['imageTrace'] = function (p) {
 
         edgePower: 70,
         etfIterations: 0,
-        etfRadius: 2,
+        etfRadius: 3,
         postBlurIterations: 0,
         postBlurRadius: 2,
 
@@ -280,12 +311,12 @@ window.sketches['imageTrace'] = function (p) {
         return out;
     }
     function blurVectorField(gx, gy, w, h, iterations, radius) {
-        // Caps sized to DBV3's real preset extremes (ETF Iterations up to 10,
-        // ETF Radius up to 11, Smooth Iterations up to 20) with headroom,
-        // except Smooth Radius which DBV3 pushes to 30 for one preset
-        // ("Fingerprints") -- that's cheap for their native OpenCV blur but
-        // ~4x the cost here for a naive JS box blur, so it's capped at 15
-        // (visibly close, not identical) to stay safely bounded on the Pi.
+        // Real DBV3 docs (pfms.rst) give Post Blur Iterations/Radius safe
+        // ranges of 0-50 each; capped tighter here (20 / 30) because this is
+        // a naive JS box blur (not their native OpenCV one) run on every
+        // pen, every Generate -- still comfortably covers every real preset
+        // seen in the wild (the "Fingerprints" preset uses 20 iters / 30
+        // radius, right at this cap).
         iterations = Math.max(0, Math.min(20, Math.round(iterations) || 0));
         radius = Math.max(1, Math.min(30, Math.round(radius) || 1));
         var bx = gx, by = gy;
@@ -503,18 +534,36 @@ window.sketches['imageTrace'] = function (p) {
         out.push(points[points.length - 1]);
         return out;
     }
-    function addOscillation(points, amplitude, velMin, velMax) {
+    // DBV3 Hatch/Spiral Sawtooth (pfms.rst "Hatch Sawtooth" -- shares its
+    // Amplitude/Velocity formulas with Spiral Sawtooth verbatim): Amplitude
+    // is a FIXED scale (finalWidth = lineSpacing * amplitude), but the
+    // oscillation frequency ("Velocity") is LUMINANCE-DRIVEN PER POINT along
+    // the line: velocity = minVelocity + sineFunction(luminance) *
+    // (maxVelocity - minVelocity) -- same formula and easeInSine curve
+    // traceSpiralReal already uses correctly. This used to pick one random
+    // frequency for the whole line, which doesn't match: real Sawtooth
+    // speeds up/slows down its oscillation as it crosses lighter/darker
+    // parts of the image, not just once per stroke -- fixed to sample
+    // density at every point and integrate a locally-varying phase instead.
+    function addOscillation(points, weightMap, w, h, amplitude, velMin, velMax) {
         if (points.length < 2 || amplitude <= 0) return points;
-        var freq = (velMin + Math.random() * (velMax - velMin)) / 360;
-        var out = []; var acc = 0;
+        function densityAt(x, y) {
+            var xi = Math.round(x), yi = Math.round(y);
+            if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0;
+            return weightMap[yi * w + xi] || 0;
+        }
+        var out = []; var phase = 0;
         for (var i = 0; i < points.length; i++) {
             var p0 = points[i], dx, dy;
             if (i < points.length - 1) { dx = points[i + 1].x - p0.x; dy = points[i + 1].y - p0.y; }
             else { dx = p0.x - points[i - 1].x; dy = p0.y - points[i - 1].y; }
             var len = Math.hypot(dx, dy) || 1;
             var nx = -dy / len, ny = dx / len;
-            if (i > 0) acc += Math.hypot(p0.x - points[i - 1].x, p0.y - points[i - 1].y);
-            var off = Math.sin(acc * freq * Math.PI * 2) * amplitude;
+            var step = i > 0 ? Math.hypot(p0.x - points[i - 1].x, p0.y - points[i - 1].y) : 0;
+            var dens = densityAt(p0.x, p0.y);
+            var velocity = velMin + easeInSine(1 - dens) * (velMax - velMin); // 1-dens ~ luminance; brighter = faster oscillation, matches real formula
+            phase += step * (velocity / 360) * Math.PI * 2;
+            var off = Math.sin(phase) * amplitude;
             out.push({ x: p0.x + nx * off, y: p0.y + ny * off });
         }
         return out;
@@ -1108,7 +1157,7 @@ window.sketches['imageTrace'] = function (p) {
         }
         var lines = scanDirection(angleDeg, 0.15);
         if (crosshatch) lines = lines.concat(scanDirection(angleDeg + 90, 0.5));
-        if (style === 'sawtooth') lines = lines.map(function (l) { return addOscillation(l, spacing * 0.4 * amplitude, velMin, velMax); });
+        if (style === 'sawtooth') lines = lines.map(function (l) { return addOscillation(l, weightMap, w, h, spacing * 0.4 * amplitude, velMin, velMax); });
         else if (style === 'scribbles') lines = lines.map(function (l) { return scribbleizeAlong(l, Math.max(3, spacing * 0.8), amplitude); });
         return lines;
     }
@@ -1213,7 +1262,9 @@ window.sketches['imageTrace'] = function (p) {
                 var yb = spiralY(parabolic, pass, bRadius, alpha, cy);
 
                 var within = (xa >= 0 && xa < w && ya >= 0 && ya < h) || (xb >= 0 && xb < w && yb >= 0 && yb < h);
-                var draw = within && !(opts.ignoreWhite && avgDens <= 0.04);
+                // Real PFMSpiralBasic.java: `mask=240; if (ignoreWhite && mask <= luminance) draw=false;`
+                // i.e. skip when luminance >= 240/255. density = 1-luminance, so that's density <= 15/255.
+                var draw = within && !(opts.ignoreWhite && avgDens <= (15 / 255));
 
                 if (draw) {
                     if (!opts.connectedLines || cur.length === 0) {
@@ -1233,11 +1284,18 @@ window.sketches['imageTrace'] = function (p) {
         return polylines;
     }
 
-    // ---- Voronoi / Stippling family (mode: 'stipple') --------------------
-    // "Voronoi Iterations" is approximated as bucketed local-repulsion
-    // relaxation (spatial hash, O(n) per pass) rather than a true recomputed
-    // Voronoi diagram each iteration -- much cheaper, same qualitative
-    // "points spread out, denser areas stay packed" result.
+    // ---- Voronoi / Stippling family (mode: 'stipple') -- (approx) overall.
+    // Real DBV3 (pfms.rst): scatter points weighted by brightness, compute a
+    // TRUE Voronoi diagram, recompute weighted centroids from it, rebuild
+    // the diagram from those centroids, repeat for N "Voronoi Iterations" --
+    // and real DBV3 also exposes Point Density (1-1200) and a SEPARATE
+    // "Density Power" (biases the centroid recompute) alongside "Luminance
+    // Power" (biases the initial scatter) -- two independent controls this
+    // tracer folds into one (luminancePower does both jobs here). This
+    // tracer approximates the whole relaxation step as bucketed local-
+    // repulsion (spatial hash, O(n) per pass) rather than true recomputed
+    // Voronoi diagrams -- much cheaper, same qualitative "points spread out,
+    // denser areas stay packed" result, but not the real algorithm.
     function relaxPoints(points, weightMap, w, h, iterations, neighborRadius) {
         iterations = Math.max(0, Math.min(20, Math.round(iterations) || 0));
         if (!iterations || points.length < 2) return points;
@@ -1318,12 +1376,21 @@ window.sketches['imageTrace'] = function (p) {
         return polylines;
     }
 
-    // ---- LBG family (mode: 'lbg') -----------------------------------------
-    // Linde-Buzo-Gray weighted stippling: iteratively assign density mass to
-    // the nearest point, move each point to its density-weighted centroid
-    // (Lloyd step), then SPLIT high-mass points and REMOVE low-mass ones so the
-    // point count adapts to the image's density -- a genuinely different, more
-    // faithful distribution than the repulsion-based Voronoi/Stipple family.
+    // ---- LBG family (mode: 'lbg') -- (v3.1): real DBV3 LBG PFMs are just as
+    // closed-source/Premium-only as Adaptive and Voronoi (confirmed via
+    // PremiumPluginDummy.java), so there's still no real code to port -- BUT
+    // DBV3's own docs (pfms.rst) name the real technique they're built on:
+    // "LBS (Linde Buzo Gray) PFMs combine the speed of Adaptive PFMs with
+    // the Quality of Voronoi PFMs". Linde-Buzo-Gray (1980) is a real, well-
+    // known vector-quantization algorithm, and that's genuinely what this
+    // implements: iteratively assign density mass to the nearest point, move
+    // each point to its density-weighted centroid (Lloyd step), then SPLIT
+    // high-mass points and REMOVE low-mass ones so the point count adapts to
+    // the image's density. Real DBV3's own settings (Stipple Radius Min/Max,
+    // Max Iterations) match this tracer's names/behaviour too. Not a port of
+    // DBV3's actual (inaccessible) code, but a genuine independent
+    // implementation of the correct, named, real algorithm their docs cite
+    // -- earns (v3.1), not (approx).
     // Bounded by a downscaled work grid (LBG_MAX), capped iterations, and a
     // hard point cap; validated well under a second on a 480px working image.
     function traceLBG(weightMap, w, h, pointDensity, radiusMin, radiusMax, pointLimit, iterations, shape) {
@@ -1425,9 +1492,16 @@ window.sketches['imageTrace'] = function (p) {
         return polylines;
     }
 
-    // ---- Adaptive family (mode: 'adaptive', NEW) --------------------------
+    // ---- Adaptive family (mode: 'adaptive') -- (approx), see adaptiveShape
+    // tip above: real DBV3 Adaptive PFMs are 100% Premium/closed-source with
+    // no public implementation, and use a real Voronoi-relaxation + tone-
+    // mapping pipeline (verified via pfms.rst), not quadtree subdivision.
     // Recursive quadtree subdivision: split cells with high local variance
     // or oversized cells, stop at Min Sample Radius; one shape per leaf.
+    // "Min/Max Sample Radius" happen to be real DBV3 setting names (used by
+    // the real "Adaptive Circular Scribbles" PFM specifically), reused here
+    // as this tracer's own cell-size bounds -- same names, different PFM,
+    // different algorithm underneath.
     // Hard-capped by both a total-cell limit and a total-work-item limit so
     // a very small Min Sample Radius degrades (fewer, coarser cells kept)
     // rather than exploding into unbounded recursion.
@@ -1660,12 +1734,26 @@ window.sketches['imageTrace'] = function (p) {
         // `visibleWhen` shape already used for params: every condition must
         // match the CURRENT value for the preset to appear.
         stylePresets: [
-            // Streamlines Edge Field / Flow Field / Superformula: exact
-            // values pulled from DBV3's own bundled preset defaults
-            // (presets/streamlines_pfm_defaults.json in the installed app --
-            // a plain JSON data file, not decompiled code). Max Length here
-            // is DBV3's own real length unit (not steps), so it's converted
-            // to this tracer's maxSteps proportionally against Digital
+            // Streamlines Edge Field / Flow Field / Superformula presets
+            // below (Digital Detail, Fingerprints, Turbulence, Raindrops,
+            // etc.): CORRECTION this pass -- these were previously
+            // attributed to "presets/streamlines_pfm_defaults.json in the
+            // installed app". Having now cloned and searched the actual
+            // public DBV3 source (github.com/SonarSonic/DrawingBotV3), that
+            // file does not exist anywhere in it -- Streamlines has zero
+            // public presence at all (100% Premium, no bundled preset JSON
+            // ships in the free build). So that citation could not be
+            // verified this pass; if these values came from the user's own
+            // real installed Premium app's resources in an earlier session
+            // that's a legitimate source I don't have access to here, but as
+            // written the citation overclaims. Treat these preset VALUES as
+            // (approx) until re-verified against the actual installed app;
+            // the SETTING NAMES/ranges/behaviour they use (Edge Power, ETF
+            // Iterations/Radius, Post Blur, flow Frequency/Amplitude,
+            // Superformula Cos/Sine Factor/Curvature) are real, confirmed
+            // against docs/source/pfms.rst this pass. Max Length here is
+            // DBV3's own real length unit (not steps), so it's converted to
+            // this tracer's maxSteps proportionally against Digital
             // Detail's 150 -> 50 steps baseline; Start Angle values >180
             // are folded into -180..180 (they're periodic). DBV3 Max Length 0
             // means "no maximum" (symmetric with Min Length 0 = no minimum),
@@ -1705,11 +1793,11 @@ window.sketches['imageTrace'] = function (p) {
               values: { sketchAngleMin: 50, sketchAngleMax: 130, sketchMinLineLength: 8, sketchMaxLineLength: 30, sketchLineTests: 30, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['squares'] }],
               values: { sketchSquareAngle: 0, sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 16, sketchSquiggleMax: 40, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 20, sketchEraseMax: 100, sketchTone: 50 } },
-            { label: 'Sweeping (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['curves'] }],
+            { label: 'Sweeping (v3.1)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['curves'] }],
               values: { sketchAngleMin: -180, sketchAngleMax: 180, sketchMinLineLength: 20, sketchMaxLineLength: 80, sketchLineTests: 16, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 1, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 50 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
               values: { sketchWaveStartAngle: 0, sketchWaveOffsetX: 0, sketchWaveOffsetY: 0, sketchWaveDivisorX: 20, sketchWaveDivisorY: 20, sketchWaveTypeX: 'sin', sketchWaveTypeY: 'cos', sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 3, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 100 } },
-            { label: 'Distorted Waves (v3)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
+            { label: 'Distorted Waves (v3.1)', scope: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['waves'] }],
               values: { sketchWaveStartAngle: 45, sketchWaveOffsetX: 45, sketchWaveOffsetY: 45, sketchWaveDivisorX: 9, sketchWaveDivisorY: 9, sketchWaveTypeX: 'tan', sketchWaveTypeY: 'cos', sketchMinLineLength: 2, sketchMaxLineLength: 40, sketchLineTests: 20, sketchSquiggleMax: 100, sketchEraseRadiusMin: 1, sketchEraseRadiusMax: 5, sketchEraseMin: 50, sketchEraseMax: 125, sketchTone: 100 } },
             { label: 'Classic Crosshatch', scope: [{ param: 'mode', values: ['hatch'] }, { param: 'hatchStyle', values: ['straight'] }],
               values: { hatchSpacing: 4, hatchAngle: 45, crosshatch: 'on', linkEnds: 'on' } },
@@ -1743,8 +1831,17 @@ window.sketches['imageTrace'] = function (p) {
               values: { pointDensity: 28, pointLimit: 1000, stippleRadiusMin: 1.0, stippleRadiusMax: 2.6, voronoiIterations: 8 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['lbg'] }, { param: 'lbgShape', values: ['square'] }],
               values: { pointDensity: 24, pointLimit: 1000, stippleRadiusMin: 0.8, stippleRadiusMax: 2.2, voronoiIterations: 8 } },
-            // Adaptive Shapes/Stippling/Dashes/Circular Scribbles "Default"
-            // presets, exact values from adaptive_pfm_defaults.json.
+            // Adaptive "Default" presets per shape -- CORRECTION this pass:
+            // previously claimed as "exact values from adaptive_pfm_defaults
+            // .json"; having now actually read that file (it's real and
+            // does exist, unlike the streamlines one above), it has no
+            // Min/Max Sample Radius entries keyed by Square/Circle/Dash/
+            // Scribble the way this maps them -- real DBV3's closest match
+            // is "Stipple Max Radius": 20.0 for Adaptive Shapes (Shape Type
+            // Circle) and Min/Max Sample Radius only appears in "Adaptive
+            // Circular Scribbles" (default Max Sample Radius 16.0, ranging
+            // 16-30 across its presets). So these (approx) values are this
+            // tracer's own tuning, not a verified port of the real defaults.
             { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['square'] }],
               values: { minSampleRadius: 1, maxSampleRadius: 20 } },
             { label: 'Default', scope: [{ param: 'mode', values: ['adaptive'] }, { param: 'adaptiveShape', values: ['circle'] }],
@@ -1770,19 +1867,19 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'generate', label: 'Generate', type: 'action', buttonLabel: '⟳ Generate', group: 'general',
               tip: 'Run the trace with the current settings. Re-run after changing pens/mode/sliders — this does not auto-update live.' },
             { id: 'mode', label: 'Path finding family', type: 'select', value: 'streamlines', group: 'general',
-              tip: 'DrawingBotV3-style Path Finding Module family. Each has its own sub-style and settings below.',
+              tip: 'DrawingBotV3-style Path Finding Module family. Each has its own sub-style and settings below. Tags: (v3) = verified against real DBV3 source, (v3.1) = built from real DBV3 docs/settings or a real named algorithm DBV3 cites but independently implemented, (approx) = our own approximation with no verified DBV3 basis. Streamlines/Hatch/Voronoi/Adaptive/LBG are all closed-source Premium features in real DBV3 with zero public implementation anywhere, so (v3.1)/(approx) is the ceiling for them.',
               options: [
                 { value: 'sketch', label: 'Sketch' },
                 { value: 'streamlines', label: 'Streamlines' },
                 { value: 'spiral', label: 'Spiral' },
                 { value: 'hatch', label: 'Hatch' },
-                { value: 'stipple', label: 'Voronoi / Stippling' },
-                { value: 'adaptive', label: 'Adaptive' },
-                { value: 'lbg', label: 'LBG (v3)' }
+                { value: 'stipple', label: 'Voronoi / Stippling (approx)' },
+                { value: 'adaptive', label: 'Adaptive (approx)' },
+                { value: 'lbg', label: 'LBG (v3.1)' }
               ] },
             { id: 'colorMode', label: 'Color mode', type: 'select', value: 'separate', group: 'color',
-              tip: 'CMYK (v3.1) = real RGB->CMYK with full black generation, DrawingBotV3-style — best for 4-pen CMYK sets. Separate = linear deficit projection (every pen gets a density layer). Nearest = classify each region to one closest pen, no mixing.',
-              options: [{ value: 'cmyk', label: 'CMYK separation (v3.1)' }, { value: 'separate', label: 'Separate (linear mix)' }, { value: 'nearest', label: 'Nearest pen (posterize)' }] },
+              tip: 'CMYK (approx) = the standard textbook RGB->CMYK conversion with full black generation (K=1-max(R,G,B)) — a well-known technique, but DBV3\'s own CMYK splitter is closed-source so this isn\'t verified against their exact code. Separate = linear deficit projection (every pen gets a density layer). Nearest = classify each region to one closest pen, no mixing.',
+              options: [{ value: 'cmyk', label: 'CMYK separation (approx)' }, { value: 'separate', label: 'Separate (linear mix)' }, { value: 'nearest', label: 'Nearest pen (posterize)' }] },
 
             // -- Sketch -- real port of PFMSketchLinesBasic/PFMSketchSquaresBasic:
             // darkest-block seeding, angle-tested darkest-line search, erase-
@@ -1918,9 +2015,9 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'etfIterations', label: 'ETF Iterations', type: 'range', min: 0, max: 12, step: 1, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
               tip: 'DBV3 "ETF Iterations": refinement passes smoothing the edge flow field.' },
-            { id: 'etfRadius', label: 'ETF Radius', type: 'range', min: 1, max: 12, step: 1, value: 2, group: 'general',
+            { id: 'etfRadius', label: 'ETF Radius', type: 'range', min: 3, max: 12, step: 1, value: 3, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
-              tip: 'DBV3 "ETF Radius": kernel size used when refining the edge flow field.' },
+              tip: 'DBV3 "ETF Radius": kernel size used when refining the edge flow field. Real safe range is 3-30; capped to 12 here to bound cost on the Pi.' },
             { id: 'postBlurIterations', label: 'Smooth Iterations', type: 'range', min: 0, max: 20, step: 1, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['streamlines'] }, { param: 'fieldType', values: ['edge'] }],
               tip: 'DBV3 "Smooth Iterations": additional smoothing passes after ETF refinement.' },
@@ -1962,8 +2059,8 @@ window.sketches['imageTrace'] = function (p) {
             // top of the real Archimedean trace.
             { id: 'spiralStyle', label: 'Spiral type', type: 'select', value: 'archimedean', group: 'general',
               visibleWhen: { param: 'mode', values: ['spiral'] },
-              tip: 'DBV3 "Spiral Type": Archimedean (even rings) or Parabolic (two connected branches). Circular Scribbles is our own approximation, not a ported algorithm.',
-              options: [{ value: 'archimedean', label: 'Archimedean (v3)' }, { value: 'parabolic', label: 'Parabolic (v3)' }, { value: 'scribbles', label: 'Circular Scribbles (v3.1)' }] },
+              tip: 'DBV3 "Spiral Type": Archimedean (even rings) or Parabolic (two connected branches) -- both byte-verified this pass against the real public PFMSpiralBasic.java. Circular Scribbles is NOT DBV3\'s real "Circular Scribbles" PFM (that\'s a totally different closed-source algorithm implementing Chiu et al. 2015\'s continuous rotating-loop scribble, with its own Radius/Velocity/Angular Velocity/Curvature settings) -- it\'s our own decorative doodle effect layered on the real spiral trace, kept under this name only because it produces a vaguely similar look.',
+              options: [{ value: 'archimedean', label: 'Archimedean (v3)' }, { value: 'parabolic', label: 'Parabolic (v3)' }, { value: 'scribbles', label: 'Circular Scribbles (approx)' }] },
             { id: 'spiralSize', label: 'Spiral Size', type: 'range', min: 0.1, max: 2, step: 0.05, value: 1, group: 'general',
               visibleWhen: { param: 'mode', values: ['spiral'] },
               tip: 'DBV3 "Spiral Size": alters where the generated spiral will end.' },
@@ -1997,8 +2094,8 @@ window.sketches['imageTrace'] = function (p) {
             // -- Hatch --
             { id: 'hatchStyle', label: 'Hatch style', type: 'select', value: 'straight', group: 'general',
               visibleWhen: { param: 'mode', values: ['hatch'] },
-              tip: 'DBV3 Hatch default/Sawtooth/Circular Scribbles.',
-              options: [{ value: 'straight', label: 'Straight (v3.1)' }, { value: 'sawtooth', label: 'Sawtooth (v3.1)' }, { value: 'scribbles', label: 'Circular Scribbles (v3.1)' }] },
+              tip: 'DBV3 has no standalone "Hatch" PFM -- only Hatch Sawtooth and Hatch Circular Scribbles are real, both Premium/closed-source. Straight = this tracer\'s own no-oscillation option, built on DBV3\'s real shared "Default Hatch Settings" (Line Spacing/Angle/Crosshatch/Link Ends). Sawtooth = real Amplitude+Velocity formulas (velocity varies by local luminance, same math as Spiral). Circular Scribbles is our decorative doodle stand-in, not DBV3\'s real (and very different) Chiu et al. algorithm.',
+              options: [{ value: 'straight', label: 'Straight (v3.1)' }, { value: 'sawtooth', label: 'Sawtooth (v3.1)' }, { value: 'scribbles', label: 'Circular Scribbles (approx)' }] },
             { id: 'hatchSpacing', label: 'Line Spacing (px)', type: 'range', min: 2, max: 20, step: 1, value: 5, group: 'general',
               visibleWhen: { param: 'mode', values: ['hatch'] },
               tip: 'DBV3 "Line Spacing": distance between parallel hatch scanlines.' },
@@ -2026,11 +2123,11 @@ window.sketches['imageTrace'] = function (p) {
             // -- Voronoi / Stippling --
             { id: 'stippleShape', label: 'Shape', type: 'select', value: 'dot', group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple'] },
-              tip: 'DBV3 Voronoi Stippling/Dashes/Shapes.',
+              tip: '(approx) Point-rendering styles roughly matching DBV3\'s real Voronoi Stippling/Dashes/Shapes PFM names, but the point placement underneath (local-repulsion relaxation, not a true recomputed Voronoi diagram) is our own approximation -- see traceStipple comment.',
               options: [{ value: 'dot', label: 'Stipple (dot)' }, { value: 'dash', label: 'Dash' }, { value: 'square', label: 'Square' }] },
             { id: 'lbgShape', label: 'Shape', type: 'select', value: 'dot', group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: 'LBG (Linde-Buzo-Gray) point style: dot / dash / square.',
+              tip: '(v3.1) LBG (Linde-Buzo-Gray) point style: dot / dash / square. The point-generation algorithm itself is a genuine LBG implementation (see traceLBG comment); these render styles are this tracer\'s own simple point shapes, matching real DBV3\'s LBG Stippling/Dashes/Shapes naming.',
               options: [{ value: 'dot', label: 'Stipple (dot)' }, { value: 'dash', label: 'Dash' }, { value: 'square', label: 'Square' }] },
             { id: 'pointDensity', label: 'Point Density', type: 'range', min: 5, max: 100, step: 5, value: 30, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
@@ -2054,8 +2151,8 @@ window.sketches['imageTrace'] = function (p) {
             // -- Adaptive --
             { id: 'adaptiveShape', label: 'Shape Type', type: 'select', value: 'square', group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
-              tip: 'DBV3 Adaptive Shapes/Circular Scribbles/Dashes.',
-              options: [{ value: 'square', label: 'Square (v3.1)' }, { value: 'circle', label: 'Circle (v3.1)' }, { value: 'dash', label: 'Dash (v3.1)' }, { value: 'scribble', label: 'Circular Scribble (v3.1)' }] },
+              tip: 'Real DBV3 Adaptive PFMs (Shapes/Triangulation/Tree/Stippling/Dashes/Letters/Diagram/Circular Scribbles/TSP) are all closed-source Premium, and sample their points via a real Voronoi-style relaxation + tone-mapping stage, not the quadtree subdivision this tracer uses -- so this whole family is an approximation of the general "adapt to local detail" idea, not a port of any specific real Adaptive PFM. "Circular Scribble" here is our decorative doodle effect, unrelated to DBV3\'s real Chiu et al. Circular Scribbles algorithm.',
+              options: [{ value: 'square', label: 'Square (approx)' }, { value: 'circle', label: 'Circle (approx)' }, { value: 'dash', label: 'Dash (approx)' }, { value: 'scribble', label: 'Circular Scribble (approx)' }] },
             { id: 'minSampleRadius', label: 'Min Sample Radius', type: 'range', min: 1, max: 40, step: 1, value: 4, group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
               tip: 'DBV3 "Min Sample Radius": smallest cell size — controls fine detail retention.' },
