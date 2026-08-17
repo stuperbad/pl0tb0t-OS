@@ -1,0 +1,1 @@
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="XCONTROLLER5180A3", SYMLINK+="pl0tb0t", MODE="0660", GROUP="plugdev"

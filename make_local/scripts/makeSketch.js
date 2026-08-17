@@ -1845,7 +1845,6 @@
                         ensureGroup(getParamGroup(pdef)).appendChild(row);
                     });
                     applyConditionalUI(params);
-                    try { buildSkipLayersUI(ensureGroup('advanced')); } catch(e) {}
                     if (registeredApi && typeof registeredApi.buildAdvancedExtra === 'function') {
                         try { registeredApi.buildAdvancedExtra(ensureGroup('advanced')); } catch(e) {}
                     }
@@ -1855,7 +1854,7 @@
                     // they were appended, ahead of this fixed block.
                     (function() {
                         var advBody = ensureGroup('advanced');
-                        var order = ['plotHorizontal', 'skipLayersWrap', 'recolor', 'drawOrder', 'svgColorMapWrap', 'delayRender'];
+                        var order = ['plotHorizontal', 'recolor', 'drawOrder', 'svgColorMapWrap', 'delayRender'];
                         order.forEach(function(key) {
                             var el = advBody.querySelector('[data-param-id="' + key + '"]') || document.getElementById(key);
                             if (el) advBody.appendChild(el);
