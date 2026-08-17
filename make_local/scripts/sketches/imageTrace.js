@@ -95,6 +95,21 @@ window.sketches['imageTrace'] = function (p) {
         sketchEraseMin: 20,
         sketchEraseMax: 100,
         sketchTone: 50,
+        // DBV3 "Style" settings shared by every Sketch PFM (ported from the
+        // real drawingbot.k.e.d.a / drawingbot.k.e.b.p engine). Only Lines
+        // and Curves route through the full weighted scorer in real DBV3 --
+        // Squares uses a simpler single-candidate test and Waves tests
+        // exactly 2 fixed directions, so these intentionally have no effect
+        // on those two styles (matches the real engine, not a bug).
+        sketchDirectionality: 0,   // DBV3 "Directionality" -- weights local contrast/variance, NOT literal direction-following
+        sketchDistortion: 0,       // DBV3 "Distortion" -- weights injected random noise per candidate
+        sketchAngularity: 0,       // DBV3 "Angularity" -- penalizes sharp turns from the previous segment
+        sketchEdgePower: 0,        // DBV3 "Edge Power" -- weights a precomputed edge-strength map
+        sketchSobelPower: 0,       // DBV3 "Sobel Power" -- weights a precomputed Sobel-magnitude map
+        sketchLuminancePower: 100, // DBV3 "Luminance Power" -- weights local ink density (the original signal)
+        sketchClarity: 0,          // DBV3 "Clarity" -- NOT an edge threshold; unsharp-mask amount applied before tracing
+        sketchSeedType: 'none',    // DBV3 "Seed Type": none | edges | sobel -- which map drives squiggle re-seeding
+        sketchSeedThreshold: 50,   // DBV3 "Seed Threshold" -- cutoff applied to the edges/sobel seed map
 
         // Spiral (real port of PFMSpiralBasic)
         spiralSize: 1,
@@ -775,7 +790,12 @@ window.sketches['imageTrace'] = function (p) {
     // Bounded via hard caps (maxSquiggles/maxTotalLines/MAX_FAILS) so a
     // pathological slider combination can't loop indefinitely.
     function easeInCubicJS(t) { return t * t * t; }
-    function findDarkestArea(density, w, h) {
+    // seedMap/seedThreshold port DBV3's real "Seed Type" (None/Edges/Sobel):
+    // when set, only blocks whose seedMap average clears seedThreshold are
+    // eligible at all; among those, still re-seed toward whatever working
+    // ink (density) remains, since seedMap itself is a static structure map
+    // and never gets eroded like the real ink density does.
+    function findDarkestArea(density, w, h, seedMap, seedThreshold) {
         var blockW = 10, blockH = 10;
         // Scan order is shuffled each call: with a strict ">" comparison,
         // ties between equally-dark blocks always favored whichever was
@@ -797,21 +817,27 @@ window.sketches['imageTrace'] = function (p) {
             var bx = blocks[bi][0], by = blocks[bi][1];
             {
                 var sum = 0, cnt = 0, localBestX = bx, localBestY = by, localBest = -1;
+                var seedSum = 0;
                 var ex = Math.min(w, bx + blockW), ey = Math.min(h, by + blockH);
                 for (var y = by; y < ey; y++) {
                     for (var x = bx; x < ex; x++) {
                         var d = density[y * w + x] || 0;
                         sum += d; cnt++;
+                        if (seedMap) seedSum += seedMap[y * w + x] || 0;
                         if (d > localBest) { localBest = d; localBestX = x; localBestY = y; }
                     }
                 }
+                if (seedMap && cnt && (seedSum / cnt) < seedThreshold) continue; // block doesn't qualify under Seed Type
                 var avg = cnt ? sum / cnt : 0;
                 if (avg > bestBlockAvg) { bestBlockAvg = avg; bestX = localBestX; bestY = localBestY; found = true; }
             }
         }
         return found ? { x: bestX, y: bestY, blockAvg: bestBlockAvg } : null;
     }
-    function findDarkestLineJS(density, w, h, startX, startY, minLen, maxLen, numTests, startAngleDeg, deltaAngleDeg) {
+    // `style`, when passed, activates the real DBV3 weighted scorer (Lines/
+    // Curves only -- see weightedCandidateScore above); omitted entirely for
+    // Squares/Waves, which stay pure-density like the real engine.
+    function findDarkestLineJS(density, w, h, startX, startY, minLen, maxLen, numTests, startAngleDeg, deltaAngleDeg, style, prevAngleDeg) {
         var best = null;
         var tests = Math.max(1, Math.round(numTests));
         for (var t = 0; t < tests; t++) {
@@ -826,10 +852,11 @@ window.sketches['imageTrace'] = function (p) {
                 count++;
                 if (count >= minLen) {
                     var avg = sum / count;
-                    if (!bestOnLine || avg > bestOnLine.avg) bestOnLine = { x: x, y: y, avg: avg };
+                    var scoreVal = style ? weightedCandidateScore(avg, x, y, angleDeg, prevAngleDeg, style, w, h) : avg;
+                    if (!bestOnLine || scoreVal > bestOnLine.score) bestOnLine = { x: x, y: y, avg: avg, score: scoreVal };
                 }
             }
-            if (bestOnLine && (!best || bestOnLine.avg > best.avg)) best = bestOnLine;
+            if (bestOnLine && (!best || bestOnLine.score > best.score)) best = bestOnLine;
         }
         return best;
     }
@@ -864,44 +891,164 @@ window.sketches['imageTrace'] = function (p) {
         if (!isFinite(r)) r = 0;
         return Math.max(-6, Math.min(6, r));   // clamp tan blow-ups near asymptotes
     }
+
+    // ---- Sketch "Style" engine -- real port of drawingbot.k.e.d.a /
+    // drawingbot.k.e.b.p. DBV3 sharpens the source image with an unsharp
+    // mask (amount = "Clarity" -- confirmed from decompiled source; it is
+    // NOT an edge-detection threshold despite the name) and, when Edge
+    // Power/Sobel Power/Seed Type call for it, precomputes an edge map
+    // (Canny in the real app) and a Sobel-magnitude map that a weighted
+    // scorer samples at every candidate step:
+    //   sample = luminance*LuminancePower + edges*EdgePower + sobel*SobelPower
+    //          + variance*Directionality + noise*Distortion - angleDiff*Angularity
+    // DBV3 minimizes this sample (lower = darker = better, since its maps
+    // are luminance-style 0=ink/255=blank); we keep pl0tb0t's existing
+    // "higher density = better" convention throughout this file, so the
+    // formula below is polarity-flipped to MAXIMIZE, term-for-term
+    // equivalent. The luminance/angularity/distortion terms are a
+    // high-confidence port (verified against p.java's scoring method and
+    // the base class's angleDiff/noise construction). The exact internal
+    // scale of the edges/sobel/variance samplers (drawingbot.k.e.b.v) was
+    // not fully recoverable from the decompiled source, so those three
+    // terms are a best-effort, tunable approximation -- flip the sign in
+    // weightedCandidateScore() below if testing shows a slider should push
+    // the opposite way.
+    function unsharpMask(lum, w, h, amount) {
+        if (!(amount > 0)) return lum;
+        var blurred = boxBlurPass(boxBlurPass(lum, w, h, 2, true), w, h, 2, false);
+        var out = new Float32Array(w * h);
+        for (var i = 0; i < lum.length; i++) {
+            out[i] = Math.max(0, Math.min(1, lum[i] + (lum[i] - blurred[i]) * amount * 2));
+        }
+        return out;
+    }
+    function computeSobelMagnitudeMap(gx, gy, w, h) {
+        var out = new Float32Array(w * h);
+        var maxMag = 1e-6;
+        for (var i = 0; i < w * h; i++) {
+            var m = Math.sqrt(gx[i] * gx[i] + gy[i] * gy[i]);
+            out[i] = m;
+            if (m > maxMag) maxMag = m;
+        }
+        for (var j = 0; j < out.length; j++) out[j] /= maxMag;
+        return out;
+    }
+    function computeEdgeMap(sobelMag, w, h) {
+        // Approximation of DBV3's real Canny-based edge map (no in-browser
+        // Canny implementation here): threshold the Sobel magnitude, then
+        // soften with a light blur so it behaves like the real app's
+        // post-Canny GaussianBlur rather than a hard binary mask.
+        var thresholded = new Float32Array(w * h);
+        for (var i = 0; i < sobelMag.length; i++) thresholded[i] = sobelMag[i] > 0.25 ? 1 : 0;
+        return boxBlurPass(boxBlurPass(thresholded, w, h, 1, true), w, h, 1, false);
+    }
+    function computeLocalVarianceMap(lum, w, h) {
+        var out = new Float32Array(w * h);
+        var maxVar = 1e-6;
+        for (var y = 1; y < h - 1; y++) {
+            for (var x = 1; x < w - 1; x++) {
+                var i = y * w + x, sum = 0, sumSq = 0, n = 0;
+                for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+                    var v = lum[(y + dy) * w + (x + dx)]; sum += v; sumSq += v * v; n++;
+                }
+                var mean = sum / n;
+                var vr = Math.max(0, sumSq / n - mean * mean);
+                out[i] = vr;
+                if (vr > maxVar) maxVar = vr;
+            }
+        }
+        for (var j = 0; j < out.length; j++) out[j] /= maxVar; // normalize 0..1, comparable to edge/sobel terms
+        return out;
+    }
+    function mapValueAt(map, w, h, x, y) {
+        if (!map) return 0;
+        var xi = Math.round(x), yi = Math.round(y);
+        if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0;
+        return map[yi * w + xi] || 0;
+    }
+    // Composite candidate score. `style` weights are all pre-normalized 0..1
+    // by the caller. Returns a value where HIGHER = more likely to be
+    // selected (matches pl0tb0t's existing avgDensity convention).
+    function weightedCandidateScore(avgDensity, x, y, angleDeg, prevAngleDeg, style, w, h) {
+        var score = avgDensity * style.luminancePower;
+        if (style.edgePower > 0) score += mapValueAt(style.edgeMap, w, h, x, y) * style.edgePower;
+        if (style.sobelPower > 0) score += mapValueAt(style.sobelMap, w, h, x, y) * style.sobelPower;
+        if (style.directionality > 0) score += mapValueAt(style.varianceMap, w, h, x, y) * style.directionality;
+        if (style.distortion > 0) score += (Math.random() - 0.5) * 2 * style.distortion;
+        if (style.angularity > 0 && prevAngleDeg != null) {
+            var diff = Math.abs(((angleDeg - prevAngleDeg + 540) % 360) - 180) / 180; // 0..1
+            score -= diff * style.angularity;
+        }
+        return score;
+    }
     function traceSketchReal(weightMap, w, h, opts) {
         var density = new Float32Array(weightMap.length);
         density.set(weightMap);
+        if (opts.clarity > 0) density = unsharpMask(density, w, h, opts.clarity);
+
+        // DBV3 "Seed Type": None (default, seed from working ink density,
+        // unchanged behaviour) | Edges | Sobel (seed from those static maps
+        // instead, gated by Seed Threshold).
+        var seedMap = opts.seedType === 'edges' ? opts.edgeMap : opts.seedType === 'sobel' ? opts.sobelMap : null;
+        var seedThreshold = opts.seedThreshold || 0;
+
+        // Real DBV3 only runs the weighted Style scorer for Lines/Curves;
+        // Squares and Waves bypass it entirely in the decompiled source.
+        var style = null;
+        if (opts.angleMode === 'lines') {
+            style = {
+                luminancePower: opts.luminancePower, directionality: opts.directionality,
+                distortion: opts.distortion, angularity: opts.angularity,
+                edgePower: opts.edgePower, sobelPower: opts.sobelPower,
+                edgeMap: opts.edgeMap, sobelMap: opts.sobelMap, varianceMap: opts.varianceMap
+            };
+            // DBV3 fallback: if every weight is zero the scorer degenerates
+            // to nothing, so it forces luminance-only scoring in that case.
+            if (!style.luminancePower && !style.directionality && !style.distortion && !style.angularity && !style.edgePower && !style.sobelPower) {
+                style.luminancePower = 1;
+            }
+        }
+
         var polylines = [];
         var totalLines = 0, fails = 0, squiggleCount = 0;
         var MAX_FAILS = 300, MAX_SQUIGGLES = 600, MAX_TOTAL_LINES = 3000;
 
         while (squiggleCount < MAX_SQUIGGLES && totalLines < MAX_TOTAL_LINES) {
-            var seed = findDarkestArea(density, w, h);
+            var seed = findDarkestArea(density, w, h, seedMap, seedThreshold);
             if (!seed || seed.blockAvg <= 0.05) break;
             squiggleCount++;
 
             var curX = seed.x, curY = seed.y;
             var cur = [{ x: curX, y: curY }];
             var failedThisSquiggle = true;
+            var prevAngleDeg = null; // DBV3: no turn penalty on a squiggle's first step
 
             for (var s = 0; s < opts.squiggleMaxLength; s++) {
-                var startAngleDeg, searchDelta;
+                var startAngleDeg, searchDelta, numTests, useStyle = null;
                 if (opts.angleMode === 'squares') {
                     startAngleDeg = opts.squareStartAngle + (Math.sin(curX / 9) + Math.cos(curY / 9 + 26)) * 180 / Math.PI;
                     searchDelta = 360;
+                    numTests = opts.lineTests;
                 } else if (opts.angleMode === 'waves') {
-                    // DBV3 Sketch Waves: line direction follows an X/Y curve
-                    // field; the darkest-line search is CONSTRAINED to a narrow
-                    // wedge centred on that direction so lines flow ALONG the
-                    // field, instead of sweeping all 360 deg like lines mode.
+                    // Real DBV3 Sketch Waves tests exactly 2 fixed directions
+                    // (the wave angle, and that angle + 180 deg) via a single
+                    // luminance test each -- not a swept wedge of candidates.
                     var waveDir = opts.waveStartAngle
                         + (waveFieldFn(opts.waveTypeX, ((curX / w * 100) + opts.waveOffsetX) / opts.waveDivisorX)
                          + waveFieldFn(opts.waveTypeY, ((curY / h * 100) + opts.waveOffsetY) / opts.waveDivisorY)) * 180 / Math.PI;
-                    searchDelta = opts.waveDelta;
-                    startAngleDeg = waveDir - searchDelta / 2;
+                    startAngleDeg = waveDir;
+                    searchDelta = 360;
+                    numTests = 2;
                 } else {
                     startAngleDeg = opts.startAngleMin + Math.random() * (opts.startAngleMax - opts.startAngleMin);
                     searchDelta = 360;
+                    numTests = opts.lineTests;
+                    useStyle = style;
                 }
-                var result = findDarkestLineJS(density, w, h, curX, curY, opts.minLineLength, opts.maxLineLength, opts.lineTests, startAngleDeg, searchDelta);
+                var result = findDarkestLineJS(density, w, h, curX, curY, opts.minLineLength, opts.maxLineLength, numTests, startAngleDeg, searchDelta, useStyle, prevAngleDeg);
                 if (!result) break;
                 eraseAlongSegment(density, w, h, curX, curY, result.x, result.y, opts.radiusMin, opts.radiusMax, opts.eraseMin, opts.eraseMax, opts.eraseTone);
+                if (useStyle) prevAngleDeg = Math.atan2(result.y - curY, result.x - curX) * 180 / Math.PI;
                 cur.push({ x: result.x, y: result.y });
                 curX = result.x; curY = result.y;
                 totalLines++;
@@ -1368,6 +1515,15 @@ window.sketches['imageTrace'] = function (p) {
                 var distortion01 = Math.max(0, Math.min(1, (Number(PARAMS.distortion) || 0) / 100));
                 var ignoreWhite = PARAMS.ignoreWhite === 'on';
 
+                // DBV3 builds Edge/Sobel/variance data once from the working
+                // image's structure, shared by every pen -- not per-channel.
+                var sketchEdgeMap = null, sketchSobelMap = null, sketchVarianceMap = null;
+                if (mode === 'sketch') {
+                    sketchSobelMap = computeSobelMagnitudeMap(field.gx, field.gy, workW, workH);
+                    sketchEdgeMap = computeEdgeMap(sketchSobelMap, workW, workH);
+                    sketchVarianceMap = computeLocalVarianceMap(lum, workW, workH);
+                }
+
                 var streamAngleFn = null;
                 if (mode === 'streamlines') {
                     if (PARAMS.fieldType === 'flow') {
@@ -1432,12 +1588,22 @@ window.sketches['imageTrace'] = function (p) {
                             waveOffsetX: Number(PARAMS.sketchWaveOffsetX) || 0, waveOffsetY: Number(PARAMS.sketchWaveOffsetY) || 0,
                             waveDivisorX: _waveDivX, waveDivisorY: _waveDivY,
                             waveTypeX: PARAMS.sketchWaveTypeX || 'sin', waveTypeY: PARAMS.sketchWaveTypeY || 'cos',
-                            waveDelta: 80,
                             minLineLength: Math.max(1, PARAMS.sketchMinLineLength), maxLineLength: Math.max(2, PARAMS.sketchMaxLineLength),
                             lineTests: Math.max(1, PARAMS.sketchLineTests), squiggleMaxLength: Math.max(1, PARAMS.sketchSquiggleMax),
                             radiusMin: Math.max(0.5, PARAMS.sketchEraseRadiusMin), radiusMax: Math.max(0.5, PARAMS.sketchEraseRadiusMax),
                             eraseMin: Math.max(0, Math.min(1, PARAMS.sketchEraseMin / 100)), eraseMax: Math.max(0, Math.min(1, PARAMS.sketchEraseMax / 100)),
-                            eraseTone: Math.max(0, Math.min(1, PARAMS.sketchTone / 100))
+                            eraseTone: Math.max(0, Math.min(1, PARAMS.sketchTone / 100)),
+                            // Real DBV3 "Style" scorer settings (Lines/Curves only -- see traceSketchReal)
+                            clarity: Math.max(0, Math.min(1, (Number(PARAMS.sketchClarity) || 0) / 100)),
+                            luminancePower: Math.max(0, Math.min(1, (Number(PARAMS.sketchLuminancePower) || 0) / 100)),
+                            directionality: Math.max(0, Math.min(1, (Number(PARAMS.sketchDirectionality) || 0) / 100)),
+                            distortion: Math.max(0, Math.min(1, (Number(PARAMS.sketchDistortion) || 0) / 100)),
+                            angularity: Math.max(0, Math.min(1, (Number(PARAMS.sketchAngularity) || 0) / 100)),
+                            edgePower: Math.max(0, Math.min(1, (Number(PARAMS.sketchEdgePower) || 0) / 100)),
+                            sobelPower: Math.max(0, Math.min(1, (Number(PARAMS.sketchSobelPower) || 0) / 100)),
+                            seedType: PARAMS.sketchSeedType || 'none',
+                            seedThreshold: Math.max(0, Math.min(1, (Number(PARAMS.sketchSeedThreshold) || 0) / 100)),
+                            edgeMap: sketchEdgeMap, sobelMap: sketchSobelMap, varianceMap: sketchVarianceMap
                         });
                         result[pens[i]] = applySketchStyle(sketchRaw, PARAMS.sketchStyle);
                     } else {
@@ -1686,6 +1852,39 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'sketchTone', label: 'Tone', type: 'range', min: 0, max: 100, step: 5, value: 50, group: 'general',
               visibleWhen: { param: 'mode', values: ['sketch'] },
               tip: 'DBV3 "Tone": blends a linear vs. eased curve controlling how erase radius/amount respond to local darkness.' },
+
+            // -- Sketch "Style" settings -- shared scorer ported from DBV3's
+            // real drawingbot.k.e.b.p engine. Only affect Lines/Curves (the
+            // two styles that route through the weighted candidate scorer
+            // in the real app); Squares/Waves are unaffected by design.
+            { id: 'sketchLuminancePower', label: 'Luminance Power', type: 'range', min: 0, max: 100, step: 5, value: 100, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Luminance Power": weight on local ink density when scoring candidate lines.' },
+            { id: 'sketchDirectionality', label: 'Directionality', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Directionality": weights local contrast/variance in the candidate score. Despite the name, it does not bias toward a flow direction.' },
+            { id: 'sketchDistortion', label: 'Distortion', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Distortion": injects weighted random noise into the candidate score for a rougher, less mechanical line.' },
+            { id: 'sketchAngularity', label: 'Angularity', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Angularity": penalizes sharp turns from the previous segment, favoring smoother continuations as it increases.' },
+            { id: 'sketchEdgePower', label: 'Edge Power', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Edge Power": weights a precomputed edge-strength map in the candidate score, pulling lines toward image edges.' },
+            { id: 'sketchSobelPower', label: 'Sobel Power', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchStyle', values: ['lines', 'curves'] }],
+              tip: 'DBV3 "Sobel Power": weights a precomputed Sobel-magnitude map in the candidate score.' },
+            { id: 'sketchClarity', label: 'Clarity', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
+              visibleWhen: { param: 'mode', values: ['sketch'] },
+              tip: 'DBV3 "Clarity": NOT an edge threshold -- this is unsharp-mask sharpening amount applied before tracing.' },
+            { id: 'sketchSeedType', label: 'Seed Type', type: 'select', value: 'none', group: 'general',
+              visibleWhen: { param: 'mode', values: ['sketch'] },
+              tip: 'DBV3 "Seed Type": which map picks where the next squiggle starts. None = darkest remaining ink (default). Edges/Sobel = seed from those maps instead.',
+              options: [{ value: 'none', label: 'None' }, { value: 'edges', label: 'Edges' }, { value: 'sobel', label: 'Sobel' }] },
+            { id: 'sketchSeedThreshold', label: 'Seed Threshold', type: 'range', min: 0, max: 100, step: 5, value: 50, group: 'general',
+              visibleWhen: [{ param: 'mode', values: ['sketch'] }, { param: 'sketchSeedType', values: ['edges', 'sobel'] }],
+              tip: 'DBV3 "Seed Threshold": cutoff applied to the Edges/Sobel seed map before it is used to pick the next squiggle start.' },
 
             // -- Streamlines settings --
             { id: 'fieldType', label: 'Field type', type: 'select', value: 'edge', group: 'general',
