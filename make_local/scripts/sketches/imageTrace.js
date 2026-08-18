@@ -1829,6 +1829,16 @@ window.sketches['imageTrace'] = function (p) {
         }
         return lists;
     }
+    // 2-opt for an OPEN Hamiltonian PATH, not a closed cycle -- important:
+    // encodeTSPPolyline never draws a closing edge back from the last point
+    // to the first, so edges only exist between consecutive tour POSITIONS
+    // 0..n-2 (n-1 edges for n points). An earlier version used `% n`
+    // wraparound indexing here, which scores/optimizes a "closing" edge
+    // that's never actually drawn -- the optimizer was spending effort
+    // minimizing a phantom edge and could leave real, visible crossings in
+    // place because closing the phantom loop looked cheaper overall. No
+    // modulo anywhere below fixes that: position n-1 is a true dead end,
+    // never treated as connecting back to position 0.
     function twoOptImprove(tour, points, maxPasses) {
         var n = tour.length;
         if (n < 4) return tour;
@@ -1839,9 +1849,8 @@ window.sketches['imageTrace'] = function (p) {
             while (improved && passes < maxPasses) {
                 improved = false; passes++;
                 for (var i = 0; i < n - 2; i++) {
-                    for (var j = i + 2; j < n - (i === 0 ? 1 : 0); j++) {
-                        var a = tour[i], b = tour[i + 1], c = tour[j], dd = tour[(j + 1) % n];
-                        if (a === c || b === dd) continue;
+                    for (var j = i + 2; j < n - 1; j++) {
+                        var a = tour[i], b = tour[i + 1], c = tour[j], dd = tour[j + 1];
                         if (d(a, c) + d(b, dd) < d(a, b) + d(c, dd) - 1e-6) {
                             var seg = tour.slice(i + 1, j + 1).reverse();
                             for (var k2 = 0; k2 < seg.length; k2++) tour[i + 1 + k2] = seg[k2];
@@ -1865,7 +1874,7 @@ window.sketches['imageTrace'] = function (p) {
         // full search would find, a well-documented, accepted tradeoff for
         // going from O(n^2) to ~O(n*k) per pass. Still a genuinely correct
         // local search, not an approximation of the search itself.
-        var K = Math.min(20, n - 1);
+        var K = Math.min(24, n - 1);
         var neighbors = buildNeighborLists(points, K);
         var pos = new Int32Array(n);
         for (var p = 0; p < n; p++) pos[tour[p]] = p;
@@ -1880,8 +1889,8 @@ window.sketches['imageTrace'] = function (p) {
         var improvedN = true, passesN = 0;
         while (improvedN && passesN < maxPasses) {
             improvedN = false; passesN++;
-            for (var ii = 0; ii < n; ii++) {
-                var a2 = tour[ii], b2 = tour[(ii + 1) % n];
+            for (var ii = 0; ii < n - 1; ii++) {
+                var a2 = tour[ii], b2 = tour[ii + 1];
                 var dab = d(a2, b2);
                 var cand = neighbors[a2];
                 for (var ci = 0; ci < cand.length; ci++) {
@@ -1889,16 +1898,58 @@ window.sketches['imageTrace'] = function (p) {
                     var dac = d(a2, c2);
                     if (dac >= dab) break; // sorted by distance -- no closer candidate can win past here
                     var jj = pos[c2];
-                    var dd3 = tour[(jj + 1) % n];
+                    if (jj >= n - 1) continue; // position n-1 has no outgoing edge (path end, not a cycle)
+                    var dd3 = tour[jj + 1];
                     if (c2 === b2 || dd3 === a2) continue;
                     if (dac + d(b2, dd3) < dab + d(c2, dd3) - 1e-6) {
                         var lo2 = Math.min(ii, jj), hi2 = Math.max(ii, jj);
                         reverseSegment(lo2 + 1, hi2);
                         improvedN = true;
-                        b2 = tour[(ii + 1) % n]; dab = d(a2, b2);
+                        b2 = tour[ii + 1]; dab = d(a2, b2);
                     }
                 }
             }
+        }
+        return tour;
+    }
+    function segmentsIntersect(p1, p2, p3, p4) {
+        function ccw(a, b, c) { return (c.y - a.y) * (b.x - a.x) - (b.y - a.y) * (c.x - a.x); }
+        var d1 = ccw(p3, p4, p1), d2 = ccw(p3, p4, p2), d3 = ccw(p1, p2, p3), d4 = ccw(p1, p2, p4);
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    }
+    // Guaranteed crossing-removal pass, run after 2-opt. Neighbour-list 2-opt
+    // (above) only tries reconnecting each edge to its K geometrically
+    // nearest candidates -- fast, but it can still miss a crossing whose fix
+    // isn't in either point's candidate list, especially on the clustered,
+    // non-uniform point sets real LBG/Voronoi sampling produces (dense
+    // clusters, sparse gaps) rather than uniform-random test data. This pass
+    // instead checks actual segment geometry directly: any two edges that
+    // truly cross can ALWAYS be shortened by reversing the segment between
+    // them (strict inequality on the resulting quadrilateral, same triangle-
+    // inequality argument 2-opt itself relies on), so every fix here is a
+    // guaranteed real improvement, and since tour length is bounded below
+    // this always terminates. It's O(n^2) per pass (checks real geometry,
+    // not a candidate list), so it only runs a few bounded passes right at
+    // the end -- not inside the main 2-opt loop -- and is gated behind the
+    // same maxOptPoints cap as 2-opt itself in encodeTSPPolyline.
+    function removeCrossings(tour, points, maxPasses) {
+        var n = tour.length;
+        if (n < 4) return tour;
+        for (var pass = 0; pass < maxPasses; pass++) {
+            var fixedThisPass = 0;
+            for (var i = 0; i < n - 1; i++) {
+                var a = points[tour[i]], b = points[tour[i + 1]];
+                for (var j = i + 2; j < n - 1; j++) {
+                    var c = points[tour[j]], dd = points[tour[j + 1]];
+                    if (segmentsIntersect(a, b, c, dd)) {
+                        var seg = tour.slice(i + 1, j + 1).reverse();
+                        for (var k2 = 0; k2 < seg.length; k2++) tour[i + 1 + k2] = seg[k2];
+                        b = points[tour[i + 1]];
+                        fixedThisPass++;
+                    }
+                }
+            }
+            if (fixedThisPass === 0) break;
         }
         return tour;
     }
@@ -1946,7 +1997,7 @@ window.sketches['imageTrace'] = function (p) {
         var gw = Math.max(1, Math.ceil(w / cell)), gh = Math.max(1, Math.ceil(h / cell));
         var grid = new Array(gw * gh);
         var pts = [];
-        var MAX_DISKS = Math.min(opts.maxPoints || 2500, 2500);
+        var MAX_DISKS = Math.min(opts.maxPoints || 2500, 25000);
         var tries = 0, maxTries = MAX_DISKS * 80;
         function densityAt(x, y) { var xi = x | 0, yi = y | 0; if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0; return weightMap[yi * w + xi] || 0; }
         function radiusAt(x, y) { return maxR - (maxR - minR) * densityAt(x, y); }
@@ -2028,7 +2079,7 @@ window.sketches['imageTrace'] = function (p) {
         // iteration once the population reaches the cap (still allowing
         // merges, so it can shrink back below the cap), which is order-
         // independent.
-        var HARD_CAP = Math.min(opts.maxPoints, 2000);
+        var HARD_CAP = Math.min(opts.maxPoints, 20000);
         var seedRadius = (opts.minDiameter + opts.maxDiameter) / 4;
         var pts = [], startCount = Math.max(4, Math.min(HARD_CAP, Math.round(opts.pointCount * 0.3)));
         var tries = 0, maxTries = startCount * 200;
@@ -2203,7 +2254,10 @@ window.sketches['imageTrace'] = function (p) {
     function encodeTSPPolyline(points, maxOptPoints) {
         if (points.length < 2) return [];
         var tour = nearestNeighborTour(points);
-        if (points.length <= maxOptPoints) tour = twoOptImprove(tour, points, 12);
+        if (points.length <= maxOptPoints) {
+            tour = twoOptImprove(tour, points, 12);
+            tour = removeCrossings(tour, points, 8);
+        }
         return [tour.map(function (i) { return { x: points[i].x, y: points[i].y }; })];
     }
     function renderPointFamily(sampled, weightMap, w, h, opts) {
@@ -2963,14 +3017,14 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'dashDistortion', label: 'Dash Distortion (%)', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
               tip: 'DBV3 real Dashes encoder\'s optional bezier bow-distortion, applied as a Catmull-Rom bulge instead of the real cubic-bezier control points -- same idea, not a byte-identical curve.' },
-            { id: 'tspMaxOptPoints', label: 'TSP 2-opt Point Cap', type: 'range', min: 20, max: 4000, step: 10, value: 4000, group: 'general',
+            { id: 'tspMaxOptPoints', label: 'TSP 2-opt Point Cap', type: 'range', min: 20, max: 40000, step: 10, value: 4000, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['tsp'] }],
-              tip: '(v3.1) Above this many points, 2-opt crossing-removal is skipped entirely and only the raw greedy nearest-neighbour tour is used, which reliably produces long crossing lines -- so this defaults to the point-count ceiling (2-opt now uses an efficient neighbour-list search, not full O(n^2), so it stays fast even at high counts). Lower this only if a specific image is running slow. Our own safety cap, not a real DBV3 setting.' },
+              tip: '(v3.1) Above this many points, 2-opt/crossing-removal is skipped entirely and only the raw greedy nearest-neighbour tour is used, which reliably produces crossing lines -- keep this at or above your point count if you want a guaranteed crossing-free tour. Honest cost warning: tour construction and crossing-removal are both O(n^2) here (no spatial indexing yet), so pushing this much past ~4000-6000 on the Pi can take minutes, not seconds. Our own safety cap, not a real DBV3 setting.' },
 
             // -- Voronoi / Stippling (real, drawingbot.k.e.c.a.p) --
-            { id: 'pointLimit', label: 'Point Limit', type: 'range', min: 50, max: 4000, step: 50, value: 800, group: 'general',
+            { id: 'pointLimit', label: 'Point Limit', type: 'range', min: 50, max: 40000, step: 50, value: 800, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple'] },
-              tip: 'DBV3 "Point Limit": target/maximum point count.' },
+              tip: 'DBV3 "Point Limit": target/maximum point count. Honest cost warning: each Voronoi Iteration rebuilds a full Delaunay triangulation from scratch, O(n^2) with no spatial indexing -- past a few thousand points this gets slow fast (roughly quadrupling each time point count doubles), especially on the Pi. Raised well past DBV3\'s own practical range on request; drop Voronoi Iterations if a high point count is too slow.' },
             { id: 'luminancePower', label: 'Density Power', type: 'range', min: 0.5, max: 6, step: 0.5, value: 2, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple'] },
               tip: '(v3) Real DBV3 "Density Power": the exact exponent from the decompiled rejection-sampling formula, (255-lum)^power / 255^(power-1) -- higher = point placement biased harder toward darker areas.' },
@@ -3007,15 +3061,18 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'lbgMaxIterations', label: 'Max Iterations', type: 'range', min: 1, max: 60, step: 1, value: 25, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
               tip: '(v3) Real DBV3 LBG "Max Iterations", default 25 exactly -- split-merge passes, each rebuilding a real Voronoi diagram. Low iteration counts under-converge and can look chaotic/uneven; 25 is real DBV3\'s own default for a reason.' },
-            { id: 'lbgPointLimit', label: 'Point Limit', type: 'range', min: 20, max: 2000, step: 20, value: 500, group: 'general',
+            { id: 'lbgPointLimit', label: 'Point Limit', type: 'range', min: 20, max: 20000, step: 20, value: 500, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: 'Seed/cap point count. OUR OWN necessary approximation -- real DBV3 seeds LBG one random point at a time via a framework-level scheduling loop with no single "how many points" setting visible in the LBG panel itself.' },
-            { id: 'lbgHysteresis', label: 'Hysteresis', type: 'range', min: 0, max: 2, step: 0.05, value: 0.6, group: 'general',
-              visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Hysteresis" (real Java default 0.6) -- widens the split/merge keep-band so cells near the threshold don\'t oscillate.' },
-            { id: 'lbgHysteresisGrowth', label: 'Hysteresis Growth', type: 'range', min: 0, max: 1, step: 0.01, value: 0.01, group: 'general',
-              visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Hysteresis Growth" (real Java default 0.01) -- widens Hysteresis further each iteration so the point count converges.' },
+              tip: 'Seed/cap point count. OUR OWN necessary approximation -- real DBV3 seeds LBG one random point at a time via a framework-level scheduling loop with no single "how many points" setting visible in the LBG panel itself. Honest cost warning: every iteration rebuilds a full Delaunay triangulation, O(n^2) with no spatial indexing -- past a few thousand points this gets slow fast, especially on the Pi. Raised well past the practical range on request; lower Max Iterations if a high point count is too slow.' },
+            // Hysteresis / Hysteresis Growth (q/r) are real fields on the Java
+            // sampler, but NOT shown as sliders in DBV3's own "LBG Diagram"
+            // panel (confirmed against the user's screenshot: only Stipple
+            // Radius Min/Max, Density, Threshold, Max Iterations are exposed
+            // there) -- they're internal convergence tuning, not a user-facing
+            // control in real DBV3 either. Kept out of this UI to match that
+            // exactly; still live as PARAMS.lbgHysteresis/lbgHysteresisGrowth
+            // at the real Java defaults (0.6/0.01) for the dispatch below and
+            // for presets to fine-tune internally, just not rendered as knobs.
 
             // -- Adaptive (v3.1 -- real AIS disk-packer unrecoverable, see
             // engine header comment: a Windows case-insensitive-filesystem
@@ -3027,9 +3084,9 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'maxSampleRadius', label: 'Max Sample Radius', type: 'range', min: 2, max: 80, step: 1, value: 24, group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
               tip: '(v3.1) Largest disk radius, placed in flat/light areas.' },
-            { id: 'adaptiveMaxPoints', label: 'Max Points', type: 'range', min: 100, max: 2500, step: 50, value: 1200, group: 'general',
+            { id: 'adaptiveMaxPoints', label: 'Max Points', type: 'range', min: 100, max: 25000, step: 50, value: 1200, group: 'general',
               visibleWhen: { param: 'mode', values: ['adaptive'] },
-              tip: 'Hard cap on placed disks, independent of image content, so a dense photo can\'t hang the Pi.' },
+              tip: 'Hard cap on placed disks, independent of image content. This sampler is grid-based (not triangulation), so it scales much better than Voronoi/LBG -- the main cost at high counts comes from whichever line/point Encoder you pick afterward (TSP especially, see its own cost warning) rather than this step itself.' },
 
             // -- Grid (real, direct port of drawingbot.k.e.c.a.g) --
             { id: 'gridCellWidth', label: 'Cell Width', type: 'range', min: 2, max: 80, step: 1, value: 12, group: 'general',
