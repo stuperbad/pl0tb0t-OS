@@ -180,12 +180,12 @@ window.sketches['imageTrace'] = function (p) {
         hatchVelocityMin: 20,
         hatchVelocityMax: 60,
 
-        pointLimit: 800,
-        stippleRadiusMin: 0.4,
+        pointLimit: 800,       // Voronoi seed/target point count (LBG has no direct real equivalent -- see lbgPointLimit below)
+        stippleRadiusMin: 0.4, // Voronoi only -- LBG has its own dedicated real Stipple Radius Min/Max (lbgRadiusMin/Max)
         stippleRadiusMax: 1.4,
         luminancePower: 2,      // real DBV3 "Density Power" (Voronoi sampler only -- LBG's own cell analysis fixes this at 1, matching the real k.b.i.e code)
-        voronoiIterations: 4,   // shared Voronoi Lloyd-relaxation / LBG split-merge iteration count
-        voronoiAccuracy: 0.5,   // real DBV3 "Voronoi Accuracy": cell centroid/mass scan step (shared by Voronoi + LBG)
+        voronoiIterations: 4,   // Voronoi Lloyd-relaxation iteration count (LBG has its own dedicated real Max Iterations, default 25 -- see lbgMaxIterations)
+        voronoiAccuracy: 0.5,   // cell centroid/mass scan step (shared by Voronoi + LBG) -- OUR OWN performance knob, not a real DBV3 setting (real OpenCV code scans every pixel unconditionally; this file has no native raster acceleration)
 
         minSampleRadius: 4,
         maxSampleRadius: 24,
@@ -193,11 +193,18 @@ window.sketches['imageTrace'] = function (p) {
         adaptiveBrightness: 100,
         adaptiveContrast: 100,
 
-        lbgMinDiameter: 2,          // real DBV3 LBG "Min Cell Diameter"
-        lbgMaxDiameter: 20,         // real DBV3 LBG "Max Cell Diameter"
-        lbgDensityBlend: 0.5,       // real DBV3 LBG "Density Blend"
-        lbgHysteresis: 0.3,         // real DBV3 LBG "Hysteresis"
-        lbgHysteresisGrowth: 0.05,  // real DBV3 LBG "Hysteresis Growth"
+        // LBG (drawingbot.k.e.c.a.k) -- field-for-field real DBV3 names/
+        // defaults, confirmed against both the decompiled source (fields
+        // l/m/n/o/p/q/r) AND a real "LBG Diagram" screenshot of DBV3's own
+        // UI/default values.
+        lbgRadiusMin: 2,        // real "Stipple Radius Min" (l, real UI default 2.0)
+        lbgRadiusMax: 12,       // real "Stipple Radius Max" (m, real UI default 12.0)
+        lbgDensity: 0.5,        // real "Density" (n, real UI default 50.0%) -- blend factor between an eased and linear density->diameter response
+        lbgThreshold: 100,      // real "Threshold" (o, real UI default 100.0%) -- final luminance cutoff on converged points; 100% = disabled
+        lbgMaxIterations: 25,   // real "Max Iterations" (p, real UI default 25 exactly)
+        lbgPointLimit: 500,     // seed/cap point count -- OUR OWN necessary approximation: real DBV3 seeds LBG one random point at a time via a framework-level scheduling loop with no single user-facing "how many points" setting visible in the LBG panel itself
+        lbgHysteresis: 0.6,         // real "Hysteresis" (q, real Java default 0.6)
+        lbgHysteresisGrowth: 0.01,  // real "Hysteresis Growth" (r, real Java default 0.01)
 
         gridCellWidth: 12,   // real DBV3 Grid "Cell Width"
         gridCellHeight: 12,  // real DBV3 Grid "Cell Height"
@@ -1705,6 +1712,33 @@ window.sketches['imageTrace'] = function (p) {
         }
         return polys;
     }
+    // Bounded Voronoi wrapper -- fixes a real corner/edge bug: a site near
+    // the canvas boundary has a Delaunay neighbour fan that doesn't wrap a
+    // full 360 degrees, so voronoiCellsFromDelaunay's circumcenter-fan for
+    // that site is an OPEN arc, not a closed loop -- clipping an open arc to
+    // the canvas rect produces garbage (self-intersecting/degenerate)
+    // polygons right at edges and corners. Real DBV3 avoids this because
+    // OpenCV's Subdiv2D is initialized with the canvas Rect directly
+    // (drawingbot.k.b.i.e.a(): `initDelaunay(new Rect(0,0,w,h))`), which
+    // seeds its own boundary structure; we don't have that, so this adds a
+    // ring of distant "ghost" sites around the canvas before triangulating,
+    // which closes every real site's cell before it gets clipped, then
+    // drops the ghost sites' own cells. Every Voronoi-cell caller (Lloyd
+    // relaxation, LBG split/merge, the Diagram encoder) should go through
+    // this instead of calling delaunayTriangulate+voronoiCellsFromDelaunay
+    // directly.
+    function boundedVoronoiCells(points, w, h) {
+        var n = points.length;
+        var cx = w / 2, cy = h / 2, R = Math.max(w, h) * 4;
+        var all = points.slice();
+        for (var gi = 0; gi < 8; gi++) {
+            var ang = gi * Math.PI / 4;
+            all.push({ x: cx + Math.cos(ang) * R, y: cy + Math.sin(ang) * R });
+        }
+        var tri = delaunayTriangulate(all);
+        var cellsAll = voronoiCellsFromDelaunay(all, tri, w, h);
+        return cellsAll.slice(0, n);
+    }
     // Density-weighted cell centroid + orientation -- the EXACT formula real
     // DBV3 uses in both places it needs one: the Voronoi sampler's Lloyd-
     // relaxation step (drawingbot.k.e.c.a.p's static method `a`) and LBG's
@@ -1822,8 +1856,7 @@ window.sketches['imageTrace'] = function (p) {
         var iterations = Math.max(0, Math.min(12, opts.iterations));
         var cells = null;
         for (var it = 0; it <= iterations; it++) {
-            var tri = delaunayTriangulate(pts);
-            cells = voronoiCellsFromDelaunay(pts, tri, w, h);
+            cells = boundedVoronoiCells(pts, w, h);
             if (it === iterations) break;
             for (var pi = 0; pi < pts.length; pi++) {
                 var poly = cells[pi]; if (!poly || poly.length < 3) continue;
@@ -1872,18 +1905,36 @@ window.sketches['imageTrace'] = function (p) {
         return { points: pts, cells: null };
     }
     // LBG (real, direct port of drawingbot.k.e.c.a.k's iterative split/merge
-    // -- Linde-Buzo-Gray 1980): each iteration rebuilds a real Voronoi
-    // diagram, computes each cell's mass + weighted centroid (shared formula
-    // above), derives a target diameter per cell from its mean density (Min/
-    // Max Cell Diameter blended by Density Blend, the real l/m/n fields),
-    // then SPLITS cells whose mass exceeds that target's area (2 new points
-    // offset along the cell's real orientation), MERGES cells below it
-    // (drop), or recentres (Lloyd step) otherwise. Hysteresis/Hysteresis
-    // Growth (real q/r fields) widen the keep-band each iteration so the
-    // point count converges instead of oscillating. `easeOutQuad` stands in
+    // -- Linde-Buzo-Gray 1980): field-for-field port of the real class's
+    // exposed settings, confirmed against both the decompiled source AND a
+    // real DBV3 "LBG Diagram" screenshot of its actual UI/defaults --
+    //   l/m  Stipple Radius Min/Max -- target cell diameter range (opts.
+    //        minDiameter/maxDiameter here; also literally each point's OWN
+    //        render radius, see below)
+    //   n    Density -- blend factor between an eased and linear response
+    //        curve mapping local density to target diameter (opts.densityBlend)
+    //   o    Threshold -- final luminance cutoff on the converged point set
+    //        only (opts.threshold; 1.0/100% = disabled, matches real default)
+    //   p    Max Iterations (opts.iterations; real default 25)
+    //   q/r  Hysteresis / Hysteresis Growth -- widen the split/merge keep-
+    //        band each iteration so the point count converges instead of
+    //        oscillating (opts.hysteresis/hysteresisGrowth)
+    // Each iteration rebuilds a real (bounded) Voronoi diagram, computes
+    // every cell's mass + weighted centroid (shared formula above), derives
+    // a target diameter from mean density, then SPLITS cells whose mass
+    // exceeds that target's area (2 new points offset along the cell's real
+    // orientation, each carrying diameter/2 as its own radius -- real DBV3
+    // stores this as the point's Z coordinate), MERGES cells below it
+    // (drop), or recentres (Lloyd step) otherwise. `easeOutQuad` stands in
     // for DBV3's own easing helper (drawingbot.e.b.a.i) -- that one specific
     // curve wasn't recoverable from the decompile, this is the standard
-    // shape it's almost certainly matching.
+    // shape it's almost certainly matching. Real DBV3 also exposes "Plotting
+    // Resolution" and "Random Seed" as generic per-PFM settings (and "Cache
+    // Result" to skip re-sampling when nothing changed) -- not modeled here:
+    // this file uses one shared working-resolution downscale for the whole
+    // image pipeline rather than a per-PFM resolution knob, always reseeds
+    // with Math.random() (no deterministic seed), and always resamples on
+    // Generate (no cross-run cache).
     function easeOutQuad(t) { return 1 - (1 - t) * (1 - t); }
     function lbgTargetDiameter(meanDensity, minDiam, maxDiam, blend) {
         var yProgress = 1 - (easeOutQuad(meanDensity) * blend + meanDensity * (1 - blend));
@@ -1899,19 +1950,28 @@ window.sketches['imageTrace'] = function (p) {
         // iteration re-triangulates the whole set (O(n^2)) -- exactly the
         // unbounded-compute pattern this file's header warns against, so it
         // gets a real, independent backstop like every other sampler here.
+        // IMPORTANT: this must be spatially neutral -- an earlier version
+        // enforced the cap by slicing the point array once it overflowed,
+        // which silently favoured whichever cells happened to be visited
+        // first each iteration and produced visible asymmetric/corner bias.
+        // This version instead freezes ALL splits uniformly for the whole
+        // iteration once the population reaches the cap (still allowing
+        // merges, so it can shrink back below the cap), which is order-
+        // independent.
         var HARD_CAP = Math.min(opts.maxPoints, 2000);
+        var seedRadius = (opts.minDiameter + opts.maxDiameter) / 4;
         var pts = [], startCount = Math.max(4, Math.min(HARD_CAP, Math.round(opts.pointCount * 0.3)));
         var tries = 0, maxTries = startCount * 200;
         while (pts.length < startCount && tries < maxTries) {
             tries++;
             var x = Math.random() * w, y = Math.random() * h;
-            if ((weightMap[(y | 0) * w + (x | 0)] || 0) > 0.05) pts.push({ x: x, y: y });
+            if ((weightMap[(y | 0) * w + (x | 0)] || 0) > 0.05) pts.push({ x: x, y: y, r: seedRadius });
         }
         if (pts.length < 3) return { points: pts, cells: null };
-        var iterations = Math.max(1, Math.min(20, opts.iterations)), cells = null;
+        var iterations = Math.max(1, Math.min(60, opts.iterations)), cells = null;
         for (var it = 0; it < iterations; it++) {
-            var tri = delaunayTriangulate(pts);
-            cells = voronoiCellsFromDelaunay(pts, tri, w, h);
+            cells = boundedVoronoiCells(pts, w, h);
+            var atCap = pts.length >= HARD_CAP;
             var hysteresis = opts.hysteresis + it * opts.hysteresisGrowth;
             var next = [];
             for (var pi = 0; pi < pts.length; pi++) {
@@ -1925,24 +1985,55 @@ window.sketches['imageTrace'] = function (p) {
                 var diameter = lbgTargetDiameter(meanDensity, opts.minDiameter, opts.maxDiameter, opts.densityBlend);
                 var targetArea = Math.PI * (diameter / 2) * (diameter / 2);
                 var minMass = (1 - hysteresis / 2) * targetArea, maxMass = (1 + hysteresis / 2) * targetArea;
-                if (c.mass < minMass) { continue; }
-                else if (c.mass < maxMass || next.length >= HARD_CAP - 1) { next.push({ x: c.x, y: c.y }); }
+                if (c.mass < minMass) { continue; } // merge (drop)
+                else if (c.mass < maxMass || atCap) { next.push({ x: c.x, y: c.y, r: pts[pi].r || diameter / 2 }); } // keep (Lloyd recentre)
                 else {
-                    var area = Math.max(c.mass, 1), radius = Math.sqrt(area / Math.PI) / 2, ang = c.orientation;
-                    next.push({ x: Math.max(0, Math.min(w - 1, c.x - radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y - radius * Math.sin(ang))) });
-                    next.push({ x: Math.max(0, Math.min(w - 1, c.x + radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y + radius * Math.sin(ang))) });
+                    // split: 2 new points offset along the cell's real
+                    // orientation, each carrying the target diameter/2 as
+                    // its own radius -- real DBV3 stores this as the point's
+                    // Z coordinate (CoordinateXYZM(x,y,diameter/2.0,lum)) and
+                    // every kept/un-split point simply retains whatever radius
+                    // it was last given at its own split event.
+                    var area = Math.max(c.mass, 1), radius = Math.sqrt(area / Math.PI) / 2, ang = c.orientation, childR = diameter / 2;
+                    next.push({ x: Math.max(0, Math.min(w - 1, c.x - radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y - radius * Math.sin(ang))), r: childR });
+                    next.push({ x: Math.max(0, Math.min(w - 1, c.x + radius * Math.cos(ang))), y: Math.max(0, Math.min(h - 1, c.y + radius * Math.sin(ang))), r: childR });
                 }
             }
             if (next.length < 2) break;
-            // Backstop: trim any residual overshoot from the last iteration's
-            // trailing splits (the per-cell check above can only over/undershoot
-            // by ~1 cell, but this keeps the bound exact and independent of it).
-            if (next.length > HARD_CAP) next = next.slice(0, HARD_CAP);
+            // The atCap freeze above stops NEW splits once a full iteration
+            // starts at/over the cap, but a single iteration that starts
+            // just under it can still nearly double in that one step before
+            // the freeze engages next time -- so this is a real backstop,
+            // not just the freeze. Downsample with a uniform random partial
+            // shuffle (not next.slice(0, HARD_CAP)) so the bound is exact
+            // AND spatially unbiased -- array order here isn't random (split
+            // children are always appended at the tail), so a plain slice
+            // would systematically discard whichever cells split most
+            // recently rather than a neutral cross-section.
+            if (next.length > HARD_CAP) {
+                for (var swapI = 0; swapI < HARD_CAP; swapI++) {
+                    var swapJ = swapI + Math.floor(Math.random() * (next.length - swapI));
+                    var tmp = next[swapI]; next[swapI] = next[swapJ]; next[swapJ] = tmp;
+                }
+                next.length = HARD_CAP;
+            }
             pts = next;
         }
-        var tri2 = delaunayTriangulate(pts);
-        cells = voronoiCellsFromDelaunay(pts, tri2, w, h);
-        return { points: pts, cells: cells };
+        // Real DBV3 "Threshold" (drawingbot.k.e.c.a.k.b()'s `this.j` filter):
+        // a final luminance cutoff applied to the CONVERGED point set only --
+        // it does not affect the split/merge math above, only which of the
+        // converged points actually get rendered. 1.0 (100%) = disabled,
+        // every converged point is kept (this is real DBV3's own default).
+        var finalPts = pts;
+        if (opts.threshold < 1) {
+            finalPts = pts.filter(function (p) {
+                var xi = Math.max(0, Math.min(w - 1, p.x | 0)), yi = Math.max(0, Math.min(h - 1, p.y | 0));
+                var brightness = 1 - (weightMap[yi * w + xi] || 0);
+                return brightness <= opts.threshold;
+            });
+        }
+        var finalCells = finalPts.length >= 3 ? boundedVoronoiCells(finalPts, w, h) : null;
+        return { points: finalPts, cells: finalCells };
     }
     // Grid (real, direct port of drawingbot.k.e.c.a.g): regular rows/columns
     // by Cell Width/Height (optionally square-locked), optional hex-stagger
@@ -2061,8 +2152,7 @@ window.sketches['imageTrace'] = function (p) {
             case 'stippling': return encodeStipplingPolylines(points, opts.dotRadius);
             case 'dashes': return encodeDashesPolylines(points, radii, weightMap, w, h, opts.dashAlignEdge, opts.dashMinRotation, opts.dashMaxRotation, opts.dashDistortion);
             case 'diagram': {
-                var cellsForDiagram = cells;
-                if (!cellsForDiagram) { var tri = delaunayTriangulate(points); cellsForDiagram = voronoiCellsFromDelaunay(points, tri, w, h); }
+                var cellsForDiagram = cells || boundedVoronoiCells(points, w, h);
                 return encodeDiagramPolylines(cellsForDiagram);
             }
             case 'tsp': return encodeTSPPolyline(points, opts.tspMaxOptPoints || 350);
@@ -2176,12 +2266,13 @@ window.sketches['imageTrace'] = function (p) {
                             : spiralRaw;
                     } else if (mode === 'lbg') {
                         result[pens[i]] = traceLBGFamily(wMap, workW, workH, {
-                            pointCount: Math.max(10, PARAMS.pointLimit), maxPoints: Math.max(10, PARAMS.pointLimit),
-                            iterations: Math.max(1, PARAMS.voronoiIterations), accuracy: Math.max(0.05, Math.min(1, PARAMS.voronoiAccuracy)),
-                            minDiameter: Math.max(0.5, PARAMS.lbgMinDiameter), maxDiameter: Math.max(PARAMS.lbgMinDiameter, PARAMS.lbgMaxDiameter),
-                            densityBlend: Math.max(0, Math.min(1, PARAMS.lbgDensityBlend)),
+                            pointCount: Math.max(10, PARAMS.lbgPointLimit), maxPoints: Math.max(10, PARAMS.lbgPointLimit),
+                            iterations: Math.max(1, PARAMS.lbgMaxIterations), accuracy: Math.max(0.05, Math.min(1, PARAMS.voronoiAccuracy)),
+                            minDiameter: Math.max(0.5, PARAMS.lbgRadiusMin), maxDiameter: Math.max(PARAMS.lbgRadiusMin, PARAMS.lbgRadiusMax),
+                            densityBlend: Math.max(0, Math.min(1, PARAMS.lbgDensity)),
+                            threshold: Math.max(0, Math.min(1, (Number(PARAMS.lbgThreshold) || 0) / 100)),
                             hysteresis: Math.max(0, PARAMS.lbgHysteresis), hysteresisGrowth: Math.max(0, PARAMS.lbgHysteresisGrowth),
-                            radiusMin: Math.max(0.1, PARAMS.stippleRadiusMin), radiusMax: Math.max(PARAMS.stippleRadiusMin, PARAMS.stippleRadiusMax),
+                            radiusMin: Math.max(0.1, PARAMS.lbgRadiusMin / 2), radiusMax: Math.max(PARAMS.lbgRadiusMin / 2, PARAMS.lbgRadiusMax / 2),
                             encoder: PARAMS.pointEncoder, shapeType: PARAMS.pointShapeType,
                             closeBorder: PARAMS.triangulationCloseBorder === 'on', dotRadius: Math.max(0.1, PARAMS.stipplingDotRadius),
                             dashAlignEdge: PARAMS.dashAlignToEdge === 'on', dashMinRotation: Number(PARAMS.dashMinRotation) || 0,
@@ -2418,10 +2509,12 @@ window.sketches['imageTrace'] = function (p) {
               values: { colorMode: 'nearest', pointLimit: 1500, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, luminancePower: 3, voronoiIterations: 6, voronoiAccuracy: 0.6 } },
             { label: 'Bold Voronoi (v3)', scope: [{ param: 'mode', values: ['stipple'] }],
               values: { pointLimit: 500, stippleRadiusMin: 0.6, stippleRadiusMax: 2.2, luminancePower: 1.5, voronoiIterations: 3, voronoiAccuracy: 0.4 } },
+            { label: 'Default (v3)', scope: [{ param: 'mode', values: ['lbg'] }],
+              values: { colorMode: 'nearest', lbgPointLimit: 500, lbgRadiusMin: 2, lbgRadiusMax: 12, lbgDensity: 50, lbgThreshold: 100, lbgMaxIterations: 25, voronoiAccuracy: 0.5, lbgHysteresis: 0.6, lbgHysteresisGrowth: 0.01 } },
             { label: 'Fine LBG (v3.1)', scope: [{ param: 'mode', values: ['lbg'] }],
-              values: { colorMode: 'nearest', pointLimit: 2000, stippleRadiusMin: 0.25, stippleRadiusMax: 1.0, voronoiIterations: 10, voronoiAccuracy: 0.6, lbgMinDiameter: 1.5, lbgMaxDiameter: 14, lbgDensityBlend: 0.5, lbgHysteresis: 0.2, lbgHysteresisGrowth: 0.04 } },
+              values: { colorMode: 'nearest', lbgPointLimit: 900, lbgRadiusMin: 1, lbgRadiusMax: 8, lbgDensity: 50, lbgThreshold: 100, lbgMaxIterations: 30, voronoiAccuracy: 0.6, lbgHysteresis: 0.4, lbgHysteresisGrowth: 0.02 } },
             { label: 'Bold LBG (v3.1)', scope: [{ param: 'mode', values: ['lbg'] }],
-              values: { pointLimit: 700, stippleRadiusMin: 0.6, stippleRadiusMax: 2.2, voronoiIterations: 8, voronoiAccuracy: 0.4, lbgMinDiameter: 4, lbgMaxDiameter: 30, lbgDensityBlend: 0.5, lbgHysteresis: 0.3, lbgHysteresisGrowth: 0.05 } },
+              values: { lbgPointLimit: 300, lbgRadiusMin: 4, lbgRadiusMax: 24, lbgDensity: 50, lbgThreshold: 100, lbgMaxIterations: 20, voronoiAccuracy: 0.4, lbgHysteresis: 0.6, lbgHysteresisGrowth: 0.02 } },
             // Adaptive's real AIS disk-packing engine didn't survive
             // decompilation (see engine header comment -- Windows filesystem
             // case-collision), so this v3.1 Poisson-disc sampler's Min/Max
@@ -2806,40 +2899,53 @@ window.sketches['imageTrace'] = function (p) {
 
             // -- Voronoi / Stippling (real, drawingbot.k.e.c.a.p) --
             { id: 'pointLimit', label: 'Point Limit', type: 'range', min: 50, max: 4000, step: 50, value: 800, group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
+              visibleWhen: { param: 'mode', values: ['stipple'] },
               tip: 'DBV3 "Point Limit": target/maximum point count.' },
             { id: 'luminancePower', label: 'Density Power', type: 'range', min: 0.5, max: 6, step: 0.5, value: 2, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple'] },
               tip: '(v3) Real DBV3 "Density Power": the exact exponent from the decompiled rejection-sampling formula, (255-lum)^power / 255^(power-1) -- higher = point placement biased harder toward darker areas.' },
-            { id: 'voronoiIterations', label: 'Voronoi / LBG Iterations', type: 'range', min: 0, max: 20, step: 1, value: 4, group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: '(v3) Real DBV3 "Voronoi Iterations": Lloyd-relaxation passes (Voronoi) / split-merge passes (LBG), each rebuilding a real Voronoi diagram.' },
+            { id: 'voronoiIterations', label: 'Voronoi Iterations', type: 'range', min: 0, max: 20, step: 1, value: 4, group: 'general',
+              visibleWhen: { param: 'mode', values: ['stipple'] },
+              tip: '(v3) Real DBV3 "Voronoi Iterations": Lloyd-relaxation passes, each rebuilding a real Voronoi diagram.' },
+            { id: 'stippleRadiusMin', label: 'Point Radius Min', type: 'range', min: 0.1, max: 3, step: 0.1, value: 0.4, group: 'general',
+              visibleWhen: { param: 'mode', values: ['stipple'] },
+              tip: 'DBV3 "Stipple Radius Min": point size in the lightest inked areas.' },
+            { id: 'stippleRadiusMax', label: 'Point Radius Max', type: 'range', min: 0.2, max: 6, step: 0.1, value: 1.4, group: 'general',
+              visibleWhen: { param: 'mode', values: ['stipple'] },
+              tip: 'DBV3 "Stipple Radius Max": point size in the densest inked areas.' },
             { id: 'voronoiAccuracy', label: 'Voronoi Accuracy', type: 'range', min: 0.05, max: 1, step: 0.05, value: 0.5, group: 'general',
               visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: '(v3) Real DBV3 "Voronoi Accuracy": pixel-scan step size for each cell\'s weighted centroid/mass -- higher = finer, slower.' },
-            { id: 'stippleRadiusMin', label: 'Point Radius Min', type: 'range', min: 0.1, max: 3, step: 0.1, value: 0.4, group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Stipple Radius Min": point size in the lightest inked areas (Shapes/Triangulation-adjacent encoders).' },
-            { id: 'stippleRadiusMax', label: 'Point Radius Max', type: 'range', min: 0.2, max: 6, step: 0.1, value: 1.4, group: 'general',
-              visibleWhen: { param: 'mode', values: ['stipple', 'lbg'] },
-              tip: 'DBV3 "Stipple Radius Max": point size in the densest inked areas.' },
+              tip: 'Pixel-scan step size for each cell\'s weighted centroid/mass -- higher = finer, slower. OUR OWN performance knob (real DBV3 has no equivalent setting; its native OpenCV code scans every pixel unconditionally, which this file can\'t afford at interactive speed).' },
 
-            // -- LBG (real, drawingbot.k.e.c.a.k -- Linde-Buzo-Gray 1980) --
-            { id: 'lbgMinDiameter', label: 'Min Cell Diameter', type: 'range', min: 0.5, max: 20, step: 0.5, value: 2, group: 'general',
+            // -- LBG (real, drawingbot.k.e.c.a.k -- Linde-Buzo-Gray 1980).
+            // Field-for-field real names/defaults, confirmed against a real
+            // "LBG Diagram" screenshot of DBV3's own UI: Stipple Radius Min
+            // 2.0, Max 12.0, Density 50.0%, Threshold 100.0%, Max Iterations
+            // 25 -- matched here exactly, down to the default values.
+            { id: 'lbgRadiusMin', label: 'Stipple Radius Min', type: 'range', min: 0.5, max: 20, step: 0.5, value: 2, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Min Cell Diameter": target cell size in the densest areas -- cells smaller than this merge away.' },
-            { id: 'lbgMaxDiameter', label: 'Max Cell Diameter', type: 'range', min: 2, max: 80, step: 1, value: 20, group: 'general',
+              tip: '(v3) Real DBV3 LBG "Stipple Radius Min" -- target cell diameter in the densest areas (cells smaller than this merge away), and also each converged point\'s own render radius there.' },
+            { id: 'lbgRadiusMax', label: 'Stipple Radius Max', type: 'range', min: 1, max: 80, step: 1, value: 12, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Max Cell Diameter": target cell size in flat/light areas -- cells larger than this split in two.' },
-            { id: 'lbgDensityBlend', label: 'Density Blend', type: 'range', min: 0, max: 1, step: 0.05, value: 0.5, group: 'general',
+              tip: '(v3) Real DBV3 LBG "Stipple Radius Max" -- target cell diameter in flat/light areas (cells larger than this split in two).' },
+            { id: 'lbgDensity', label: 'Density', type: 'range', min: 0, max: 100, step: 5, value: 50, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3.1) Real DBV3 LBG "Density Blend": blends an eased vs. linear response between local density and target diameter. The specific easing curve (drawingbot.e.b.a.i) wasn\'t recoverable from the decompile; this substitutes the standard ease-out-quad shape it almost certainly matches.' },
-            { id: 'lbgHysteresis', label: 'Hysteresis', type: 'range', min: 0, max: 2, step: 0.05, value: 0.3, group: 'general',
+              tip: '(v3.1) Real DBV3 LBG "Density" -- blends an eased vs. linear response between local density and target diameter. The specific easing curve (drawingbot.e.b.a.i) wasn\'t recoverable from the decompile; this substitutes the standard ease-out-quad shape it almost certainly matches.' },
+            { id: 'lbgThreshold', label: 'Threshold', type: 'range', min: 0, max: 100, step: 5, value: 100, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Hysteresis": widens the split/merge keep-band so cells near the threshold don\'t oscillate.' },
-            { id: 'lbgHysteresisGrowth', label: 'Hysteresis Growth', type: 'range', min: 0, max: 1, step: 0.01, value: 0.05, group: 'general',
+              tip: '(v3) Real DBV3 LBG "Threshold" -- final luminance cutoff applied to the converged point set only (doesn\'t affect split/merge convergence itself). 100% = disabled, every converged point is kept -- this is real DBV3\'s own default.' },
+            { id: 'lbgMaxIterations', label: 'Max Iterations', type: 'range', min: 1, max: 60, step: 1, value: 25, group: 'general',
               visibleWhen: { param: 'mode', values: ['lbg'] },
-              tip: '(v3) Real DBV3 LBG "Hysteresis Growth": widens Hysteresis further each iteration so the point count converges.' },
+              tip: '(v3) Real DBV3 LBG "Max Iterations", default 25 exactly -- split-merge passes, each rebuilding a real Voronoi diagram. Low iteration counts under-converge and can look chaotic/uneven; 25 is real DBV3\'s own default for a reason.' },
+            { id: 'lbgPointLimit', label: 'Point Limit', type: 'range', min: 20, max: 2000, step: 20, value: 500, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: 'Seed/cap point count. OUR OWN necessary approximation -- real DBV3 seeds LBG one random point at a time via a framework-level scheduling loop with no single "how many points" setting visible in the LBG panel itself.' },
+            { id: 'lbgHysteresis', label: 'Hysteresis', type: 'range', min: 0, max: 2, step: 0.05, value: 0.6, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Hysteresis" (real Java default 0.6) -- widens the split/merge keep-band so cells near the threshold don\'t oscillate.' },
+            { id: 'lbgHysteresisGrowth', label: 'Hysteresis Growth', type: 'range', min: 0, max: 1, step: 0.01, value: 0.01, group: 'general',
+              visibleWhen: { param: 'mode', values: ['lbg'] },
+              tip: '(v3) Real DBV3 LBG "Hysteresis Growth" (real Java default 0.01) -- widens Hysteresis further each iteration so the point count converges.' },
 
             // -- Adaptive (v3.1 -- real AIS disk-packer unrecoverable, see
             // engine header comment: a Windows case-insensitive-filesystem
@@ -2979,7 +3085,7 @@ window.sketches['imageTrace'] = function (p) {
                       'hatchSpacing', 'hatchAngle', 'hatchAmplitude', 'hatchVelocityMin', 'hatchVelocityMax',
                       'pointLimit', 'stippleRadiusMin', 'stippleRadiusMax', 'luminancePower', 'voronoiIterations', 'voronoiAccuracy',
                       'minSampleRadius', 'maxSampleRadius', 'adaptiveMaxPoints', 'adaptiveBrightness', 'adaptiveContrast',
-                      'lbgMinDiameter', 'lbgMaxDiameter', 'lbgDensityBlend', 'lbgHysteresis', 'lbgHysteresisGrowth',
+                      'lbgRadiusMin', 'lbgRadiusMax', 'lbgDensity', 'lbgThreshold', 'lbgMaxIterations', 'lbgPointLimit', 'lbgHysteresis', 'lbgHysteresisGrowth',
                       'gridCellWidth', 'gridCellHeight', 'gridNoise', 'gridRadiusScale',
                       'stipplingDotRadius', 'dashMinRotation', 'dashMaxRotation', 'dashDistortion', 'tspMaxOptPoints',
                       'brightness', 'contrast', 'rotation', 'offsetX', 'offsetY', 'alpha'].indexOf(name) >= 0) {
