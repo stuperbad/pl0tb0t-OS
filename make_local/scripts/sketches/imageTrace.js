@@ -222,7 +222,7 @@ window.sketches['imageTrace'] = function (p) {
         dashMinRotation: 0,
         dashMaxRotation: 180,
         dashDistortion: 0,
-        tspMaxOptPoints: 350,
+        tspMaxOptPoints: 4000,
 
         ignoreWhite: 'off',
 
@@ -1811,21 +1811,91 @@ window.sketches['imageTrace'] = function (p) {
         }
         return tour;
     }
+    // K nearest neighbours per point by plain index (brute-force O(n^2 log n),
+    // but a ONE-TIME cost -- cheap next to running full 2-opt every pass).
+    function buildNeighborLists(points, k) {
+        var n = points.length, lists = new Array(n);
+        for (var i = 0; i < n; i++) {
+            var dists = [];
+            for (var j = 0; j < n; j++) {
+                if (j === i) continue;
+                var dx = points[i].x - points[j].x, dy = points[i].y - points[j].y;
+                dists.push([dx * dx + dy * dy, j]);
+            }
+            dists.sort(function (a, b) { return a[0] - b[0]; });
+            var list = [];
+            for (var m = 0; m < Math.min(k, dists.length); m++) list.push(dists[m][1]);
+            lists[i] = list;
+        }
+        return lists;
+    }
     function twoOptImprove(tour, points, maxPasses) {
         var n = tour.length;
         if (n < 4) return tour;
         function d(a, b) { var dx = points[a].x - points[b].x, dy = points[a].y - points[b].y; return Math.sqrt(dx * dx + dy * dy); }
-        var improved = true, passes = 0;
-        while (improved && passes < maxPasses) {
-            improved = false; passes++;
-            for (var i = 0; i < n - 2; i++) {
-                for (var j = i + 2; j < n - (i === 0 ? 1 : 0); j++) {
-                    var a = tour[i], b = tour[i + 1], c = tour[j], dd = tour[(j + 1) % n];
-                    if (a === c || b === dd) continue;
-                    if (d(a, c) + d(b, dd) < d(a, b) + d(c, dd) - 1e-6) {
-                        var seg = tour.slice(i + 1, j + 1).reverse();
-                        for (var k = 0; k < seg.length; k++) tour[i + 1 + k] = seg[k];
-                        improved = true;
+        if (n <= 150) {
+            // Small tours: exhaustive all-pairs 2-opt, cheap enough at this size.
+            var improved = true, passes = 0;
+            while (improved && passes < maxPasses) {
+                improved = false; passes++;
+                for (var i = 0; i < n - 2; i++) {
+                    for (var j = i + 2; j < n - (i === 0 ? 1 : 0); j++) {
+                        var a = tour[i], b = tour[i + 1], c = tour[j], dd = tour[(j + 1) % n];
+                        if (a === c || b === dd) continue;
+                        if (d(a, c) + d(b, dd) < d(a, b) + d(c, dd) - 1e-6) {
+                            var seg = tour.slice(i + 1, j + 1).reverse();
+                            for (var k2 = 0; k2 < seg.length; k2++) tour[i + 1 + k2] = seg[k2];
+                            improved = true;
+                        }
+                    }
+                }
+            }
+            return tour;
+        }
+        // Larger tours: neighbour-list 2-opt (Johnson & McGeoch's standard
+        // technique for spatial TSP) -- exhaustive all-pairs 2-opt is O(n^2)
+        // PER PASS, which is exactly the unbounded-compute pattern this file
+        // avoids everywhere else. Each edge only tries reconnecting to its
+        // geometrically nearest candidates instead of every other edge,
+        // which is near-linear per pass. The `dac >= dab: break` early-exit
+        // is the standard pruning rule for this technique (neighbours are
+        // distance-sorted, so once a candidate is no closer than the edge's
+        // current partner, no farther candidate can possibly improve via
+        // this term) -- it can occasionally miss an improving move that a
+        // full search would find, a well-documented, accepted tradeoff for
+        // going from O(n^2) to ~O(n*k) per pass. Still a genuinely correct
+        // local search, not an approximation of the search itself.
+        var K = Math.min(20, n - 1);
+        var neighbors = buildNeighborLists(points, K);
+        var pos = new Int32Array(n);
+        for (var p = 0; p < n; p++) pos[tour[p]] = p;
+        function reverseSegment(lo, hi) {
+            while (lo < hi) {
+                var tl = tour[lo], th = tour[hi];
+                tour[lo] = th; tour[hi] = tl;
+                pos[th] = lo; pos[tl] = hi;
+                lo++; hi--;
+            }
+        }
+        var improvedN = true, passesN = 0;
+        while (improvedN && passesN < maxPasses) {
+            improvedN = false; passesN++;
+            for (var ii = 0; ii < n; ii++) {
+                var a2 = tour[ii], b2 = tour[(ii + 1) % n];
+                var dab = d(a2, b2);
+                var cand = neighbors[a2];
+                for (var ci = 0; ci < cand.length; ci++) {
+                    var c2 = cand[ci];
+                    var dac = d(a2, c2);
+                    if (dac >= dab) break; // sorted by distance -- no closer candidate can win past here
+                    var jj = pos[c2];
+                    var dd3 = tour[(jj + 1) % n];
+                    if (c2 === b2 || dd3 === a2) continue;
+                    if (dac + d(b2, dd3) < dab + d(c2, dd3) - 1e-6) {
+                        var lo2 = Math.min(ii, jj), hi2 = Math.max(ii, jj);
+                        reverseSegment(lo2 + 1, hi2);
+                        improvedN = true;
+                        b2 = tour[(ii + 1) % n]; dab = d(a2, b2);
                     }
                 }
             }
@@ -2133,7 +2203,7 @@ window.sketches['imageTrace'] = function (p) {
     function encodeTSPPolyline(points, maxOptPoints) {
         if (points.length < 2) return [];
         var tour = nearestNeighborTour(points);
-        if (points.length <= maxOptPoints) tour = twoOptImprove(tour, points, 6);
+        if (points.length <= maxOptPoints) tour = twoOptImprove(tour, points, 12);
         return [tour.map(function (i) { return { x: points[i].x, y: points[i].y }; })];
     }
     function renderPointFamily(sampled, weightMap, w, h, opts) {
@@ -2893,9 +2963,9 @@ window.sketches['imageTrace'] = function (p) {
             { id: 'dashDistortion', label: 'Dash Distortion (%)', type: 'range', min: 0, max: 100, step: 5, value: 0, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['dashes'] }],
               tip: 'DBV3 real Dashes encoder\'s optional bezier bow-distortion, applied as a Catmull-Rom bulge instead of the real cubic-bezier control points -- same idea, not a byte-identical curve.' },
-            { id: 'tspMaxOptPoints', label: 'TSP 2-opt Point Cap', type: 'range', min: 20, max: 800, step: 10, value: 350, group: 'general',
+            { id: 'tspMaxOptPoints', label: 'TSP 2-opt Point Cap', type: 'range', min: 20, max: 4000, step: 10, value: 4000, group: 'general',
               visibleWhen: [{ param: 'mode', values: ['stipple', 'adaptive', 'lbg', 'grid'] }, { param: 'pointEncoder', values: ['tsp'] }],
-              tip: '(v3.1) Above this many points, 2-opt local search is skipped and only the nearest-neighbour tour is used, to keep the Pi responsive -- our own safety cap, not a real DBV3 setting.' },
+              tip: '(v3.1) Above this many points, 2-opt crossing-removal is skipped entirely and only the raw greedy nearest-neighbour tour is used, which reliably produces long crossing lines -- so this defaults to the point-count ceiling (2-opt now uses an efficient neighbour-list search, not full O(n^2), so it stays fast even at high counts). Lower this only if a specific image is running slow. Our own safety cap, not a real DBV3 setting.' },
 
             // -- Voronoi / Stippling (real, drawingbot.k.e.c.a.p) --
             { id: 'pointLimit', label: 'Point Limit', type: 'range', min: 50, max: 4000, step: 50, value: 800, group: 'general',
