@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.222"
+__version__ = "0.5.223"
 import os
 import sys
 import time
@@ -95,6 +95,12 @@ class Tool:
     z: float
     safe_z: float
     pen_type: str = ""
+    # Per-HOLDER drawing trim, distinct from the per-pen-type offsets. Pen-type
+    # trim cannot correct a holder that is not square: load four identical pens
+    # and they share one pen-type offset, yet still land in different places.
+    # That residual is a property of the holder, so it is stored on the holder.
+    trim_x: float = 0.0
+    trim_y: float = 0.0
 
 
 @dataclass
@@ -116,6 +122,10 @@ class OSConfig:
     zero_pen_type: str = "stabilo"
     pen_types: list = field(default_factory=list)
     pen_tip_widths: dict = field(default_factory=dict)
+    # Which way the machine physically moves for increasing X. The jog buttons
+    # assume +X is to the right; a mirrored machine needs this off, or every
+    # left/right hint in the UI is backwards.
+    x_plus_is_right: bool = True
     vpype_profile: str = "pl0tb0t_0x0"
     # Signature / attribution band
     sig_enabled: bool = False
@@ -168,6 +178,7 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         zero_pen_type=str(data.get("zero_pen_type", "stabilo")),
         pen_types=list(data.get("pen_types", []) or []),
         pen_tip_widths=data.get("pen_tip_widths", {}),
+        x_plus_is_right=bool(data.get("x_plus_is_right", True)),
         vpype_profile=data.get("vpype_profile", "pl0tb0t_0x0"),
         sig_enabled=bool(data.get("sig_enabled", False)),
         sig_show_preview=bool(data.get("sig_show_preview", True)),
@@ -356,6 +367,8 @@ def load_tools(path: str = CONFIG_PATH) -> List[Tool]:
             z=float(item.get("z", 0)),
             safe_z=float(item.get("safe_z", 0)),
             pen_type=("" if item.get("pen_type", "") == "custom" else item.get("pen_type", "")),
+            trim_x=float(item.get("trim_x", 0) or 0),
+            trim_y=float(item.get("trim_y", 0) or 0),
         )
         for item in data.get("tools", [])
     ]
@@ -2091,6 +2104,40 @@ if has_display:
             b = self._pen_offset(getattr(self.config, 'zero_pen_type', 'stabilo'))
             return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
+        def _plot_xy_offset(self, ptype, tool=None):
+            """Pen-type XY offset plus this holder's own trim."""
+            dx, dy = self._pen_xy_delta(ptype)
+            if tool is not None:
+                dx += float(getattr(tool, 'trim_x', 0.0) or 0.0)
+                dy += float(getattr(tool, 'trim_y', 0.0) or 0.0)
+            return (dx, dy)
+
+        _ORDINALS = ("2nd", "3rd", "4th", "5th", "6th", "7th", "8th")
+
+        def _holder_side_label(self, tool):
+            """Where a holder sits along X, so the confirm dialog can say which
+            physical slot to load rather than only a name you have to remember."""
+            if tool is None or not self.tools:
+                return ""
+            ordered = sorted(self.tools, key=lambda t: t.x)
+            if not getattr(self.config, 'x_plus_is_right', True):
+                ordered.reverse()
+            idx = None
+            for k, t in enumerate(ordered):
+                if t is tool:
+                    idx = k
+                    break
+            if idx is None:
+                return ""
+            n = len(ordered)
+            if n == 1:
+                return "only holder"
+            if idx == 0:
+                return "leftmost"
+            if idx == n - 1:
+                return "rightmost"
+            return "%s from left" % self._ORDINALS[min(idx - 1, len(self._ORDINALS) - 1)]
+
         def _pen_diameter(self, ptype):
             try: return float((self.config.pen_diameters or {}).get(ptype, 0) or 0)
             except (TypeError, ValueError): return 0.0
@@ -2325,13 +2372,25 @@ if has_display:
             # from, and there was then no way to say which pen is in the holder.
             # This is that escape hatch: leave it on Auto to keep the old
             # behaviour, or pin a type to override it.
-            eg.addWidget(QLabel("Pen type:"), 3, 0)
+            eg.addWidget(QLabel("X trim:"), 3, 0)
+            self.tool_trim_x_edit = QLineEdit("0.0")
+            self.tool_trim_x_edit.setToolTip(
+                "Per-holder drawing offset, added on top of the pen-type offsets.\n"
+                "Use it when identical pens in different holders still land apart --\n"
+                "that residual is the holder, not the pen.")
+            eg.addWidget(self.tool_trim_x_edit, 3, 1)
+            eg.addWidget(QLabel("Y trim:"), 3, 2)
+            self.tool_trim_y_edit = QLineEdit("0.0")
+            self.tool_trim_y_edit.setToolTip(self.tool_trim_x_edit.toolTip())
+            eg.addWidget(self.tool_trim_y_edit, 3, 3)
+
+            eg.addWidget(QLabel("Pen type:"), 4, 0)
             self.tool_pen_type_combo = QComboBox()
             self.tool_pen_type_combo.setToolTip(
                 "Auto: use the Make tab palette's pen for this holder's colour.\n"
                 "Pinning a type overrides that -- needed when plotting an SVG\n"
                 "straight from the machine tab.")
-            eg.addWidget(self.tool_pen_type_combo, 3, 1, 1, 3)
+            eg.addWidget(self.tool_pen_type_combo, 4, 1, 1, 3)
             self._reload_tool_pen_types()
             eg.setColumnStretch(1, 1)
             eg.setColumnStretch(3, 1)
@@ -3384,6 +3443,8 @@ if has_display:
             self.tool_y_edit.setText(str(t.y))
             self.tool_z_edit.setText(str(t.z))
             self.tool_safe_z_edit.setText(str(t.safe_z))
+            self.tool_trim_x_edit.setText(str(getattr(t, 'trim_x', 0.0)))
+            self.tool_trim_y_edit.setText(str(getattr(t, 'trim_y', 0.0)))
             self._reload_tool_pen_types(getattr(t, 'pen_type', '') or '')
 
         AUTO_PEN_LABEL = "\u2014 Auto (from Make palette) \u2014"
@@ -3427,6 +3488,8 @@ if has_display:
                 z=float(self.tool_z_edit.text()),
                 safe_z=float(self.tool_safe_z_edit.text()),
                 pen_type=self._current_tool_pen_type(),
+                trim_x=float(self.tool_trim_x_edit.text() or 0),
+                trim_y=float(self.tool_trim_y_edit.text() or 0),
             )
 
         def _save_tool_from_position(self):
@@ -3910,7 +3973,11 @@ if has_display:
             dlg.setWindowTitle("Confirm Pen Assignments")
             layout = QVBoxLayout(dlg)
 
-            msg = "SVG colors will be plotted in this order.\nMake sure each slot has the correct pen loaded."
+            _side_hint = ("left \u2192 right" if getattr(self.config, 'x_plus_is_right', True)
+                          else "right \u2192 left")
+            msg = ("SVG colors will be plotted in this order.\n"
+                   "Make sure each slot has the correct pen loaded.\n"
+                   "Holder positions are given as you face the machine (X+ runs %s)." % _side_hint)
             if paper_size_mm:
                 msg += f"\n\nPaper: {paper_size_mm[0]:.1f} × {paper_size_mm[1]:.1f} mm"
             if colors_exceed_slots:
@@ -3952,7 +4019,11 @@ if has_display:
                 fill = color if (color.startswith("#") and len(color) in (4, 7)) else "#888888"
                 swatch.setStyleSheet(f"background:{fill}; border:1px solid #555;")
                 rl.addWidget(swatch)
-                rl.addWidget(QLabel(f"{color}   →   Slot {entry['slot']}: {slot_label}{extra}   ·   {pen_note}   ·   Z {contact:+.2f} mm"))
+                _side = self._holder_side_label(tool)
+                _where = f"   \u00b7   {_side} (X {tool.x:+.1f})" if _side else ""
+                rl.addWidget(QLabel(
+                    f"{color}   \u2192   Slot {entry['slot']}: {slot_label}{extra}{_where}"
+                    f"   \u00b7   {pen_note}   \u00b7   Z {contact:+.2f} mm"))
                 rl.addStretch()
                 layout.addWidget(row)
             btns = QDialogButtonBox(
@@ -4448,7 +4519,7 @@ if has_display:
                         self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
                         if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                    tmp_gcode, silent=True, _err_out=err_out,
-                                                   xy_offset=self._pen_xy_delta(_ept)):
+                                                   xy_offset=self._plot_xy_offset(_ept, tool)):
                             msg = err_out[0] if err_out else "vpype failed"
                             result[0] = ("err", f"vpype failed for layer {label}: {msg}")
                             return
@@ -5606,7 +5677,7 @@ if has_display:
                             self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
                             if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                        l_gcode, silent=True, _err_out=err_out,
-                                                       xy_offset=self._pen_xy_delta(_ept)):
+                                                       xy_offset=self._plot_xy_offset(_ept, tool)):
                                 msg = err_out[0] if err_out else "vpype failed"
                                 result[0] = ("err", f"vpype failed for {label}: {msg}")
                                 return
@@ -5725,7 +5796,8 @@ if has_display:
                         simplify_tol = float(self.vpype_simplify_tol_edit.text())
                     except (ValueError, AttributeError):
                         simplify_tol = 0.1
-                    _xy = self._pen_xy_delta(getattr(self.tools[0], 'pen_type', 'custom')) if self.tools else (0.0, 0.0)
+                    _xy = (self._plot_xy_offset(getattr(self.tools[0], 'pen_type', 'custom'), self.tools[0])
+                           if self.tools else (0.0, 0.0))
                     _err_out = []
                     if not self._run_vpype_cmd(str(svg_path), str(layer_cfg), "pl0tb0t_layer", str(gcode_path),
                                                silent=True, _err_out=_err_out, xy_offset=_xy):

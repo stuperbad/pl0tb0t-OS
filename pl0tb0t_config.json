@@ -89,7 +89,7 @@
     {
       "color": "magenta",
       "name": "Test Pen 2",
-      "pen_type": "micron",
+      "pen_type": "stabilo",
       "safe_z": -5.0,
       "x": -163.756,
       "y": -582.488,
@@ -98,7 +98,7 @@
     {
       "color": "yellow",
       "name": "Test Pen 3",
-      "pen_type": "pilot",
+      "pen_type": "stabilo",
       "safe_z": -5.0,
       "x": -123.905,
       "y": -582.463,
@@ -107,7 +107,7 @@
     {
       "color": "black",
       "name": "Test Pen 4",
-      "pen_type": "posca",
+      "pen_type": "stabilo",
       "safe_z": -5.0,
       "x": -84.751,
       "y": -582.463,
