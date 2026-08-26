@@ -284,6 +284,15 @@ def init_db():
             ("cloud_id",    "TEXT DEFAULT NULL"),
             ("recipe",      "TEXT DEFAULT NULL"),
             ("plot_count",  "INTEGER DEFAULT 0"),
+            # Timing instrumentation. The estimator is analytical only and no
+            # actual duration was ever recorded, so the 88 finished jobs on this
+            # machine are not a dataset -- there is nothing to fit against. These
+            # columns start accumulating one.
+            ("started_at",   "REAL DEFAULT NULL"),
+            ("finished_at",  "REAL DEFAULT NULL"),
+            ("est_s",        "REAL DEFAULT NULL"),   # estimate at dispatch, for residuals
+            ("paused_s",     "REAL DEFAULT 0"),      # human time to subtract (pen changes)
+            ("progress",     "REAL DEFAULT NULL"),   # fraction completed if it stopped early
         ]:
             try:
                 db.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
@@ -431,12 +440,66 @@ def update_status(job_id):
     inc = data.get("increment_plot_count", False)
     if not new_status and not inc:
         return jsonify({"error": "status or increment_plot_count required"}), 400
+    now = time.time()
     with get_db() as db:
         if new_status:
             db.execute("UPDATE jobs SET status=? WHERE id=?", (new_status, job_id))
+            # Stamp timing from the status transition itself, so no client has to
+            # remember to report it and older callers keep working unchanged.
+            if new_status == "plotting":
+                db.execute("UPDATE jobs SET started_at=?, finished_at=NULL, "
+                           "paused_s=0, progress=NULL WHERE id=?", (now, job_id))
+            elif new_status in ("done", "error", "cancelled"):
+                # Only close a run that actually opened, so a stale row flipped by
+                # hand cannot invent a duration.
+                db.execute("UPDATE jobs SET finished_at=? "
+                           "WHERE id=? AND started_at IS NOT NULL AND finished_at IS NULL",
+                           (now, job_id))
+        # Optional richer detail when the caller knows it. An aborted plot is
+        # still a usable sample: with `progress` we can compare elapsed against
+        # the estimate for the portion that actually ran, rather than discarding
+        # the run. `paused_s` matters because a multi-pen plot waits on a human
+        # at every pen change -- without subtracting it the model would be
+        # fitting how fast you walk to the machine.
+        for field in ("est_s", "paused_s", "progress"):
+            if field in data:
+                try:
+                    db.execute(f"UPDATE jobs SET {field}=? WHERE id=?",
+                               (float(data[field]), job_id))
+                except (TypeError, ValueError):
+                    pass
         if inc:
             db.execute("UPDATE jobs SET plot_count = plot_count + 1 WHERE id=?", (job_id,))
     return jsonify({"job_id": job_id, "status": new_status})
+
+
+@app.route("/timings", methods=["GET"])
+def timings():
+    """Completed runs with a usable duration -- the estimator's training set.
+
+    Returns raw samples rather than a fitted model: the fit belongs wherever the
+    estimate is made, and keeping this endpoint dumb means the model can change
+    without touching the queue.
+    """
+    check_auth()
+    rows = []
+    with get_db() as db:
+        for r in db.execute(
+            "SELECT id, sketch_name, paper_size, status, est_s, progress, "
+            "       started_at, finished_at, paused_s "
+            "FROM jobs WHERE started_at IS NOT NULL AND finished_at IS NOT NULL "
+            "ORDER BY finished_at DESC"):
+            elapsed = (r["finished_at"] or 0) - (r["started_at"] or 0)
+            actual = elapsed - (r["paused_s"] or 0)
+            if actual <= 0:
+                continue
+            rows.append({
+                "id": r["id"], "sketch": r["sketch_name"],
+                "paper": r["paper_size"], "status": r["status"],
+                "est_s": r["est_s"], "actual_s": round(actual, 1),
+                "progress": r["progress"],
+            })
+    return jsonify({"count": len(rows), "samples": rows})
 
 
 @app.route("/jobs/<job_id>", methods=["DELETE"])
