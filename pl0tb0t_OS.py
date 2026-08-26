@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.219"
+__version__ = "0.5.220"
 import os
 import sys
 import time
@@ -58,8 +58,9 @@ if has_display:
         QFileDialog, QMessageBox, QMenu, QFrame, QAbstractScrollArea,
         QDialog, QDialogButtonBox, QStackedWidget, QProgressDialog,
         QRadioButton, QButtonGroup, QColorDialog, QSpinBox,
+        QPlainTextEdit,
     )
-    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher
+    from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QEvent, QByteArray, QRectF, QUrl, QFileSystemWatcher, QProcess
     from PyQt6.QtGui import QPainter, QPen, QColor, QFont
     from PyQt6.QtSvg import QSvgRenderer
     try:
@@ -1349,7 +1350,7 @@ if has_display:
                 ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
                 ("Machine Settings",   self._scrolled(self._build_settings_panel()),   True, 1),
-                ("Show Mode Palette",  self._scrolled(self._build_show_palette_panel()), False, 1),
+                ("Web Sync",           self._scrolled(self._build_web_sync_panel()),      False, 1),
             ])
             middle_col = self._panel_column([
                 ("Pen Type Offsets",   self._scrolled(self._build_pen_offsets_panel()), False, 0),
@@ -1818,6 +1819,74 @@ if has_display:
                 self._make_webview.page().runJavaScript(js)
             except Exception:
                 pass
+
+        def _build_web_sync_panel(self):
+            """Publish this Pi's Make app to the website in one click.
+
+            The site is a plain git checkout at ~/90percentart-site; the sync
+            tool rebuilds its make-app bundle from this machine's make_local
+            plus the curation currently live in the app's localStorage, then
+            commits and pushes. GitHub Pages serves it, so there is no
+            separate deploy step.
+            """
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(6)
+            info = QLabel(
+                "Publish this Pi's Make app to 90percent.art/make \u2014 sketches, "
+                "panel curation and pen palette exactly as set up here. Rebuilds "
+                "the site bundle, then commits and pushes the website repo.")
+            info.setWordWrap(True)
+            info.setStyleSheet("color:#666; font-size:11px;")
+            layout.addWidget(info)
+
+            self._web_sync_btn = QPushButton("\u2191 Sync to website")
+            self._web_sync_btn.clicked.connect(self._run_web_sync)
+            layout.addWidget(self._web_sync_btn)
+
+            self._web_sync_log = QPlainTextEdit()
+            self._web_sync_log.setReadOnly(True)
+            self._web_sync_log.setMaximumHeight(150)
+            self._web_sync_log.setStyleSheet("font-family: monospace; font-size:11px;")
+            self._web_sync_log.setPlaceholderText("Sync output appears here.")
+            layout.addWidget(self._web_sync_log)
+            layout.addStretch()
+            self._web_sync_proc = None
+            return w
+
+        def _run_web_sync(self):
+            # Run detached via QProcess rather than subprocess: a push can take
+            # several seconds and blocking the event loop would freeze the UI.
+            if getattr(self, "_web_sync_proc", None) is not None:
+                return
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "tools", "web_sync.sh")
+            if not os.path.exists(script):
+                self._web_sync_log.setPlainText("Missing %s" % script)
+                return
+            self._web_sync_log.setPlainText("Publishing\u2026\n")
+            self._web_sync_btn.setEnabled(False)
+            self._web_sync_btn.setText("Syncing\u2026")
+            proc = QProcess(self)
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+            def _drain():
+                txt = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+                if txt.strip():
+                    self._web_sync_log.appendPlainText(txt.rstrip())
+
+            proc.readyReadStandardOutput.connect(_drain)
+            proc.finished.connect(lambda code, _st: self._web_sync_done(code))
+            self._web_sync_proc = proc
+            proc.start("bash", [script])
+
+        def _web_sync_done(self, code):
+            self._web_sync_proc = None
+            self._web_sync_btn.setEnabled(True)
+            self._web_sync_btn.setText("\u2191 Sync to website")
+            if code != 0:
+                self._web_sync_log.appendPlainText("\nFailed (exit %s)." % code)
 
         def _build_show_palette_panel(self):
             w = QWidget()
