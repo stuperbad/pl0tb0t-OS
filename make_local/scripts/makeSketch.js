@@ -1,4 +1,16 @@
  (function(){
+    // ---- MODE: exactly two, Advanced and Show -------------------------
+    // Advanced ('full') = the whole authoring surface: pen registry editor,
+    //   every param group, home-only presets, scatter fills, delay render.
+    // Show ('fast')     = minimal gallery front end.
+    // The old third mode ('web') is normalised to Show here. The online
+    // studio now serves Show and UNLOCKS Advanced with a passcode instead
+    // of being its own half-and-half mode -- that hybrid is what made the
+    // studio hide pens while still showing the paper column.
+    window.pl0tNormalizeMode = function (m) { return (m === 'full') ? 'full' : 'fast'; };
+    if (window._pl0tMode === 'web') window._pl0tMode = 'fast';
+    window.pl0tIsAdvanced = function () { return (window._pl0tMode || 'fast') === 'full'; };
+    window.pl0tModeLabel = function () { return window.pl0tIsAdvanced() ? 'ADVANCED' : 'SHOW'; };
     var container = document.getElementById('make-sketch');
     var selector = document.getElementById('sketchSelector');
     var currentP5 = null;
@@ -12,14 +24,68 @@
     // not as a buildParamUI()-local var, which those persistent listeners
     // would see a stale copy of after the first sketch switch.
     var draggedRow = null;
+    var draggedGroup = null;
+
+    // ---- Drag insertion caret -------------------------------------------
+    // Previously a drag only lit up the destination panel, and the exact
+    // landing position was computed at DROP time -- so you could see WHICH
+    // panel you were dropping into but never WHERE within it, and the result
+    // was a surprise. This is the now-standard insertion line: a caret is
+    // placed in the real DOM flow between the two rows (or panels) you're
+    // hovering between, so the gap opens up where the thing will actually go.
+    // The drop then inserts AT THE CARET rather than recomputing, which
+    // guarantees the result matches the preview exactly.
+    var _dropCaret = null;
+    function dropCaret() {
+        if (!_dropCaret) {
+            _dropCaret = document.createElement('div');
+            _dropCaret.className = 'pl0t-drop-caret';
+        }
+        return _dropCaret;
+    }
+    function clearDropCaret() {
+        if (_dropCaret && _dropCaret.parentNode) _dropCaret.parentNode.removeChild(_dropCaret);
+    }
+    // Nearest child boundary to clientY, skipping the dragged element and the
+    // caret itself (or it would measure its own position and jitter).
+    function caretBefore(container, clientY, skipEl, matchFn) {
+        var kids = Array.prototype.filter.call(container.children, function (el) {
+            return el !== skipEl && el !== _dropCaret && matchFn(el);
+        });
+        for (var i = 0; i < kids.length; i++) {
+            var r = kids[i].getBoundingClientRect();
+            if (clientY < r.top + r.height / 2) return kids[i];
+        }
+        return null;
+    }
+    function showDropCaret(container, clientY, skipEl, matchFn) {
+        var before = caretBefore(container, clientY, skipEl, matchFn);
+        var c = dropCaret();
+        if (before) { if (c.nextSibling !== before || c.parentNode !== container) container.insertBefore(c, before); }
+        else if (c.parentNode !== container || c.nextSibling) container.appendChild(c);
+    }
+    function isRowEl(el) { return el.nodeType === 1 && el.hasAttribute('data-param-id'); }
+    function isGroupEl(el) { return el.nodeType === 1 && el.tagName === 'DETAILS' && el.classList.contains('param-group'); }
+    // Defensive: a drag cancelled with Esc or dropped on nothing never fires a
+    // drop handler, which would strand the caret in the layout.
+    document.addEventListener('dragend', function () { clearDropCaret(); }, true);
     // Per-launch random fallback for the signature/print name, used when the
     // active sketch doesn't supply its own getSignatureSeed(). Re-rolled on Reseed.
     if (typeof window._pl0tSigSeed === 'undefined' || !window._pl0tSigSeed) {
         window._pl0tSigSeed = Math.floor(Math.random() * 1e9) + 1;
     }
 
+    // The user's own tick is the final word. This used to OR the two together
+    // (`pdef.showModeHidden || stored`), so a control marked showModeHidden in
+    // sketch code could NEVER be turned back on -- every Textures param is
+    // flagged that way, which is why ticking the Textures panel produced a
+    // panel whose rows were all still hidden, and which therefore got removed
+    // again by the empty-panel pass.
     function isShowHidden(pdef) {
-        return !!(pdef.showModeHidden || (window.ParamLayout && window.ParamLayout.getShowHidden(pdef.id)));
+        if (window.ParamLayout && window.ParamLayout.hasShowHidden(pdef.id)) {
+            return !!window.ParamLayout.getShowHidden(pdef.id);
+        }
+        return !!pdef.showModeHidden;
     }
     function isSuppressed(pdef) {
         return !!(window.ParamLayout && window.ParamLayout.getSuppressed(pdef.id));
@@ -46,7 +112,7 @@
     // art in progress. _showModeStash holds the pre-substitution values.
     var _showModeStash = null;
     function applyShowModeLockedDefaults() {
-        if ((window._pl0tMode || 'fast') === 'full') return;
+        if (window.pl0tIsAdvanced()) return;
         if (!window.ParamLayout || _showModeStash) return;   // already applied this Show-mode session
         var stash = {};
         (_lastBuiltParams || []).forEach(function(pdef) {
@@ -432,11 +498,35 @@
         };
 
         // Snapshot: capture & restore full param state (used by print queue "load into editor")
+        function _liveParamValue(pdef) {
+            var el = document.getElementById(pdef.id);
+            if (!el) return pdef.value;
+            var v;
+            if (el.type === 'checkbox') v = el.checked;
+            else if (el.type === 'range' || el.type === 'number') v = Number(el.value);
+            else v = el.value;
+            // colorPalette / multiSelect keep a JSON array in a hidden input
+            if (typeof v === 'string' && (v.charAt(0) === '[' || v.charAt(0) === '{')) {
+                try { v = JSON.parse(v); } catch (e) {}
+            }
+            return v;
+        }
         window.sketchAPI.getParamsSnapshot = function() {
-            if (!registeredApi || !Array.isArray(registeredApi.params)) return [];
-            return registeredApi.params
-                .filter(function(p) { return p.type !== 'action'; })
-                .map(function(p) { return { id: p.id, value: p.value }; });
+            // _lastBuiltParams = declared params PLUS buildParamUI's injections
+            // (paper, advanced, textures/fills...). Using registeredApi.params
+            // here silently dropped every injected control from the recipe.
+            var list = (_lastBuiltParams && _lastBuiltParams.length)
+                ? _lastBuiltParams
+                : ((registeredApi && Array.isArray(registeredApi.params)) ? registeredApi.params : []);
+            var seen = {};
+            return list
+                .filter(function(p) {
+                    if (!p || !p.id || p.type === 'action') return false;
+                    if (seen[p.id]) return false;      // injected lists can overlap
+                    seen[p.id] = 1;
+                    return true;
+                })
+                .map(function(p) { return { id: p.id, value: _liveParamValue(p) }; });
         };
         window.sketchAPI.applyParamsSnapshot = function(snapshot) {
             if (!snapshot || !Array.isArray(snapshot)) return;
@@ -607,6 +697,7 @@
                     wedges:   { title: 'Wedges',   open: true  },
                     textures: { title: 'Textures', open: true  },
                     closedshapes: { title: 'Texture Closed Shapes', open: true },
+                    element:  { title: 'Element settings', open: true },
                     color:    { title: 'Color',    open: true  },
                     advanced: { title: 'Advanced', open: false }
                 };
@@ -627,7 +718,7 @@
                 // (window._pl0tPens, pushed by the OS). The sketch keeps its own
                 // options in Show mode / when no registry is set.
                 var _regApplied = false;
-                if (params && (window._pl0tMode || 'fast') === 'full' &&
+                if (params && window.pl0tIsAdvanced() &&
                     window.plotPens && window.plotPens.pens().length) {
                     params.forEach(function(pdef) {
                         if (pdef.type !== 'colorPalette') return;
@@ -657,7 +748,7 @@
                 // Show mode: the Machine-tab "Show Mode Palette" defines the
                 // available colours for every Show-mode colour picker. (Home
                 // mode uses the live pen registry above instead.)
-                if (params && (window._pl0tMode || 'fast') !== 'full' &&
+                if (params && !window.pl0tIsAdvanced() &&
                     Array.isArray(window._pl0tShowPalette) && window._pl0tShowPalette.length) {
                     params.forEach(function(pdef) {
                         if (pdef.type !== 'colorPalette') return;
@@ -778,6 +869,46 @@
                 _lastBuiltParams = params;
                 if (!paramsContainer) return;
 
+                // A hidden panel reuses the SAME [data-show-mode-hidden] attribute the
+                // per-row hiding uses, so setRenderMode()'s existing blanket toggle
+                // picks it up on every mode switch with no extra wiring.
+                function applyGroupShowHidden(name, hidden, el) {
+                    el = el || document.getElementById('param-group-' + name);
+                    if (!el) return;
+                    if (hidden) {
+                        el.dataset.showModeHidden = '1';
+                        if (!window.pl0tIsAdvanced()) el.style.display = 'none';
+                    } else {
+                        delete el.dataset.showModeHidden;
+                        el.style.display = '';
+                    }
+                }
+                function saveGroupOrder() {
+                    if (!window.ParamLayout) return;
+                    var ids = [];
+                    [paramsContainer, globalParamsContainer].forEach(function (cont) {
+                        if (!cont) return;
+                        // direct children only -- no :scope, which isn't worth
+                        // betting on in an older embedded Chromium
+                        Array.prototype.forEach.call(cont.children, function (d) {
+                            if (d.tagName === 'DETAILS' && d.classList.contains('param-group')) {
+                                ids.push(d.id.replace('param-group-', ''));
+                            }
+                        });
+                    });
+                    window.ParamLayout.setGroupOrder(ids);
+                }
+                // Re-append in the saved order. Groups absent from the saved list keep
+                // their natural position ahead of the ordered ones.
+                function applyGroupOrder() {
+                    if (!window.ParamLayout) return;
+                    var ord = window.ParamLayout.getGroupOrder();
+                    if (!ord.length) return;
+                    ord.forEach(function (g) {
+                        var el = document.getElementById('param-group-' + g);
+                        if (el && el.parentNode) el.parentNode.appendChild(el);
+                    });
+                }
                 function ensureGroup(name) {
                     var isGlobal = !!GLOBAL_GROUPS[name];
                     var existing = document.getElementById('param-group-' + name);
@@ -805,6 +936,76 @@
                     var summary = document.createElement('summary');
                     summary.textContent = (groupMeta[name] && groupMeta[name].title) ? groupMeta[name].title : name;
 
+                    // Panel-level authoring controls, mirroring the per-row ones:
+                    // hide a WHOLE panel from Show mode, and drag panels to reorder
+                    // them. Both are CSS-gated on body.pl0t-edit-mode so toggling
+                    // edit mode needs no rebuild. Every click here stops propagation
+                    // -- without that, clicking a control inside <summary> would also
+                    // open/close the <details>.
+                    var gCtrls = document.createElement('span');
+                    gCtrls.className = 'group-edit-controls';
+
+                    // Ticked = VISIBLE in Show mode. Stored inverted (as "hidden") so
+                    // an absent entry means visible -- that way every existing panel and
+                    // every panel added later defaults to ticked with no migration.
+                    var gHide = document.createElement('input');
+                    gHide.type = 'checkbox';
+                    gHide.title = 'Show this panel in Show mode';
+                    gHide.checked = !(window.ParamLayout && window.ParamLayout.getGroupHidden(name));
+                    gHide.addEventListener('click', function (e) { e.stopPropagation(); });
+                    gHide.addEventListener('change', function (e) {
+                        e.stopPropagation();
+                        if (window.ParamLayout) window.ParamLayout.setGroupHidden(name, !gHide.checked);
+                        applyGroupShowHidden(name, !gHide.checked, details);
+                    });
+                    gCtrls.appendChild(gHide);
+
+                    var gHandle = document.createElement('span');
+                    gHandle.className = 'group-drag-handle';
+                    gHandle.textContent = '\u2630';
+                    gHandle.title = 'Drag to reorder this panel';
+                    gHandle.draggable = true;
+                    gHandle.addEventListener('click', function (e) { e.stopPropagation(); e.preventDefault(); });
+                    gHandle.addEventListener('dragstart', function (e) {
+                        if (!window.ParamLayout || !window.ParamLayout.isEditMode()) { e.preventDefault(); return; }
+                        draggedGroup = details;
+                        details.classList.add('drag-ghost');
+                        try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', name); } catch (ex) {}
+                    });
+                    gHandle.addEventListener('dragend', function () {
+                        if (draggedGroup) draggedGroup.classList.remove('drag-ghost');
+                        draggedGroup = null;
+                        clearDropCaret();
+                        saveGroupOrder();
+                    });
+                    gCtrls.appendChild(gHandle);
+                    summary.appendChild(gCtrls);
+
+                    // Panels used to REORDER LIVE on every dragover, which made the whole
+                    // column jump around under the cursor. Now it previews with the same
+                    // caret the rows use and commits on drop.
+                    details.addEventListener('dragover', function (e) {
+                        if (!draggedGroup || draggedGroup === details) return;
+                        if (draggedGroup.parentNode !== details.parentNode) return;   // don't drag across columns
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        showDropCaret(details.parentNode, e.clientY, draggedGroup, isGroupEl);
+                    });
+                    details.addEventListener('drop', function (e) {
+                        if (!draggedGroup || draggedGroup === details) return;
+                        if (draggedGroup.parentNode !== details.parentNode) return;
+                        e.preventDefault();
+                        if (_dropCaret && _dropCaret.parentNode) {
+                            _dropCaret.parentNode.insertBefore(draggedGroup, _dropCaret);
+                        }
+                        clearDropCaret();
+                        saveGroupOrder();
+                    });
+
+                    if (window.ParamLayout && window.ParamLayout.getGroupHidden(name)) {
+                        applyGroupShowHidden(name, true, details);
+                    }
+
                     var body = document.createElement('div');
                     body.className = 'param-group-body';
                     if (isGlobal) _clearedGlobalGroupsThisBuild[name] = true;   // freshly-created body starts empty; no need to clear it again this pass
@@ -822,23 +1023,24 @@
                             e.preventDefault();
                             e.dataTransfer.dropEffect = 'move';
                             body.classList.add('drag-over');
+                            showDropCaret(body, e.clientY, draggedRow, isRowEl);
                         });
                         body.addEventListener('dragleave', function(e) {
-                            if (e.target === body) body.classList.remove('drag-over');
+                            if (e.target === body) { body.classList.remove('drag-over'); clearDropCaret(); }
                         });
                         body.addEventListener('drop', function(e) {
                             if (!draggedRow) return;
                             e.preventDefault();
                             body.classList.remove('drag-over');
-                            var rows = Array.prototype.filter.call(body.children, function(el) {
-                                return el.hasAttribute('data-param-id') && el !== draggedRow;
-                            });
-                            var before = null;
-                            for (var i = 0; i < rows.length; i++) {
-                                var r = rows[i].getBoundingClientRect();
-                                if (e.clientY < r.top + r.height / 2) { before = rows[i]; break; }
+                            // Land exactly where the caret was drawn, so the drop can never
+                            // disagree with the preview the user was just looking at.
+                            if (_dropCaret && _dropCaret.parentNode === body) {
+                                body.insertBefore(draggedRow, _dropCaret);
+                            } else {
+                                var before = caretBefore(body, e.clientY, draggedRow, isRowEl);
+                                if (before) body.insertBefore(draggedRow, before); else body.appendChild(draggedRow);
                             }
-                            if (before) body.insertBefore(draggedRow, before); else body.appendChild(draggedRow);
+                            clearDropCaret();
 
                             var newGroup = name;
                             var draggedId = draggedRow.getAttribute('data-param-id');
@@ -870,9 +1072,39 @@
                     var types = window.plotPens.types();
                     var palDef = (params && params.find) ? params.find(function(p) { return p.type === 'colorPalette'; }) : null;
                     var maxSel = palDef ? (palDef.maxSelect || 6) : 10;
+                    // Follow a pen through a colour change: anything keyed on the old
+                    // hex has to be re-pointed at the new one, or the pen looks like it
+                    // was removed and re-added as something unrelated.
+                    function recolorPen(oldHex, newHex) {
+                        var o = String(oldHex || '').toLowerCase();
+                        var n = String(newHex || '').toLowerCase();
+                        if (!o || !n || o === n) return;
+                        // 1. keep it selected in the palette
+                        if (palDef && Array.isArray(palDef.value)) {
+                            palDef.value = palDef.value.map(function (v) {
+                                return String(v).toLowerCase() === o ? newHex : v;
+                            });
+                        }
+                        // 2. keep any Plot Layers / solo state pointed at it
+                        if (Array.isArray(window._pl0tSkippedLayers)) {
+                            window._pl0tSkippedLayers = window._pl0tSkippedLayers.map(function (c) {
+                                return String(c).toLowerCase() === o ? n : c;
+                            });
+                        }
+                    }
                     function commit(next, editIdx) {
                         window._pl0tPenEditIdx = (typeof editIdx === 'number') ? editIdx : null;
                         window.plotPens.setPens(next);
+                        // Drop skip entries for colours that no longer exist anywhere in
+                        // the palette, so a removed pen can't leave an invisible filter
+                        // behind that quietly suppresses a layer on the next plot.
+                        try {
+                            if (Array.isArray(window._pl0tSkippedLayers) && window._pl0tSkippedLayers.length) {
+                                var live = {};
+                                (next || []).forEach(function (p) { if (p && p.color) live[String(p.color).toLowerCase()] = 1; });
+                                window._pl0tSkippedLayers = window._pl0tSkippedLayers.filter(function (c) { return live[String(c).toLowerCase()]; });
+                            }
+                        } catch (e) {}
                         try { buildParamUI(registeredApi); } catch(e) {}
                     }
                     function isSel(colorHex) {
@@ -1014,7 +1246,10 @@
                         var col = document.createElement('input'); col.type = 'color';
                         col.value = pen.color || '#000000';
                         col.style.cssText = 'width:38px;height:30px;padding:0;border:1px solid #ccc;border-radius:4px;flex-shrink:0;';
-                        col.addEventListener('change', function() { var n = pens.slice(); n[i] = Object.assign({}, pen, { color: col.value }); commit(n, i); });
+                        col.addEventListener('change', function() {
+                            recolorPen(pen.color, col.value);
+                            var n = pens.slice(); n[i] = Object.assign({}, pen, { color: col.value }); commit(n, i);
+                        });
                         var lab = document.createElement('input'); lab.type = 'text';
                         lab.value = pen.label || ''; lab.placeholder = 'label';
                         lab.className = 'form-control form-control-sm';
@@ -1142,10 +1377,19 @@
                         wrap = document.createElement('div');
                         wrap.id = 'skipLayersWrap';
                         wrap.style.cssText = 'margin-top:10px;padding-top:10px;border-top:1px solid #eee;';
-                        wrap.innerHTML = '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">Skip Layers</div>'
+                        wrap.innerHTML = '<div style="font-size:12px;font-weight:700;color:#555;margin-bottom:4px;">Plot Layers</div>'
+                            + '<div id="skipLayersStatus" style="font-size:11px;color:#777;margin-bottom:4px;">Plotting all layers</div>'
+                            + '<div style="margin-bottom:6px;"><button type="button" id="skipLayersAll" style="font-size:10px;padding:2px 8px;border:1px solid #ccc;background:#fff;border-radius:8px;cursor:pointer;">Plot all</button></div>'
                             + '<div style="font-size:11px;color:#777;margin-bottom:6px;">Tap a swatch to exclude that colour from the next plot \u2014 its g-code and tool change are left out, the rest plots as usual. Resets on app restart.</div>'
                             + '<div id="skipLayersGrid" class="palette-grid"></div>';
                         body.appendChild(wrap);
+                    }
+                    var _allBtn = wrap.querySelector('#skipLayersAll');
+                    if (_allBtn && !_allBtn._wired) {
+                        _allBtn._wired = true;
+                        _allBtn.addEventListener('click', function () {
+                            if (typeof window._pl0tPlotAllLayers === 'function') window._pl0tPlotAllLayers();
+                        });
                     }
                     if (typeof window._pl0tRenderSkipPanel === 'function') window._pl0tRenderSkipPanel();
                 }
@@ -1153,10 +1397,17 @@
                 // Pre-create only the groups used by the active sketch, in a stable order.
                 // This keeps Artproofs-only groups from leaking into Whirls and other sketches.
                 // Pens registry editor — first group, Home mode only
-                if ((window._pl0tMode || 'fast') === 'full' && window.plotPens) {
+                if (window.pl0tIsAdvanced() && window.plotPens) {
                     try { buildPensEditor(ensureGroup('pens')); } catch(e) {}
                 }
-                var preferredGroups = ['pens', 'paper', 'advanced', 'general', 'orientation', 'arcs', 'wedges', 'textures', 'color'];
+                // Layer filter lives in Advanced for EVERY sketch -- it is applied
+                // during gcode generation (see _read_js_skip_set), so it is not
+                // specific to any one sketch. Advanced-only: skipping layers is an
+                // authoring decision, not something to expose in Show mode.
+                if (window.pl0tIsAdvanced()) {
+                    try { buildSkipLayersUI(ensureGroup('advanced')); } catch(e) {}
+                }
+                var preferredGroups = ['pens', 'paper', 'advanced', 'general', 'element', 'orientation', 'arcs', 'wedges', 'textures', 'color'];
                 var groupsInUse = {};
                 (params || []).forEach(function(pdef) { groupsInUse[getParamGroup(pdef)] = true; });
                 preferredGroups.forEach(function(k) { if (groupsInUse[k]) ensureGroup(k); });
@@ -1165,8 +1416,29 @@
                 });
                 // Paper group stays visible in both modes (its rows hide individually
                 // via showModeHidden; Orientation has none, so it's visible in Show mode).
+                // Panel dragover fires on the panels themselves, so hovering the GAP
+                // between two of them would leave the caret stale. Container-level
+                // handlers cover those dead zones. Bound once per container -- this
+                // function reruns on every sketch switch.
+                [paramsContainer, globalParamsContainer].forEach(function (cont) {
+                    if (!cont || cont._pl0tGroupDnd) return;
+                    cont._pl0tGroupDnd = true;
+                    cont.addEventListener('dragover', function (e) {
+                        if (!draggedGroup || draggedGroup.parentNode !== cont) return;
+                        e.preventDefault();
+                        showDropCaret(cont, e.clientY, draggedGroup, isGroupEl);
+                    });
+                    cont.addEventListener('drop', function (e) {
+                        if (!draggedGroup || draggedGroup.parentNode !== cont) return;
+                        e.preventDefault();
+                        if (_dropCaret && _dropCaret.parentNode) _dropCaret.parentNode.insertBefore(draggedGroup, _dropCaret);
+                        clearDropCaret();
+                        saveGroupOrder();
+                    });
+                });
+                applyGroupOrder();
                 var _pg = document.getElementById('param-group-paper');
-                if (_pg) _pg.style.display = '';
+                if (_pg && !(window.ParamLayout && window.ParamLayout.getGroupHidden('paper'))) _pg.style.display = '';
 
                 function getParamValue(id) {
                     var input = document.getElementById(id);
@@ -1179,7 +1451,12 @@
                 }
 
                 function maybeRegen() {
-                    if (window._pl0tDelayRender && (window._pl0tMode === 'full')) { if (typeof window._pl0tMarkDirty === 'function') window._pl0tMarkDirty(); return; }
+                    // Honour Delay render on BOTH authoring surfaces -- Home and the
+                    // online studio ('web'). It used to require 'full', so toggling
+                    // Delay render in the studio changed nothing and every slider
+                    // still forced a full canvas render. Show/gallery ('fast') stays
+                    // live deliberately.
+                    if (window._pl0tDelayRender && window.pl0tIsAdvanced()) { if (typeof window._pl0tMarkDirty === 'function') window._pl0tMarkDirty(); return; }
                     scheduleRender();
                 }
 
@@ -1266,8 +1543,9 @@
                                 catch(e) { _activeVals=[String(currentValue)]; }
                                 return _activeVals.some(function(v){return allowedValues.indexOf(v)!==-1;});
                             });
-                            row.style.display = _vwAllMatch ? '' : 'none';
-                        } else if (isShowHidden(pdef) && (window._pl0tMode || 'fast') === 'fast') {
+                            // Same rule as setRenderMode: condition AND not show-hidden.
+                            row.style.display = (_vwAllMatch && !(isShowHidden(pdef) && !window.pl0tIsAdvanced())) ? '' : 'none';
+                        } else if (isShowHidden(pdef) && !window.pl0tIsAdvanced()) {
                             row.style.display = 'none';
                         } else {
                             row.style.display = '';
@@ -1302,7 +1580,7 @@
                 function refreshPresetOptions() {
                     var sel = document.getElementById('__stylePreset');
                     if (!sel || !registeredApi || !Array.isArray(registeredApi.stylePresets)) return;
-                    var isHome = (window._pl0tMode || 'fast') === 'full';
+                    var isHome = window.pl0tIsAdvanced();
                     var prevVal = sel.value;
                     sel.innerHTML = '';
                     var ph = document.createElement('option');
@@ -1339,7 +1617,7 @@
                         // the sketch/code's own hardcoded showModeHidden flag.
                         if (isShowHidden(pdef)) {
                             row.dataset.showModeHidden = '1';
-                            if ((window._pl0tMode || 'fast') === 'fast') row.style.display = 'none';
+                            if (!window.pl0tIsAdvanced()) row.style.display = 'none';
                         }
                         if (isSuppressed(pdef)) row.classList.add('param-suppressed');
 
@@ -1352,13 +1630,19 @@
                         var editControls = document.createElement('span');
                         editControls.className = 'param-edit-controls';
 
+                        // Ticked = VISIBLE in Show mode (same convention as the panel
+                        // checkbox). Stored inverted so absent == visible == ticked.
                         var hideCb = document.createElement('input');
                         hideCb.type = 'checkbox';
-                        hideCb.title = 'Hide in Show mode';
-                        hideCb.checked = isShowHidden(pdef);
-                        hideCb.disabled = !!pdef.showModeHidden;   // hardcoded-hidden params aren't user-toggleable back on
+                        hideCb.title = 'Show this control in Show mode';
+                        hideCb.checked = !isShowHidden(pdef);
+                        // Deliberately NOT disabled for showModeHidden params any more.
+                        // Locking them meant sketch code outranked the operator, which is
+                        // exactly the behaviour that made the Textures panel un-showable.
+                        // An unticked box now simply reads "hidden in Show" whatever the
+                        // reason, and ticking it always works.
                         hideCb.addEventListener('change', function() {
-                            if (window.ParamLayout) window.ParamLayout.setShowHidden(pdef.id, hideCb.checked);
+                            if (window.ParamLayout) window.ParamLayout.setShowHidden(pdef.id, !hideCb.checked);
                             // Keep dataset in sync too -- setRenderMode()'s blanket show/hide
                             // toggle on mode switch keys off [data-show-mode-hidden], not
                             // isShowHidden(), so a checkbox-only override needs it set here
@@ -1862,7 +2146,7 @@
                     })();
                     // Upfront Preset selector (first control in General).
                     if (registeredApi && Array.isArray(registeredApi.stylePresets) && registeredApi.stylePresets.length) {
-                        var _isHome = (window._pl0tMode || 'fast') === 'full';
+                        var _isHome = window.pl0tIsAdvanced();
                         var _genBody = ensureGroup('general');
                         var _pRow = document.createElement('div'); _pRow.className = 'mb-3'; _pRow.setAttribute('data-param-id', '__stylePreset');
                         var _pLab = document.createElement('label'); _pLab.className = 'control-label';
@@ -1980,6 +2264,24 @@
         var groups = document.querySelectorAll('.param-group');
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i];
+            // An explicit "not visible in Show" tick WINS over the empty/non-empty
+            // heuristic below. This function runs last in setRenderMode and used to
+            // set every panel's display unconditionally, which silently undid the
+            // panel checkbox a few lines after it was applied -- the checkbox looked
+            // completely dead as a result.
+            var _gname = (g.id === 'sigSettingsPanel') ? 'signature' : g.id.replace('param-group-', '');
+            if (!window.pl0tIsAdvanced() && window.ParamLayout && window.ParamLayout.getGroupHidden(_gname)) {
+                g.style.display = 'none';
+                continue;
+            }
+            // Explicitly ticked visible: keep it, even if every row inside happens
+            // to be hidden. The tick is a direct instruction; the empty-panel
+            // heuristic is only a guess for panels nobody has an opinion about.
+            if (window.ParamLayout && window.ParamLayout.hasGroupHidden(_gname)
+                && !window.ParamLayout.getGroupHidden(_gname)) {
+                g.style.display = '';
+                continue;
+            }
             var rows = g.querySelectorAll('[data-param-id]');
             if (!rows.length) { g.style.display = ''; continue; }
             var anyVisible = false;
@@ -2015,6 +2317,7 @@
             return '';
         },
         setRenderMode: function(mode) {
+            mode = window.pl0tNormalizeMode(mode);
             window._pl0tMode = mode;
             // Toggle paper params and group for Show mode ONLY -- Web mode
             // keeps them (it's "like Show but keeps the global Settings
@@ -2022,7 +2325,13 @@
             // full", which lumped Web in with Show and hid paper size etc.
             // on the /studio page even though the column itself was visible.
             var _isHome = (mode === 'full');
-            var _hideShowOnly = (mode === 'fast');
+            // Edit-layout is an Advanced-only authoring surface. Close it on the
+            // way out, or its checkboxes/handles stay painted over Show mode.
+            if (!_isHome && window.ParamLayout && window.ParamLayout.isEditMode()) {
+                if (typeof window._pl0tSetEditMode === 'function') window._pl0tSetEditMode(false);
+                else window.ParamLayout.setEditMode(false);
+            }
+            var _hideShowOnly = !_isHome;
             document.querySelectorAll('[data-show-mode-hidden]').forEach(function(el) {
                 el.style.display = _hideShowOnly ? 'none' : '';
             });
@@ -2031,9 +2340,14 @@
             //   fast ('Show') - gallery/performance: no global Settings column
             //   web           - online: like Show, but KEEPS the global Settings
             //                   column so paper size etc. are available online
-            var _isWeb = (mode === 'web');
+            // The column's resize handle has to follow it -- otherwise Show mode
+            // leaves a draggable grabber sitting against nothing.
+            var _grh = document.getElementById('global-resize-handle');
+            if (_grh) _grh.style.display = _isHome ? '' : 'none';
             var _gc = document.getElementById('global-col');
-            if (_gc) _gc.style.display = (_isHome || _isWeb) ? '' : 'none';
+            if (_gc) _gc.style.display = _isHome ? '' : 'none';
+            if (typeof window._pl0tRefreshModeBadge === 'function') window._pl0tRefreshModeBadge();
+            if (typeof window._pl0tRefreshSketchChips === 'function') window._pl0tRefreshSketchChips();
             // Lock in / restore hidden numeric params' Show defaults (Edit layout
             // mode). Restoring on the way back to Home mode is what keeps this from
             // clobbering art in progress -- see applyShowModeLockedDefaults above.
@@ -2057,11 +2371,19 @@
                         try { var _pa = JSON.parse(_cur); if (Array.isArray(_pa)) return _pa.map(String).some(function(v){return _allowed.indexOf(v)!==-1;}); } catch(e) {}
                         return _allowed.indexOf(String(_cur)) !== -1;
                     });
-                    _row.style.display = _match ? '' : 'none';
+                    // A row is visible only if its condition matches AND it isn't
+                    // hidden-in-Show. This used to set display purely from the
+                    // condition, which silently UNDID the show-hidden pass a few
+                    // lines above -- so ticking 'hide in Show' did nothing for any
+                    // param that had a visibleWhen (which is most of them).
+                    _row.style.display = (_match && !(isShowHidden(pdef) && !_isHome)) ? '' : 'none';
                 });
             } catch(e) {}
             var _paperGrp = document.getElementById('param-group-paper');
-            if (_paperGrp) _paperGrp.style.display = '';   // Landscape lives here; visible in both modes
+            // Landscape lives here so it's normally visible in both modes -- but an
+            // explicit 'hide this panel in Show' tick has to win, or the checkbox
+            // silently does nothing for Paper.
+            if (_paperGrp && !(window.ParamLayout && window.ParamLayout.getGroupHidden('paper'))) _paperGrp.style.display = '';
             // Keep a hidden input so getParamValue('_renderMode') works for visibleWhen
             var _rmEl = document.getElementById('_renderMode');
             if (!_rmEl) {
@@ -2169,6 +2491,15 @@
             make(selector.value);
         });
         make(selector.value || 'default');
+        // Apply whatever mode we booted into. Without this the initial paint
+        // always shows the Advanced surface regardless of _pl0tMode, and only a
+        // manual toggle corrects it.
+        setTimeout(function () {
+            try {
+                var m = window.pl0tNormalizeMode ? window.pl0tNormalizeMode(window._pl0tMode) : (window._pl0tMode || 'fast');
+                if (window.makeSketchApp && window.makeSketchApp.setRenderMode) window.makeSketchApp.setRenderMode(m);
+            } catch (e) {}
+        }, 120);
     } else {
         // no selector present - fallback to default
         make('default');

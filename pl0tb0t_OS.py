@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.186"
+__version__ = "0.5.217"
 import os
 import sys
 import time
@@ -1105,7 +1105,9 @@ if has_display:
             self.signals.update_banner.connect(
                 lambda t: self._make_webview.page().runJavaScript(f"setBannerText({repr(t)})"))
             self.signals.plot_progress.connect(
-                lambda j: self._make_webview.page().runJavaScript(f"setPlotProgress({j})"))
+                lambda j: self._make_webview.page().runJavaScript(
+                    # guard: progress can be pushed before the page scripts have run
+                    f"if(typeof setPlotProgress==='function')setPlotProgress({j})"))
 
             self.signals.daemon_indicator.connect(self._update_daemon_indicator)
 
@@ -1347,7 +1349,6 @@ if has_display:
                 ("Jogging",          self._scrolled(self._build_jog_panel()),        False, 0),
                 ("Work Zero",        self._scrolled(self._build_workzero_panel()),   False, 0),
                 ("Machine Settings",   self._scrolled(self._build_settings_panel()),   True, 1),
-                ("Make Tab Settings",  self._scrolled(self._build_make_tab_settings_panel()), False, 1),
                 ("Show Mode Palette",  self._scrolled(self._build_show_palette_panel()), False, 1),
             ])
             middle_col = self._panel_column([
@@ -1487,7 +1488,7 @@ if has_display:
             make_html = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'make_local', 'index.html')
             view.setUrl(QUrl.fromLocalFile(make_html))
             view.page().loadFinished.connect(
-                lambda ok: (self._push_pen_width(), self._push_make_tab_settings(), self._push_pen_types_to_make(), self._push_draw_order(), self._push_machine_connected(), self._push_show_palette()) if ok else None)
+                lambda ok: (self._push_pen_width(), self._push_pen_types_to_make(), self._push_draw_order(), self._push_machine_connected(), self._push_show_palette()) if ok else None)
             settings = view.page().settings()
             settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
             settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
@@ -1505,7 +1506,7 @@ if has_display:
             inject.setName("pl0tb0t_inject")
             inject.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
             inject.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
-            inject.setSourceCode(f"window.QUEUE_URL = '{queue_url}'; window.QUEUE_API_KEY = '{api_key}'; window._pl0tMode = 'full';")
+            inject.setSourceCode(f"window.QUEUE_URL = '{queue_url}'; window.QUEUE_API_KEY = '{api_key}'; window._pl0tMode = 'full';")   # desktop Make tab is always Advanced
             view.page().scripts().insert(inject)
             # DocumentReady: force ctrl-col width via inline style so it wins
             # regardless of whatever CSS the webview ends up serving.
@@ -1598,94 +1599,6 @@ if has_display:
             # Try connecting to an already-running daemon on startup
             QTimer.singleShot(500, self._try_reconnect_daemon)
             return w
-
-        def _build_make_tab_settings_panel(self):
-            w = QWidget()
-            layout = QVBoxLayout(w)
-            layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(8)
-
-            # Render mode toggle — first in panel
-            self._render_mode = 'full'
-            self._render_mode_btn = QPushButton('Mode: Home ■ (full hatch)')
-            self._render_mode_btn.setToolTip(
-                'Home: full authoring surface (all settings + global Settings column)\n'
-                'Show: gallery/performance - no global Settings column, home-only params hidden\n'
-                'Web:  mirrors the online studio - like Show, but keeps paper/global Settings'
-            )
-            def _mode_label(m):
-                return {'full': 'Mode: Home ■ (full authoring)',
-                        'fast': 'Mode: Show ► (gallery/fast)',
-                        'web':  'Mode: Web ● (online studio)'}.get(m, 'Mode: Home ■')
-
-            def _toggle_render_mode():
-                # Cycle Home -> Show -> Web -> Home
-                _order = ['full', 'fast', 'web']
-                _cur = self._render_mode if self._render_mode in _order else 'full'
-                self._render_mode = _order[(_order.index(_cur) + 1) % len(_order)]
-                mode = self._render_mode
-                self._render_mode_btn.setText(_mode_label(mode))
-                self._make_webview.page().runJavaScript(
-                    f"window._pl0tMode = '{mode}';"
-                    f"if(window.makeSketchApp&&window.makeSketchApp.setRenderMode)"
-                    f"window.makeSketchApp.setRenderMode('{mode}');"
-                )
-            self._render_mode_btn.clicked.connect(_toggle_render_mode)
-            layout.addWidget(self._render_mode_btn)
-
-            layout.addSpacing(8)
-
-            # Paper size
-            paper_row = QHBoxLayout()
-            paper_lbl = QLabel('Paper size:')
-            paper_lbl.setFixedWidth(80)
-            paper_row.addWidget(paper_lbl)
-            self._make_paper_combo = QComboBox()
-            for val, lbl in [('5x7','5 × 7"'), ('9x12','9 × 12"'),
-                              ('11x14','11 × 14"'), ('11x17','11 × 17"'), ('14x17','14 × 17"')]:
-                self._make_paper_combo.addItem(lbl, val)
-            idx = self._make_paper_combo.findData('9x12')
-            if idx >= 0: self._make_paper_combo.setCurrentIndex(idx)
-            self._make_paper_combo.currentIndexChanged.connect(self._push_make_tab_settings)
-            paper_row.addWidget(self._make_paper_combo, 1)
-            layout.addLayout(paper_row)
-
-            # Margin
-            margin_row = QHBoxLayout()
-            margin_lbl = QLabel('Margin:')
-            margin_lbl.setFixedWidth(80)
-            margin_row.addWidget(margin_lbl)
-            self._make_margin_combo = QComboBox()
-            for val, lbl in [('0','0 (none)'), ('0.5','½ inch'), ('0.75','¾ inch'), ('1','1 inch')]:
-                self._make_margin_combo.addItem(lbl, val)
-            idx = self._make_margin_combo.findData('1')
-            if idx >= 0: self._make_margin_combo.setCurrentIndex(idx)
-            self._make_margin_combo.currentIndexChanged.connect(self._push_make_tab_settings)
-            margin_row.addWidget(self._make_margin_combo, 1)
-            layout.addLayout(margin_row)
-
-            layout.addStretch()
-            return w
-
-        def _push_make_tab_settings(self):
-            """Push paper size, margin and render mode to the active Make tab sketch."""
-            paper  = self._make_paper_combo.currentData()
-            margin = self._make_margin_combo.currentData()
-            mode   = getattr(self, '_render_mode', 'fast')
-            js = (
-                f'try{{'
-                f'if(window.makeSketchApp&&window.makeSketchApp.setRenderMode)'
-                f'window.makeSketchApp.setRenderMode("{mode}");'
-                f'if(window.sketchAPI&&window.sketchAPI.applyParamsSnapshot){{'
-                f'window.sketchAPI.applyParamsSnapshot(['
-                f'{{"id":"paperSize","value":"{paper}"}},'
-                f'{{"id":"margin","value":"{margin}"}}]);'
-                f'}}}}catch(e){{}}'
-            )
-            try:
-                self._make_webview.page().runJavaScript(js)
-            except Exception:
-                pass
 
         def _build_jog_panel(self):
             grp = QWidget()
@@ -2196,6 +2109,31 @@ if has_display:
                 return self.config.draw_order
             return result[0] or self.config.draw_order
 
+        def _read_js_pen_order(self):
+            """MAIN THREAD ONLY. The pen colours in the order the Make tab shows
+            them (plotPens registry = holder-slot order, index 0 = slot 1).
+
+            This is the list the operator actually arranges and looks at. The
+            plot order used to be derived only from ink luminance or holder X,
+            neither of which the palette strip displays -- so the confirm
+            dialog could list the pens in an order that matched nothing on
+            screen, which is impossible to sanity-check before committing."""
+            from PyQt6.QtCore import QEventLoop
+            result = [None]
+            loop = QEventLoop()
+            js = ('(function(){try{if(window.plotPens&&window.plotPens.colors)'
+                  'return (window.plotPens.colors()||[]).map(function(c){return (c||"").toLowerCase();});}'
+                  'catch(e){}return [];})()')
+            def _cb(val):
+                result[0] = val if isinstance(val, list) else []
+                loop.quit()
+            try:
+                self._make_webview.page().runJavaScript(js, _cb)
+                loop.exec()
+            except Exception:
+                return []
+            return result[0] or []
+
         def _push_draw_order(self):
             try:
                 import json as _json
@@ -2230,6 +2168,19 @@ if has_display:
             # the FIRST tool picked up matches the chosen convention, instead
             # of whatever order colours happened to appear in the file.
             mode = order_mode or self.config.draw_order
+            if mode == "palette":
+                # Follow the Make tab's own palette strip. Colours the registry
+                # doesn't know about go last (stable, rather than silently
+                # jumping to the front), and ties keep their existing order
+                # because sorted() is stable.
+                order = getattr(self, "_active_pen_order", None) or []
+                def _pal_key(pair):
+                    c = (pair[0].get("color") or "").lower()
+                    try:
+                        return order.index(c)
+                    except ValueError:
+                        return len(order) + 1
+                return sorted(assignments, key=_pal_key)
             if mode == "left_to_right":
                 # Ascending physical X = leftmost holder first. If a machine's
                 # X axis runs the other way, this is the one line to flip.
@@ -2248,7 +2199,14 @@ if has_display:
             pt = pm.get(c)
             if pt and pt in self._pen_types():
                 return pt
-            return getattr(tool, 'pen_type', 'custom')
+            # Per-holder pen_type is no longer user-editable (see the tool
+            # panel), so fall back to the declared zero/reference pen type
+            # rather than a value the user can no longer see or correct.
+            legacy = getattr(tool, 'pen_type', '') or ''
+            if legacy and legacy in self._pen_types():
+                return legacy
+            zt = getattr(self.config, 'zero_pen_type', 'stabilo')
+            return zt if zt in self._pen_types() else 'custom'
 
         def _pen_tip_delta(self, ptype):
             if not ptype or ptype not in self._pen_types():
@@ -2431,16 +2389,25 @@ if has_display:
             order_grp = QGroupBox("Draw Order (multi-color plots)")
             order_v = QVBoxLayout(order_grp)
             order_v.setSpacing(2)
+            self.draw_order_pal_rb = QRadioButton("Palette order (as shown in the Make tab)")
+            self.draw_order_pal_rb.setToolTip(
+                "Pick up pens in the order the Make tab's palette strip shows them.\n"
+                "This is the only mode whose order matches what you see on screen,\n"
+                "so the pen-confirm dialog can actually be checked against the palette.")
             self.draw_order_ltr_rb = QRadioButton("Left to right (by holder X position)")
             self.draw_order_ltr_rb.setToolTip("Pick up pens in order of increasing physical X \u2014 leftmost holder first.")
             self.draw_order_ldk_rb = QRadioButton("Lightest to darkest")
             self.draw_order_ldk_rb.setToolTip("Pick up pens in order of ink luminance, lightest first, so darker passes go down last.")
+            order_v.addWidget(self.draw_order_pal_rb)
             order_v.addWidget(self.draw_order_ltr_rb)
             order_v.addWidget(self.draw_order_ldk_rb)
             self.draw_order_group = QButtonGroup(order_grp)
+            self.draw_order_group.addButton(self.draw_order_pal_rb)
             self.draw_order_group.addButton(self.draw_order_ltr_rb)
             self.draw_order_group.addButton(self.draw_order_ldk_rb)
-            if self.config.draw_order == "left_to_right":
+            if self.config.draw_order == "palette":
+                self.draw_order_pal_rb.setChecked(True)
+            elif self.config.draw_order == "left_to_right":
                 self.draw_order_ltr_rb.setChecked(True)
             else:
                 self.draw_order_ldk_rb.setChecked(True)
@@ -2450,6 +2417,7 @@ if has_display:
                 self.config.draw_order = mode
                 save_config(self.config)
                 self._push_draw_order()
+            self.draw_order_pal_rb.toggled.connect(lambda c: _on_draw_order_change(c, "palette"))
             self.draw_order_ltr_rb.toggled.connect(lambda c: _on_draw_order_change(c, "left_to_right"))
             self.draw_order_ldk_rb.toggled.connect(lambda c: _on_draw_order_change(c, "lightest_to_darkest"))
             cl.addWidget(order_grp)
@@ -2474,10 +2442,10 @@ if has_display:
                 ey = QLineEdit("0.0" if ay != "tool_safe_z_edit" else "50")
                 setattr(self, ay, ey)
                 eg.addWidget(ey, row, 3)
-            eg.addWidget(QLabel("Pen type:"), 3, 0)
-            self.tool_pen_type_combo = QComboBox()
-            for _pt in self._pen_types(): self.tool_pen_type_combo.addItem(_pt.capitalize(), _pt)
-            eg.addWidget(self.tool_pen_type_combo, 3, 1, 1, 3)
+            # (Pen type intentionally NOT edited here -- the loaded pen is
+            # declared in the Make tab's pen panel, which _effective_pen_type()
+            # already treats as the source of truth. This panel is only for the
+            # holder's physical location.)
             eg.setColumnStretch(1, 1)
             eg.setColumnStretch(3, 1)
             cl.addWidget(edit_grp)
@@ -3377,6 +3345,12 @@ if has_display:
                 focused = QApplication.focusWidget()
                 if isinstance(focused, QLineEdit):
                     return False
+                # Never jog while a job is streaming. Waking the screen with an
+                # arrow key used to inject motion into the middle of the plot.
+                # Swallow the key rather than pass it through, so it also can't
+                # trigger anything else mid-run.
+                if getattr(self, 'gcode_running', False):
+                    return True
                 key = event.key()
                 if key in self._JOG_KEY_MAP or key == Qt.Key.Key_Shift:
                     if t == QEvent.Type.KeyPress:
@@ -3430,6 +3404,8 @@ if has_display:
         def keyPressEvent(self, event):
             if event.isAutoRepeat():
                 return
+            if getattr(self, 'gcode_running', False):
+                return          # see eventFilter: no jogging while streaming
             key = event.key()
 
             # If a debounced release is pending for this key it was X11 auto-repeat — cancel it
@@ -3464,6 +3440,8 @@ if has_display:
 
         def keyReleaseEvent(self, event):
             if event.isAutoRepeat():
+                return
+            if getattr(self, 'gcode_running', False):
                 return
             key = event.key()
 
@@ -3519,9 +3497,18 @@ if has_display:
             self.tool_y_edit.setText(str(t.y))
             self.tool_z_edit.setText(str(t.z))
             self.tool_safe_z_edit.setText(str(t.safe_z))
-            _pi = self.tool_pen_type_combo.findData(getattr(t, 'pen_type', ''))
-            if _pi < 0: _pi = 0
-            if _pi >= 0 and self.tool_pen_type_combo.count(): self.tool_pen_type_combo.setCurrentIndex(_pi)
+
+        def _current_tool_pen_type(self) -> str:
+            # Carry forward the stored value for the holder being edited. The
+            # pen actually loaded is declared in the Make tab; this is only a
+            # fallback for colours the JS registry doesn't know about.
+            try:
+                idx = self.tools_list.currentRow()
+                if 0 <= idx < len(self.tools):
+                    return getattr(self.tools[idx], 'pen_type', '') or ''
+            except Exception:
+                pass
+            return ''
 
         def _read_tool_form(self) -> Tool:
             return Tool(
@@ -3531,7 +3518,7 @@ if has_display:
                 y=float(self.tool_y_edit.text()),
                 z=float(self.tool_z_edit.text()),
                 safe_z=float(self.tool_safe_z_edit.text()),
-                pen_type=self.tool_pen_type_combo.currentData() or '',
+                pen_type=self._current_tool_pen_type(),
             )
 
         def _save_tool_from_position(self):
@@ -5597,6 +5584,7 @@ if has_display:
                 # just capture the loaded-pen map (drives the real Z/Y offset).
                 self._active_pen_map = self._read_js_pen_map()
                 self._active_skip_set = self._read_js_skip_set()
+                self._active_pen_order = self._read_js_pen_order()
                 _draw_order = self._read_js_draw_order()
                 assignments = self._apply_draw_order(assignments, _draw_order)
                 if _draw_order != self.config.draw_order:
@@ -6038,17 +6026,26 @@ if has_display:
             # exactly what run_gcode streams to the daemon.
             bounds = []
             clean_count = 0
+            pickup_at = None      # cleaned-line offset of the most recent PICK UP
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     for raw in f:
                         s = raw.strip()
                         if s.startswith(";"):
+                            if "PICK UP:" in s:
+                                pickup_at = clean_count
+                                continue
                             m = re.search(r"Layer \d+:\s*(.+?)\s*\((#[0-9a-fA-F]{6})\)", s)
                             if m:
                                 lbl = m.group(1)
                                 if " - " in lbl:
                                     lbl = lbl.split(" - ", 1)[1]
-                                bounds.append((clean_count, m.group(2).lower(), lbl))
+                                # Start the layer at its pen pickup when there is
+                                # one, so the banner flips as the pen changes
+                                # rather than after the tool change completes.
+                                start = pickup_at if pickup_at is not None else clean_count
+                                bounds.append((start, m.group(2).lower(), lbl))
+                                pickup_at = None
                             continue
                         if self._clean_gcode_line(raw):
                             clean_count += 1

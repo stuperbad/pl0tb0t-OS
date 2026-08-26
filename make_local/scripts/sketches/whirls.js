@@ -14,6 +14,8 @@ window.sketches['whirls'] = function(p) {
         pathMode: 'flow',
         swirlStrength: 0.7,
         showBorder: true,
+        cellCurviness: 100,     // 0 = straight angled cells, 100 = follow the whirl
+        borderVariability: 0,   // % of cells whose border is skipped (0 = every cell)
         overlapMode: 'erase',
         fillStyles: ['hatch'],
         laneVariability: 0,
@@ -84,7 +86,7 @@ window.sketches['whirls'] = function(p) {
             { id: 'endFray', label: 'End fraying', type: 'range', min: 0, max: 10, step: 1, value: 0,
               tip: 'At 0, every row/lane in a whirl runs the full length and ends together (current default). Above 0, each row independently stops somewhere in the tail of the path, so rows drop out one by one -- the whirl narrows toward its end instead of cutting off all at once.',
               _toInternal: function(v) { return v / 10; } },
-            { id: 'fieldScale', label: 'Turbulence',  type: 'range', min: 1,   max: 12,  step: 1,   value: 3,
+            { id: 'fieldScale', label: 'Turbulence (Perlin freq)',  type: 'range', min: 1,   max: 12,  step: 1,   value: 3,
               _toInternal: function(v) { return v / 1000; } },
             { id: 'pathMode', label: 'Path mode', type: 'select', value: 'flow',
               options: [
@@ -109,8 +111,12 @@ window.sketches['whirls'] = function(p) {
                 { value: 'crosshatch', label: 'Crosshatch' },
                 { value: 'waves', label: 'Waves' }
               ] },
+            { id: 'cellCurviness', label: 'Cell curviness', type: 'range', min: 0, max: 100, step: 5, value: 100,
+              tip: 'How closely each cell follows the whirl. 100 = the true curved lane; 0 = straight-sided angled cells. Fills and borders share one outline at every setting, so they always agree -- previously fills were clipped to a 4-corner trapezoid while the border drew the real curve, which is why hatching ran straight across bowed cells and spilled past the edge.' },
             { id: 'showBorder', label: 'Cell border', type: 'select', value: 'on',
               options: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }] },
+            { id: 'borderVariability', label: 'Border variability', type: 'range', min: 0, max: 100, step: 5, value: 0,
+              tip: 'Percentage of cells that skip their border, chosen per cell from the sketch seed so it is stable across redraws and matches the SVG export. 0 = every cell bordered (the old behaviour); 100 = none, same as turning Cell border off.' },
         ]),
         regenerate: function() { resizeIfNeeded(); p.redraw(); },
         reseed: function() { globalSeed = Math.floor(Math.random() * 1e8) + 1; buildAllWhirls(); p.redraw(); },
@@ -152,10 +158,12 @@ window.sketches['whirls'] = function(p) {
             if (name === 'cellLenVariability') PARAMS.cellLenVariability = val;
             if (name === 'endFray')    PARAMS.endFray = val;
             if (name === 'divergentEnds') PARAMS.divergentEnds = val === 'on';
-            if (name === 'fieldScale')  PARAMS.fieldScale = val;
+            if (name === 'fieldScale')  PARAMS.fieldScale = (Number(val) || 3) * 0.001;
             if (name === 'pathMode')    PARAMS.pathMode = val;
             if (name === 'swirlStrength') PARAMS.swirlStrength = val;
+            if (name === 'cellCurviness') PARAMS.cellCurviness = Number(val);
             if (name === 'showBorder')  PARAMS.showBorder = val === 'on';
+            if (name === 'borderVariability') PARAMS.borderVariability = Number(val) || 0;
             if (name === 'overlapMode') PARAMS.overlapMode = val;
             if (name === 'fillStyle') {
                 var _fv = val;
@@ -168,7 +176,7 @@ window.sketches['whirls'] = function(p) {
             if (name === 'viewMode')    PARAMS.viewMode = val;
             if (name === 'palette')     { PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette; }
             if (name === '_renderMode') { p.redraw(); }
-            var rebuilds = ['whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','endFray','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
+            var rebuilds = ['cellCurviness','borderVariability','whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','endFray','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
             if (rebuilds.indexOf(name) !== -1) buildAllWhirls();
         },
         saveSVG: function() { exportSVG(); },
@@ -437,10 +445,33 @@ window.sketches['whirls'] = function(p) {
                     outerPts.push({x:path[pi].x+n.x*oo, y:path[pi].y+n.y*oo});
                 }
                 var _np=innerPts.length;
+                // Curviness blend: lerp every sample toward where it would sit
+                // on a straight edge between the cell's two end points.
+                var _cv = Math.max(0, Math.min(1, (PARAMS.cellCurviness == null ? 100 : PARAMS.cellCurviness) / 100));
+                var _innerB = innerPts, _outerB = outerPts;
+                if (_cv < 1 && _np > 1) {
+                    _innerB = []; _outerB = [];
+                    for (var _ci = 0; _ci < _np; _ci++) {
+                        var _t = _ci / (_np - 1);
+                        var _si = { x: innerPts[0].x + (innerPts[_np-1].x - innerPts[0].x) * _t,
+                                    y: innerPts[0].y + (innerPts[_np-1].y - innerPts[0].y) * _t };
+                        var _so = { x: outerPts[0].x + (outerPts[_np-1].x - outerPts[0].x) * _t,
+                                    y: outerPts[0].y + (outerPts[_np-1].y - outerPts[0].y) * _t };
+                        _innerB.push({ x: _si.x + (innerPts[_ci].x - _si.x) * _cv,
+                                       y: _si.y + (innerPts[_ci].y - _si.y) * _cv });
+                        _outerB.push({ x: _so.x + (outerPts[_ci].x - _so.x) * _cv,
+                                       y: _so.y + (outerPts[_ci].y - _so.y) * _cv });
+                    }
+                }
+                // The real cell outline, shared by fills AND borders so they
+                // can no longer disagree about the cell's shape.
+                var _poly = _innerB.slice();
+                for (var _pi2 = _outerB.length - 1; _pi2 >= 0; _pi2--) _poly.push(_outerB[_pi2]);
                 cells.push({
-                    innerPts: innerPts,
-                    outerPts: outerPts,
-                    quad: [innerPts[0], outerPts[0], outerPts[_np-1], innerPts[_np-1]],
+                    innerPts: _innerB,
+                    outerPts: _outerB,
+                    poly: _poly,
+                    quad: [_innerB[0], _outerB[0], _outerB[_np-1], _innerB[_np-1]],
                     colorIdx: cellColorIdx(zIndex, cellIdx, r),
                     fillSeq: cellColorIdx(zIndex, r, cellIdx),
                     tangAng: tangAng,
@@ -456,6 +487,19 @@ window.sketches['whirls'] = function(p) {
         return {cells:cells, outline:outline, zIndex:zIndex, rows:rows};
     }
 
+    // Deterministic per-cell border decision. Hashed from the cell's own
+    // geometry (not a running RNG) so the canvas preview and the SVG export
+    // independently reach the SAME answer -- a live rand() here would let the
+    // plotted sheet disagree with what was on screen.
+    function cellBorderVisible(cell) {
+        if (!PARAMS.showBorder) return false;
+        var v = Math.max(0, Math.min(100, PARAMS.borderVariability || 0));
+        if (v <= 0) return true;
+        var q = (cell && cell.quad && cell.quad[0]) ? cell.quad[0] : {x:0,y:0};
+        var h = Math.imul((q.x*73856093)|0, 1) ^ Math.imul((q.y*19349663)|0, 1) ^ Math.imul(globalSeed|0, 83492791);
+        h = (h ^ (h >>> 13)) >>> 0;
+        return ((h % 100) >= v);
+    }
     function buildAllWhirls() {
         p.noiseSeed(globalSeed);
         // Per-seed angle offset — rotates the entire Perlin field so dominant flow
@@ -550,12 +594,15 @@ window.sketches['whirls'] = function(p) {
         var density = effectiveHatchDensity(style);
         var spacing = (paper.DPI / 25.4) / density;
         var phase = (cell.colorIdx % 100000) * 0.001;
-        if (style === 'zigzagHatch')   return zigzagQuad(cell.quad, hatchDeg, density, phase);
-        if (style === 'sprigFill')     return plotFills.scatterPolyFill(cell.quad, 'sprig',    spacing, PARAMS.symbolScale, cell.colorIdx);
-        if (style === 'ribbonFill')    return plotFills.scatterPolyFill(cell.quad, 'ribbon',   spacing, PARAMS.symbolScale, cell.colorIdx);
-        if (style === 'crossFill')     return plotFills.scatterPolyFill(cell.quad, 'cross',    spacing, PARAMS.symbolScale, cell.colorIdx);
-        if (style === 'asteriskFill')  return plotFills.scatterPolyFill(cell.quad, 'asterisk', spacing, PARAMS.symbolScale, cell.colorIdx);
-        var lines = hatchQuad(cell.quad, hatchDeg, density);
+        // NOTE: hatchQuad/zigzagQuad are polygon-general (modulo edge walk +
+        // even-odd scanline), so the full curved outline drops straight in.
+        var _fpoly = cell.poly || cell.quad;
+        if (style === 'zigzagHatch')   return zigzagQuad(_fpoly, hatchDeg, density, phase);
+        if (style === 'sprigFill')     return plotFills.scatterPolyFill(_fpoly, 'sprig',    spacing, PARAMS.symbolScale, cell.colorIdx);
+        if (style === 'ribbonFill')    return plotFills.scatterPolyFill(_fpoly, 'ribbon',   spacing, PARAMS.symbolScale, cell.colorIdx);
+        if (style === 'crossFill')     return plotFills.scatterPolyFill(_fpoly, 'cross',    spacing, PARAMS.symbolScale, cell.colorIdx);
+        if (style === 'asteriskFill')  return plotFills.scatterPolyFill(_fpoly, 'asterisk', spacing, PARAMS.symbolScale, cell.colorIdx);
+        var lines = hatchQuad(_fpoly, hatchDeg, density);
         if (style === 'sketchHatch') {
             return noisyLineSegments(lines, spacing, phase, spacing * (0.6 + plotFills.getFillImperfection() * 1.4), false);
         }
@@ -798,7 +845,9 @@ window.sketches['whirls'] = function(p) {
                     ctx.stroke();
                 }
             } else {
-            var _cpoly = plotFills.tessellateFlowQuadV2(cell.quad, cell.tangAng, cell.tangAngEnd, paper.DPI/25.4);
+            // Was re-deriving a curve from 4 corners + 2 tangents; the real
+            // outline is right here and is exact.
+            var _cpoly = cell.poly || plotFills.tessellateFlowQuadV2(cell.quad, cell.tangAng, cell.tangAngEnd, paper.DPI/25.4);
             if (_style === 'squiggleHatch') {
                 var _sr = plotFills.squiggleRows(plotFills.hatchPolyRows(_cpoly, _hDeg, _sp), _sp, _ph, _sp*plotFills.getFillImperfection()*0.9);
                 plotFills.drawSquiggle(p.drawingContext, _sr);
@@ -825,7 +874,7 @@ window.sketches['whirls'] = function(p) {
             }
             }
             }
-            if (PARAMS.showBorder) {
+            if (cellBorderVisible(cell)) {
                 p.stroke(0);
                 p.strokeWeight(strokeW);
                 ctx.beginPath();
@@ -895,7 +944,7 @@ window.sketches['whirls'] = function(p) {
                     var sDensity = effectiveHatchDensity();
                     var sSpacing = (paper.DPI/25.4)/sDensity;
                     var sType = style==='sprigFill'?'sprig':style==='ribbonFill'?'ribbon':style==='crossFill'?'cross':'asterisk';
-                    plotFills.scatterPolyFill(cell.quad, sType, sSpacing, PARAMS.symbolScale, cell.colorIdx).forEach(function(seg) {
+                    plotFills.scatterPolyFill(cell.poly || cell.quad, sType, sSpacing, PARAMS.symbolScale, cell.colorIdx).forEach(function(seg) {
                         var cseg = [{x1:seg.x1,y1:seg.y1,x2:seg.x2,y2:seg.y2}];
                         clipOutlines.forEach(function(ol){var nx=[];cseg.forEach(function(s){Array.prototype.push.apply(nx,clipLineOutsidePoly(s.x1,s.y1,s.x2,s.y2,ol));});cseg=nx;});
                         cseg.forEach(function(s){var cs=clipLineToRect(s.x1,s.y1,s.x2,s.y2,mp,mp,dims.width-2*mp,dims.height-2*mp);if(cs)parts.push('<line x1="'+fmt(cs.x1)+'" y1="'+fmt(cs.y1)+'" x2="'+fmt(cs.x2)+'" y2="'+fmt(cs.y2)+'" stroke="'+color+'" stroke-width="'+fmt(sw)+'" stroke-linecap="round"/>');});
@@ -994,7 +1043,7 @@ window.sketches['whirls'] = function(p) {
                     return;
                 }
 
-                var cpoly = plotFills.tessellateFlowQuadV2(cell.quad, cell.tangAng, cell.tangAngEnd, paper.DPI/25.4);
+                var cpoly = cell.poly || plotFills.tessellateFlowQuadV2(cell.quad, cell.tangAng, cell.tangAngEnd, paper.DPI/25.4);
 
                 if (style === 'squiggleHatch') {
                     var sr = plotFills.squiggleRows(plotFills.hatchPolyRows(cpoly, hatchDeg, spacing), spacing, phase, spacing*plotFills.getFillImperfection()*0.9);
@@ -1052,7 +1101,10 @@ window.sketches['whirls'] = function(p) {
 
             if (PARAMS.showBorder) {
                 whirl.cells.forEach(function(cell) {
-                    var q=plotFills.tessellateFlowQuad(cell.quad, cell.tangAng, paper.DPI/25.4);
+                    if (!cellBorderVisible(cell)) return;
+                    // Same outline the canvas border uses, so the plotted border
+                    // matches the preview instead of a separate approximation.
+                    var q=cell.poly || plotFills.tessellateFlowQuad(cell.quad, cell.tangAng, paper.DPI/25.4);
                     for (var _bi=0; _bi<q.length; _bi++) {
                         var _a=q[_bi], _b=q[(_bi+1)%q.length];
                         var edgeSegs=[{x1:_a.x,y1:_a.y,x2:_b.x,y2:_b.y}];

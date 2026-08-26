@@ -10,7 +10,17 @@ window.plotFills = (function () {
 
     var _scatterStyles = [];
     function setScatterStyles(arr) { _scatterStyles = Array.isArray(arr) ? arr : []; }
-    function getScatterStyles() { return (window._pl0tMode || 'fast') === 'full' ? _scatterStyles : []; }
+    // Same class of bug as isShowHidden: this hard-gated on mode, so even if the
+// operator deliberately made Scatter fills visible in Show mode the control
+// would render and then do nothing. Now it follows the operator's explicit
+// choice, falling back to the old advanced-only behaviour when they haven't
+// expressed one.
+function getScatterStyles() {
+    if (window.pl0tIsAdvanced && window.pl0tIsAdvanced()) return _scatterStyles;
+    if (window.ParamLayout && window.ParamLayout.hasShowHidden('scatterFill')
+        && !window.ParamLayout.getShowHidden('scatterFill')) return _scatterStyles;
+    return [];
+}
 
     var _fillAngle = 0;
     function setFillAngle(v) { _fillAngle = Number(v) || 0; }

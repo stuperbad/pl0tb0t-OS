@@ -11,7 +11,7 @@ Usage:
 
 __version__ = "0.1.06"
 
-import os, sqlite3, uuid, time, json, threading, random, subprocess, tempfile, math, re
+import os, sqlite3, uuid, time, json, threading, random, subprocess, tempfile, math, re, hmac
 from pathlib import Path
 
 # ── Word-pair job IDs ─────────────────────────────────────────────────────────
@@ -527,16 +527,37 @@ def plot_request(job_id):
     return jsonify({"ok": True, "plot_requested": job_id})
 
 # ── Online studio ─────────────────────────────────────────────────────────────
-# Serves the SAME make_local/ UI the desktop Make tab uses, in 'web' mode.
+# Serves the SAME make_local/ UI the desktop Make tab uses, in Show mode.
 # Generation is 100% client-side, so this runs on the visitor's machine and
 # POSTs finished jobs back to /jobs here. Machine control stays Pi-only.
 _STUDIO_INJECT = (
     "<script>"
     "window.QUEUE_URL = location.origin;"
     "window.QUEUE_API_KEY = '__API_KEY__';"
-    "window._pl0tMode = 'web';"
+    # Studio serves the MINIMAL (Show) surface by default; Advanced is
+    # unlocked with a passcode via /studio/unlock. The old 'web' mode was a
+    # third half-and-half surface and is gone -- makeSketch.js normalises
+    # any stray 'web' to Show.
+    "window._pl0tMode = 'fast';"
     "</script>"
 )
+
+
+@app.route("/studio/unlock", methods=["POST"])
+def studio_unlock():
+    """Soft gate for Advanced mode in the online studio.
+
+    The passcode is compared HERE so it never ships to the browser. This
+    keeps casual visitors on the minimal surface; it is deliberately not a
+    security boundary (the unlocked state is a client flag). Machine
+    control is not exposed by this endpoint and stays Pi-only.
+    """
+    want = os.environ.get("PL0T_STUDIO_CODE", "1129")
+    try:
+        got = (request.get_json(silent=True) or {}).get("code", "")
+    except Exception:
+        got = ""
+    return jsonify({"ok": hmac.compare_digest(str(got), str(want))})
 
 
 @app.route("/studio/")

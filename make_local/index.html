@@ -26,6 +26,8 @@
     <script src="scripts/sketches/calibration.js"></script>
     <script src="scripts/sketches/svgUpload.js"></script>
     <script src="scripts/sketches/imageTrace.js"></script>
+    <script src="scripts/sketches/flipbook.js"></script>
+    <script src="scripts/sketches/combo.js"></script>
     <style>
         html, body { height: 100%; margin: 0; padding: 0; background: #fff; overflow: hidden; }
         * { user-select: none; -webkit-user-select: none; }
@@ -56,9 +58,9 @@
         #make-sketch canvas, #make-sketch svg { width: auto !important; height: auto !important; max-width: 100%; max-height: 100%; border-radius: 8px; display: block; }
 
         /* Width toggle handle — click to cycle narrow/wide */
-        #resize-handle { flex: 0 0 8px; cursor: col-resize; background: transparent; position: relative; }
-        #resize-handle::after { content: ''; position: absolute; left: 3px; top: 20%; width: 2px; height: 60%; background: #ddd; border-radius: 1px; transition: background .15s; }
-        #resize-handle:hover::after { background: #888; }
+        #resize-handle, #global-resize-handle { flex: 0 0 8px; cursor: col-resize; background: transparent; position: relative; }
+        #resize-handle::after, #global-resize-handle::after { content: ''; position: absolute; left: 3px; top: 20%; width: 2px; height: 60%; background: #ddd; border-radius: 1px; transition: background .15s; }
+        #resize-handle:hover::after, #global-resize-handle:hover::after { background: #888; }
 
         /* Right: controls panel */
         #ctrl-col { flex: 0 0 150px; min-width: 0; overflow: hidden; display: flex; flex-direction: column; padding: 10px 10px 10px 0; }
@@ -98,6 +100,47 @@
         body.pl0t-edit-mode .param-group-body [data-param-id] { outline: 1px dashed #e0d4ff; border-radius: 6px; padding: 4px 58px 4px 4px; margin: -4px -4px 8px -4px; }
         [data-param-id].param-suppressed { opacity: 0.45; }
         .param-group-body.drag-over { outline: 2px dashed #7c4dff; outline-offset: 2px; border-radius: 6px; }
+        /* Insertion caret: a real element in the flow, so the gap physically
+           opens between the two things you're hovering between. */
+        .pl0t-drop-caret {
+            height: 0; margin: 4px 0; position: relative; pointer-events: none;
+            border-top: 2px solid #7c4dff; border-radius: 2px;
+            animation: pl0t-caret-in .12s ease-out;
+        }
+        .pl0t-drop-caret::before {
+            content: ''; position: absolute; left: -2px; top: -4px;
+            width: 7px; height: 7px; border-radius: 50%; background: #7c4dff;
+        }
+        @keyframes pl0t-caret-in { from { opacity: 0; margin: 0; } to { opacity: 1; margin: 4px 0; } }
+
+        /* ---- Compact param rhythm ---------------------------------------
+           Rows used Bootstrap's .mb-3 (16px) while the Signature panel used
+           5px, so Signature read noticeably tighter than every other panel.
+           These bring the shared rows down to the same rhythm. Sliders keep
+           the stacked label-above-control layout (they need the full width),
+           so this matches Signature's DENSITY rather than its one-line form. */
+        #ctrl-scroll .param-group-body .mb-3 { margin-bottom: 8px; }
+        #ctrl-scroll .control-label { font-size: 12px; margin-bottom: 2px; }
+        #ctrl-scroll input[type=range] { height: 22px; }
+        #ctrl-scroll .param-group { padding-top: 10px; margin-top: 10px; }
+        #ctrl-scroll .param-group-body { padding-top: 8px; }
+        #ctrl-scroll .param-group summary { font-size: 12px; padding: 3px 0; }
+
+        /* Signature is the first .param-group of a SEPARATE container, so
+           :first-child stripped its top border and it butted straight up
+           against the last sketch panel (Textures). Restore the divider. */
+        #globalAuthorParams > .param-group:first-child {
+            border-top: 1px solid #e0e0e0; padding-top: 10px; margin-top: 10px;
+        }
+
+        /* ---- Panel-level authoring controls (Edit layout mode only) ------ */
+        .group-edit-controls { display: none; align-items: center; gap: 8px; margin-left: auto; padding-right: 8px; }
+        body.pl0t-edit-mode .group-edit-controls { display: inline-flex; }
+        .group-edit-controls input[type=checkbox] { cursor: pointer; margin: 0; }
+        .group-drag-handle { cursor: grab; color: #9b7ddb; font-size: 13px; line-height: 1; user-select: none; }
+        .group-drag-handle:active { cursor: grabbing; }
+        body.pl0t-edit-mode .param-group { outline: 1px dashed #ded0ff; outline-offset: 3px; border-radius: 4px; }
+        .param-group.drag-ghost { opacity: .45; }
         [data-param-id].drag-ghost { opacity: 0.35; }
         .param-bounds-editor { display: none; gap: 8px; margin-top: 5px; align-items: center; }
         body.pl0t-edit-mode .param-bounds-editor { display: flex; }
@@ -121,6 +164,9 @@
         #sketch-header { flex-wrap: wrap; padding-bottom: 10px; }
         #sketch-header label { align-self: center; }
         #sketch-chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+        .sketch-chip-wrap { display: inline-flex; align-items: center; }
+        .sketch-vis-cb { display: none; margin: 0 4px 0 0; width: 13px; height: 13px; cursor: pointer; flex: 0 0 auto; }
+        body.pl0t-edit-mode .sketch-vis-cb { display: inline-block; }
         #sketch-chips .seg-btn { flex: 0 0 auto; min-height: 32px; font-size: 12px; padding: 4px 11px; border-radius: 16px; }
 
         /* Action buttons */
@@ -192,6 +238,7 @@
         </div>
     </div>
     <!-- Sketch column -->
+    <div id="global-resize-handle" title="Drag to resize Settings — click to expand/collapse"></div>
     <div id="sketch-col">
         <div id="busy-banner">● Plotting...</div>
         <div id="sketch-frame">
@@ -209,6 +256,8 @@
                     <option value="calibration"        data-script="scripts/sketches/calibration.js">Calibration</option>
                     <option value="svgUpload"          data-script="scripts/sketches/svgUpload.js">SVG Upload</option>
                     <option value="imageTrace"         data-script="scripts/sketches/imageTrace.js">Image Trace</option>
+                    <option value="flipbook"           data-script="scripts/sketches/flipbook.js">Flipbook</option>
+                    <option value="combo"              data-script="scripts/sketches/combo.js">Combo</option>
                 </select>
             </div>
             <div id="make-sketch"></div>
@@ -273,11 +322,20 @@
         if (window.sketchAPI && typeof window.sketchAPI.reseed === 'function') window.sketchAPI.reseed();
         else if (window.sketchAPI && typeof window.sketchAPI.regenerate === 'function') window.sketchAPI.regenerate();
     });
-    document.getElementById('editLayoutToggle').addEventListener('click', function() {
-        var on = !(window.ParamLayout && window.ParamLayout.isEditMode());
+    // Edit-layout state lives in three places (ParamLayout, the button's
+    // .active class, the body class). Centralised so switching to Show mode
+    // can turn it off properly -- calling ParamLayout.setEditMode(false)
+    // alone left the body class on, so the authoring checkboxes stayed
+    // visible in Show mode.
+    window._pl0tSetEditMode = function (on) {
+        on = !!on;
         if (window.ParamLayout) window.ParamLayout.setEditMode(on);
-        this.classList.toggle('active', on);
+        var btn = document.getElementById('editLayoutToggle');
+        if (btn) btn.classList.toggle('active', on);
         document.body.classList.toggle('pl0t-edit-mode', on);
+    };
+    document.getElementById('editLayoutToggle').addEventListener('click', function() {
+        window._pl0tSetEditMode(!(window.ParamLayout && window.ParamLayout.isEditMode()));
     });
     document.getElementById('shuffleLayout').addEventListener('click', function() {
         if (window.sketchAPI && typeof window.sketchAPI.shuffleLayout === 'function') window.sketchAPI.shuffleLayout();
@@ -308,6 +366,244 @@
         el.style.color = color || '#555';
         el.textContent = msg;
     }
+
+    // ---- Capture ANY sketch's real geometry -------------------------------
+    // Combo needs actual elements from the other sketches, not lookalikes. Every
+    // sketch already serialises its exact plottable geometry through saveSVG(),
+    // so the cheapest honest way to reuse one is to run the real thing in a
+    // hidden p5 instance and read its SVG back. No duplicated generator code,
+    // and an element can never drift from the sketch it came from.
+    //
+    // Paths are flattened with the browser's own getPointAtLength(), so arcs and
+    // beziers (artproofs emits arcs) come through correctly rather than needing
+    // a hand-written path parser.
+    // Captures MUST run one at a time. This function monkeypatches three
+    // globals for the duration of a capture (document.getElementById,
+    // URL.createObjectURL, HTMLAnchorElement.prototype.click). Two overlapping
+    // captures each save the OTHER's patched version as "the original" and
+    // restore it on cleanup, so the redirects leak or vanish mid-flight and
+    // both hang until their timeouts. Adding several elements at once did
+    // exactly that -- nothing rendered for minutes. A serial queue makes the
+    // patching safe without touching the capture logic itself.
+    var _capQueue = Promise.resolve();
+    window.pl0tCaptureSketchGeometry = function (sketchName, opts) {
+        var run = function () { return _pl0tCaptureOne(sketchName, opts); };
+        var next = _capQueue.then(run, run);
+        // keep the chain alive even when one capture fails
+        _capQueue = next.then(function () {}, function () {});
+        return next;
+    };
+    function _pl0tCaptureOne(sketchName, opts) {
+        opts = opts || {};
+        return new Promise(function (resolve, reject) {
+            var fn = window.sketches && window.sketches[sketchName];
+            if (typeof fn !== 'function') return reject(new Error('unknown sketch: ' + sketchName));
+            if (sketchName === 'combo') return reject(new Error('cannot nest combo inside itself'));
+
+            var hidden = document.createElement('div');
+            hidden.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;height:1000px;';
+            document.body.appendChild(hidden);
+
+            var realGet = document.getElementById.bind(document);
+            document.getElementById = function (id) { return id === 'make-sketch' ? hidden : realGet(id); };
+
+            var capturedApi = null, inst = null, finished = false;
+            var sigCfg = window._signatureConfig;
+            var sigWasEnabled = !!(sigCfg && sigCfg.enabled);
+            if (sigCfg) sigCfg.enabled = false;
+            var origCOU = URL.createObjectURL;
+            var origClick = HTMLAnchorElement.prototype.click;
+            var blobText = null;
+            var presetLabels = [];
+            var paramDefs = [];
+
+            function cleanup() {
+                document.getElementById = realGet;
+                URL.createObjectURL = origCOU;
+                HTMLAnchorElement.prototype.click = origClick;
+                if (sigCfg) sigCfg.enabled = sigWasEnabled;
+                try { if (inst && inst.remove) inst.remove(); } catch (e) {}
+                try { hidden.remove(); } catch (e) {}
+            }
+            var timer = setTimeout(function () {
+                if (!finished) { finished = true; cleanup(); reject(new Error('capture timed out: ' + sketchName)); }
+            }, 15000);
+
+            try {
+                inst = new window.p5(function (pp) {
+                    var origRegister = null;
+                    Object.defineProperty(pp, 'registerSketchAPI', {
+                        configurable: true,
+                        set: function (v) { origRegister = v; try { v(function (a) { capturedApi = a; }); } catch (e) {} },
+                        get: function () { return origRegister; }
+                    });
+                    fn(pp);
+                }, hidden);
+            } catch (e) {
+                clearTimeout(timer); finished = true; cleanup(); return reject(e);
+            }
+
+            // Let p5 run setup/draw, then push overrides and grab the SVG.
+            setTimeout(function () {
+                if (finished) return;
+                presetLabels = (capturedApi && Array.isArray(capturedApi.stylePresets))
+                    ? capturedApi.stylePresets.map(function (x, i) { return (x && x.label) ? x.label : ('Preset ' + (i + 1)); })
+                    : [];
+                // Serialisable copies only -- these cross into the host sketch and get
+                // rebuilt as its own controls. Actions are dropped (they'd fire the
+                // source's buttons), and so is anything the HOST owns for the whole
+                // page: paper, margin, palette and pen width are Combo's job.
+                var OWNED = { paperSize:1, margin:1, customWidth:1, customHeight:1, palette:1, penWidthMm:1, viewMode:1 };
+                paramDefs = (capturedApi && Array.isArray(capturedApi.params))
+                    ? capturedApi.params.filter(function (d) {
+                          return d && d.id && d.type !== 'action' && !OWNED[d.id];
+                      }).map(function (d) {
+                          return { id: d.id, label: d.label, type: d.type, min: d.min, max: d.max,
+                                   step: d.step, value: d.value, tip: d.tip,
+                                   options: d.options ? d.options.map(function (o) {
+                                       return (o && typeof o === 'object') ? { value: o.value, label: o.label } : o;
+                                   }) : undefined,
+                                   multiSelect: d.multiSelect,
+                                   visibleWhen: d.visibleWhen };
+                      })
+                    : [];
+                if (!capturedApi || typeof capturedApi.saveSVG !== 'function') {
+                    finished = true; clearTimeout(timer); cleanup();
+                    return reject(new Error('no saveSVG on ' + sketchName));
+                }
+                try {
+                    // Apply a preset first (real presets from the source sketch),
+                    // then any explicit param overrides on top.
+                    if (opts.presetIndex != null && Array.isArray(capturedApi.stylePresets)) {
+                        var ps = capturedApi.stylePresets[opts.presetIndex % capturedApi.stylePresets.length];
+                        if (ps && ps.values) {
+                            Object.keys(ps.values).forEach(function (k) {
+                                try { capturedApi.setParam(k, ps.values[k]); } catch (e) {}
+                            });
+                        }
+                    }
+                    if (opts.params) {
+                        Object.keys(opts.params).forEach(function (k) {
+                            try { capturedApi.setParam(k, opts.params[k]); } catch (e) {}
+                        });
+                    }
+                    if (opts.reseed && typeof capturedApi.reseed === 'function') capturedApi.reseed();
+                    if (typeof capturedApi.regenerate === 'function') capturedApi.regenerate();
+                } catch (e) {}
+
+                setTimeout(function () {
+                    if (finished) return;
+                    URL.createObjectURL = function (blob) {
+                        var u = origCOU(blob);
+                        try { blob.text().then(function (t) { blobText = t; }); } catch (e) {}
+                        return u;
+                    };
+                    HTMLAnchorElement.prototype.click = function () {
+                        if (this.download) return;      // swallow the download
+                        return origClick.call(this);
+                    };
+                    try { capturedApi.saveSVG(); } catch (e) {}
+                    setTimeout(function () {
+                        if (finished) return;
+                        finished = true; clearTimeout(timer);
+                        var txt = blobText;
+                        cleanup();
+                        if (!txt || txt.length < 50) return reject(new Error('empty SVG from ' + sketchName));
+                        try {
+                            resolve({ polys: window.pl0tSvgToPolylines(txt), presets: presetLabels, paramDefs: paramDefs });
+                        } catch (e) { reject(e); }
+                    }, 350);
+                }, opts.settleMs || 500);
+            }, opts.setupMs || 450);
+        });
+    };
+
+    // SVG -> [{color, pts:[{x,y}...]}], flattened via the browser so every path
+    // command (arcs, beziers) is handled without a bespoke parser.
+    window.pl0tSvgToPolylines = function (svgText) {
+        var doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+        var svg = doc.documentElement;
+        var host = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        host.setAttribute('width', '10'); host.setAttribute('height', '10');
+        host.style.cssText = 'position:fixed;left:-99999px;top:0;';
+        document.body.appendChild(host);
+        var out = [];
+        function strokeOf(el) {
+            var s = el.getAttribute('stroke');
+            if (s && s !== 'none') return s;
+            var par = el.parentNode, guard = 0;
+            while (par && par.getAttribute && guard++ < 6) {
+                var ps = par.getAttribute('stroke');
+                if (ps && ps !== 'none') return ps;
+                par = par.parentNode;
+            }
+            return '#000000';
+        }
+        function flattenPath(d, color) {
+            var pe = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            pe.setAttribute('d', d);
+            host.appendChild(pe);
+            var total = 0;
+            try { total = pe.getTotalLength(); } catch (e) { total = 0; }
+            if (total > 0.5) {
+                // Subpaths ('M' restarts) must not be joined by a stroke, so split
+                // the d string and flatten each piece independently.
+                var subs = d.match(/[Mm][^Mm]*/g) || [d];
+                subs.forEach(function (sub) {
+                    var sp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    sp.setAttribute('d', sub);
+                    host.appendChild(sp);
+                    var L = 0;
+                    try { L = sp.getTotalLength(); } catch (e) { L = 0; }
+                    if (L > 0.4) {
+                        var steps = Math.max(2, Math.min(400, Math.ceil(L / 2)));
+                        var pts = [];
+                        for (var i = 0; i <= steps; i++) {
+                            var pt = sp.getPointAtLength(L * i / steps);
+                            pts.push({ x: pt.x, y: pt.y });
+                        }
+                        out.push({ color: color, pts: pts });
+                    }
+                    sp.remove();
+                });
+            }
+            pe.remove();
+        }
+        Array.prototype.forEach.call(svg.querySelectorAll('path'), function (el) {
+            var d = el.getAttribute('d'); if (d) flattenPath(d, strokeOf(el));
+        });
+        Array.prototype.forEach.call(svg.querySelectorAll('line'), function (el) {
+            out.push({ color: strokeOf(el), pts: [
+                { x: +el.getAttribute('x1'), y: +el.getAttribute('y1') },
+                { x: +el.getAttribute('x2'), y: +el.getAttribute('y2') }] });
+        });
+        Array.prototype.forEach.call(svg.querySelectorAll('polyline,polygon'), function (el) {
+            var raw = (el.getAttribute('points') || '').trim().split(/[\s,]+/).map(Number);
+            var pts = [];
+            for (var i = 0; i + 1 < raw.length; i += 2) pts.push({ x: raw[i], y: raw[i + 1] });
+            if (el.nodeName.toLowerCase() === 'polygon' && pts.length) pts.push(pts[0]);
+            if (pts.length > 1) out.push({ color: strokeOf(el), pts: pts });
+        });
+        // Rects: the page border/background is a rect too, so skip anything
+        // unfilled-and-unstroked or clearly page-sized.
+        // Page furniture, not artwork: every sketch draws a full-page border
+        // rect, which was being captured as part of the element (it showed up as
+        // a stray #b4b4b4 outline around each one).
+        var vb = (svg.getAttribute('viewBox') || '').split(/[\s,]+/).map(Number);
+        var pageW = vb.length === 4 ? vb[2] : (parseFloat(svg.getAttribute('width')) || 0);
+        var pageH = vb.length === 4 ? vb[3] : (parseFloat(svg.getAttribute('height')) || 0);
+        Array.prototype.forEach.call(svg.querySelectorAll('rect'), function (el) {
+            var st = el.getAttribute('stroke');
+            if (!st || st === 'none') return;
+            var x = +el.getAttribute('x') || 0, y = +el.getAttribute('y') || 0;
+            var w = +el.getAttribute('width') || 0, h = +el.getAttribute('height') || 0;
+            if (w <= 0 || h <= 0) return;
+            if (pageW > 0 && pageH > 0 && w >= pageW * 0.94 && h >= pageH * 0.94) return;   // page border
+            out.push({ color: st, pts: [{x:x,y:y},{x:x+w,y:y},{x:x+w,y:y+h},{x:x,y:y+h},{x:x,y:y}] });
+        });
+        host.remove();
+        return out;
+    };
 
     function captureSvgFromSaveSVG() {
         return new Promise(function(resolve, reject) {
@@ -670,10 +966,39 @@
         return palette;
     }
 
+    // Restrict the plot to exactly one colour (everything else skipped).
+    // Clicking the solo dot of the already-soloed colour clears the filter.
+    window._pl0tSoloLayer = function (color) {
+        var cl = String(color || '').toLowerCase();
+        var pal = _pl0tCurrentPalette().map(function (e) {
+            return (typeof e === 'string' ? e : e.color).toLowerCase();
+        });
+        var others = pal.filter(function (c) { return c !== cl; });
+        var alreadySolo = window._pl0tSkippedLayers.length === others.length
+            && others.every(function (c) { return window._pl0tSkippedLayers.indexOf(c) !== -1; });
+        window._pl0tSkippedLayers = alreadySolo ? [] : others;
+        _pl0tRenderSkipPanel();
+        if (typeof window._pl0tOnSkipLayersChanged === 'function') window._pl0tOnSkipLayersChanged();
+    };
+    window._pl0tPlotAllLayers = function () {
+        window._pl0tSkippedLayers = [];
+        _pl0tRenderSkipPanel();
+        if (typeof window._pl0tOnSkipLayersChanged === 'function') window._pl0tOnSkipLayersChanged();
+    };
+
     function _pl0tRenderSkipPanel() {
         var grid = document.getElementById('skipLayersGrid');
         if (!grid) return;
         var palette = _pl0tCurrentPalette();
+        var _sk = window._pl0tSkippedLayers || [];
+        var _status = document.getElementById('skipLayersStatus');
+        if (_status) {
+            var _on = palette.length - _sk.length;
+            _status.textContent = _sk.length
+                ? ('Plotting ' + _on + ' of ' + palette.length + ' layers')
+                : 'Plotting all layers';
+            _status.style.color = _sk.length ? '#b45309' : '#777';
+        }
         grid.innerHTML = palette.map(function(entry) {
             var c   = typeof entry === 'string' ? entry : entry.color;
             var lbl = (typeof entry === 'object' && entry.label) ? entry.label : c;
@@ -682,8 +1007,17 @@
             return '<div class="palette-item skip-item" data-color="' + cl + '" title="' + lbl + (skipped ? ' (skipped)' : '') + '">'
                 + '<div class="palette-swatch" style="background:' + c + ';position:relative;' + (skipped ? 'opacity:0.35;' : '') + '">'
                 + (skipped ? '<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#c00;font-weight:900;font-size:18px;text-shadow:0 0 2px #fff;">&times;</span>' : '')
-                + '</div><span class="palette-label">' + lbl + '</span></div>';
+                + '</div><span class="palette-label">' + lbl + '</span>'
+                + '<button type="button" class="skip-solo" data-color="' + cl + '" title="Plot ONLY this layer (click again to clear)"'
+                + ' style="margin-top:2px;font-size:9px;padding:1px 5px;border:1px solid #ccc;background:#fff;border-radius:8px;cursor:pointer;">solo</button>'
+                + '</div>';
         }).join('');
+        Array.prototype.forEach.call(grid.querySelectorAll('.skip-solo'), function(b) {
+            b.addEventListener('click', function(e) {
+                e.stopPropagation();      // don't also toggle the swatch underneath
+                window._pl0tSoloLayer(b.getAttribute('data-color'));
+            });
+        });
         Array.prototype.forEach.call(grid.querySelectorAll('.skip-item'), function(el) {
             el.addEventListener('click', function() {
                 var c = el.getAttribute('data-color');
@@ -793,6 +1127,43 @@
 <script src="scripts/makeSketch.js"></script>
 <script>
 (function() {
+    // Left-hand (Settings) column resizer. Same interaction as the right one:
+    // drag to size, click without dragging to toggle wide/narrow. Note the sign
+    // flip on dx -- this handle sits to the RIGHT of the column it resizes, so
+    // dragging right grows it, whereas the other handle is to the LEFT of its
+    // column and dragging right shrinks it.
+    (function () {
+        var gHandle = document.getElementById('global-resize-handle');
+        var gCol    = document.getElementById('global-col');
+        if (!gHandle || !gCol) return;
+        var gx = 0, gw = 190, gDrag = false;
+        function setGW(w) {
+            gCol.style.flex = '0 0 ' + w + 'px';
+            gCol.style.minWidth = '0';
+        }
+        gHandle.addEventListener('pointerdown', function (e) {
+            gHandle.setPointerCapture(e.pointerId);
+            gx = e.clientX;
+            gw = gCol.offsetWidth || 190;
+            gDrag = false;
+            e.preventDefault();
+        });
+        gHandle.addEventListener('pointermove', function (e) {
+            if (!gHandle.hasPointerCapture(e.pointerId)) return;
+            var dx = e.clientX - gx;
+            if (Math.abs(dx) > 4) gDrag = true;
+            if (gDrag) setGW(Math.max(150, Math.min(720, gw + dx)));
+        });
+        gHandle.addEventListener('pointerup', function (e) {
+            gHandle.releasePointerCapture(e.pointerId);
+            if (!gDrag) {
+                var cur = gCol.offsetWidth || 190;
+                setGW(cur < 400 ? 560 : 190);
+            }
+            gDrag = false;
+        });
+    })();
+
     var handle  = document.getElementById('resize-handle');
     var ctrlCol = document.getElementById('ctrl-col');
     var dragStartX = 0, dragStartW = 320, didDrag = false;
@@ -832,6 +1203,25 @@
     var chips = document.createElement('div');
     chips.id = 'sketch-chips';
     Array.from(origSel.options).forEach(function(opt) {
+        // Wrapper so the visibility checkbox can sit beside the chip -- an <input>
+        // nested inside a <button> is invalid and its clicks fight the button's.
+        var wrap = document.createElement('span');
+        wrap.className = 'sketch-chip-wrap';
+        wrap.dataset.val = opt.value;
+
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'sketch-vis-cb';
+        cb.title = 'Show this sketch in Show mode';
+        cb.checked = !(window.ParamLayout && window.ParamLayout.getSketchHidden(opt.value));
+        cb.addEventListener('click', function(e) { e.stopPropagation(); });
+        cb.addEventListener('change', function(e) {
+            e.stopPropagation();
+            if (window.ParamLayout) window.ParamLayout.setSketchHidden(opt.value, !cb.checked);
+            applySketchChipVis();
+        });
+        wrap.appendChild(cb);
+
         var btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'seg-btn' + (opt.value === origSel.value ? ' seg-active' : '');
@@ -844,10 +1234,28 @@
                 b.classList.toggle('seg-active', b.dataset.val === origSel.value);
             });
             origSel.dispatchEvent(new Event('change'));
+            applySketchChipVis();   // the active chip is always kept visible
         });
-        chips.appendChild(btn);
+        wrap.appendChild(btn);
+        chips.appendChild(wrap);
     });
+
+    // In Show mode, unticked sketches drop out of the row. The ACTIVE sketch is
+    // always kept -- a selector with nothing selected reads as broken, and the
+    // canvas is drawing it regardless.
+    function applySketchChipVis() {
+        var adv = !!(window.pl0tIsAdvanced && window.pl0tIsAdvanced());
+        Array.prototype.forEach.call(chips.querySelectorAll('.sketch-chip-wrap'), function(w) {
+            var v = w.dataset.val;
+            var hidden = !!(window.ParamLayout && window.ParamLayout.getSketchHidden(v));
+            var isActive = (origSel.value === v);
+            w.style.display = (!adv && hidden && !isActive) ? 'none' : '';
+        });
+    }
+    window._pl0tRefreshSketchChips = applySketchChipVis;
+
     document.getElementById('sketch-header').appendChild(chips);
+    applySketchChipVis();
 })();
 </script>
 
@@ -1215,5 +1623,153 @@ window.addEventListener('error', function(e) {
     msg.textContent = 'ERROR: ' + e.message;
     document.body.appendChild(msg);
 });
+</script>
+<script>
+// ---- Mode switch + Advanced unlock ----------------------------------------
+// Two modes: Advanced (full authoring) and Show (minimal front end).
+// ADVANCED -> a solid pill, bottom LEFT, reading "switch to show mode".
+// SHOW     -> the same pill goes translucent grey and reads "advanced";
+//             clicking it opens a closable keypad to get back in.
+// The previous version shrank to a nearly invisible dot in Show mode, which
+// left no discoverable way back and forced a trip to the machine tab.
+//
+// Honest limitation: the passcode is verified by the server so it never ships
+// to the page, but the unlocked state is a client flag - this keeps casual
+// visitors on the minimal surface, it is not a security boundary. Machine
+// control is not exposed here and stays Pi-only either way.
+(function () {
+    var btn = null, modal = null;
+
+    function styleBtn(adv) {
+        var common = 'position:fixed;left:12px;bottom:12px;z-index:9998;cursor:pointer;'
+            + 'font:700 10px/1 system-ui,-apple-system,sans-serif;letter-spacing:.09em;'
+            + 'padding:8px 12px;border-radius:999px;user-select:none;text-transform:uppercase;'
+            + 'transition:opacity .15s,background .15s;';
+        if (adv) {
+            btn.textContent = 'Switch to show mode';
+            btn.title = 'Currently in Advanced mode (full authoring). Click to switch to Show.';
+            btn.style.cssText = common + 'background:#7c4dff;color:#fff;opacity:1;'
+                + 'box-shadow:0 1px 4px rgba(0,0,0,.25);';
+        } else {
+            btn.textContent = 'Advanced';
+            btn.title = 'Currently in Show mode. Click to unlock Advanced.';
+            btn.style.cssText = common + 'background:rgba(120,120,130,.35);color:rgba(255,255,255,.92);'
+                + 'opacity:.55;box-shadow:none;';
+        }
+    }
+    function refresh() {
+        if (!btn) {
+            btn = document.createElement('div');
+            btn.id = 'pl0tModeBadge';
+            btn.addEventListener('click', onClick);
+            document.body.appendChild(btn);
+        }
+        styleBtn(!!(window.pl0tIsAdvanced && window.pl0tIsAdvanced()));
+    }
+    window._pl0tRefreshModeBadge = refresh;
+
+    function setMode(m) {
+        if (window.makeSketchApp && window.makeSketchApp.setRenderMode) window.makeSketchApp.setRenderMode(m);
+        else { window._pl0tMode = m; }
+        refresh();
+    }
+
+    function closeModal() {
+        if (modal) { document.removeEventListener('keydown', onKey); modal.remove(); modal = null; }
+    }
+    function onKey(e) {
+        if (e.key === 'Escape') { closeModal(); return; }
+        if (/^[0-9]$/.test(e.key)) push(e.key);
+        else if (e.key === 'Backspace') back();
+        else if (e.key === 'Enter') submit();
+    }
+    var entered = '', dots = null, errEl = null;
+    function paint() {
+        if (!dots) return;
+        dots.textContent = entered.replace(/./g, '\u2022') + '\u00b7'.repeat(0);
+        dots.style.letterSpacing = '10px';
+    }
+    function push(d) { if (entered.length < 8) { entered += d; paint(); if (errEl) errEl.textContent = ''; } }
+    function back() { entered = entered.slice(0, -1); paint(); }
+    function submit() {
+        if (!entered) return;
+        var code = entered;
+        if (!window.QUEUE_URL) { closeModal(); setMode('full'); return; }
+        fetch(window.QUEUE_URL + '/studio/unlock', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code })
+        }).then(function (r) { return r.json(); })
+          .then(function (j) {
+              if (j && j.ok) { closeModal(); setMode('full'); }
+              else { entered = ''; paint(); if (errEl) errEl.textContent = 'Wrong code'; }
+          })
+          .catch(function () { if (errEl) errEl.textContent = 'Server unreachable'; });
+    }
+
+    function openModal() {
+        if (modal) return;
+        entered = '';
+        modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.45);'
+            + 'display:flex;align-items:center;justify-content:center;';
+        modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+
+        var card = document.createElement('div');
+        card.style.cssText = 'background:#fff;border-radius:14px;padding:18px 18px 14px;width:236px;'
+            + 'box-shadow:0 12px 40px rgba(0,0,0,.35);font:400 13px system-ui,-apple-system,sans-serif;position:relative;';
+
+        var x = document.createElement('div');
+        x.textContent = '\u00d7';
+        x.title = 'Close';
+        x.style.cssText = 'position:absolute;top:6px;right:12px;font-size:20px;line-height:1;color:#999;cursor:pointer;';
+        x.addEventListener('click', closeModal);
+        card.appendChild(x);
+
+        var h = document.createElement('div');
+        h.textContent = 'Advanced mode';
+        h.style.cssText = 'font-weight:700;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#555;margin-bottom:10px;';
+        card.appendChild(h);
+
+        dots = document.createElement('div');
+        dots.style.cssText = 'height:26px;border-bottom:2px solid #ddd;margin-bottom:12px;font-size:22px;'
+            + 'line-height:26px;color:#333;text-align:center;';
+        card.appendChild(dots);
+
+        var grid = document.createElement('div');
+        grid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:8px;';
+        ['1','2','3','4','5','6','7','8','9','\u232b','0','\u2713'].forEach(function (k) {
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = k;
+            b.style.cssText = 'padding:12px 0;font-size:17px;border:1px solid #e2e2e6;background:#fafafa;'
+                + 'border-radius:9px;cursor:pointer;font-family:inherit;';
+            b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+            b.addEventListener('click', function () {
+                if (k === '\u232b') back();
+                else if (k === '\u2713') submit();
+                else push(k);
+            });
+            grid.appendChild(b);
+        });
+        card.appendChild(grid);
+
+        errEl = document.createElement('div');
+        errEl.style.cssText = 'min-height:16px;margin-top:8px;color:#c0392b;font-size:11px;text-align:center;';
+        card.appendChild(errEl);
+
+        modal.appendChild(card);
+        document.body.appendChild(modal);
+        document.addEventListener('keydown', onKey);
+        paint();
+    }
+
+    function onClick() {
+        if (window.pl0tIsAdvanced && window.pl0tIsAdvanced()) setMode('fast');
+        else openModal();
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', refresh);
+    else refresh();
+})();
 </script>
 </body>

@@ -57,10 +57,46 @@
     ['sepPad', 'Separator padding (em)', 0.1]
   ];
 
-  function row(labelText) {
+  // This panel is built by hand rather than through buildParamUI, so it used
+  // to sit outside the Edit-layout system entirely -- no per-row hide, no
+  // panel-level hide. These helpers opt it in using the SAME ParamLayout store
+  // and the same [data-show-mode-hidden] attribute the generated rows use, so
+  // setRenderMode's existing blanket toggle picks them up with no extra wiring.
+  // Ids are namespaced 'sig.<key>' so they can't collide with sketch params.
+  function sigHidden(key) {
+    return !!(window.ParamLayout && window.ParamLayout.getShowHidden('sig.' + key));
+  }
+  function applySigRowHidden(r, key) {
+    if (sigHidden(key)) {
+      r.dataset.showModeHidden = '1';
+      if (!(window.pl0tIsAdvanced && window.pl0tIsAdvanced())) r.style.display = 'none';
+    } else {
+      delete r.dataset.showModeHidden;
+      r.style.display = '';
+    }
+  }
+  function row(labelText, key) {
     var r = document.createElement('label');
-    r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:#344054;margin:5px 0;';
+    r.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:#344054;margin:5px 0;position:relative;';
     var span = document.createElement('span'); span.textContent = labelText; r.appendChild(span);
+    if (key) {
+      r.setAttribute('data-param-id', 'sig.' + key);
+      var ec = document.createElement('span');
+      ec.className = 'param-edit-controls';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.title = 'Show this setting in Show mode';
+      cb.checked = !sigHidden(key);
+      cb.addEventListener('click', function (e) { e.stopPropagation(); });
+      cb.addEventListener('change', function (e) {
+        e.stopPropagation();
+        if (window.ParamLayout) window.ParamLayout.setShowHidden('sig.' + key, !cb.checked);
+        applySigRowHidden(r, key);
+      });
+      ec.appendChild(cb);
+      r.appendChild(ec);
+      applySigRowHidden(r, key);
+    }
     return r;
   }
 
@@ -77,17 +113,46 @@
 
     var head = document.createElement('summary');
     head.textContent = 'Signature';
+
+    // Panel-level hide + drag handle, matching the generated panels.
+    var gCtrls = document.createElement('span');
+    gCtrls.className = 'group-edit-controls';
+    var gHide = document.createElement('input');
+    gHide.type = 'checkbox';
+    gHide.title = 'Show this panel in Show mode';
+    gHide.checked = !(window.ParamLayout && window.ParamLayout.getGroupHidden('signature'));
+    function applySigPanelHidden() {
+      if (!gHide.checked) {
+        panel.dataset.showModeHidden = '1';
+        if (!(window.pl0tIsAdvanced && window.pl0tIsAdvanced())) panel.style.display = 'none';
+      } else {
+        delete panel.dataset.showModeHidden;
+        panel.style.display = '';
+      }
+    }
+    gHide.addEventListener('click', function (e) { e.stopPropagation(); });
+    gHide.addEventListener('change', function (e) {
+      e.stopPropagation();
+      if (window.ParamLayout) window.ParamLayout.setGroupHidden('signature', !gHide.checked);
+      applySigPanelHidden();
+    });
+    gCtrls.appendChild(gHide);
+    // No drag handle here: this panel lives in #globalAuthorParams, which is
+    // deliberately NOT rebuilt on sketch switches, and it is the only panel in
+    // that container -- so there is nothing to reorder it against. A handle
+    // would be a control that does nothing.
+    head.appendChild(gCtrls);
     var body = document.createElement('div');
     body.className = 'param-group-body';
 
     CHECKS.forEach(function (c) {
-      var r = row(c[1]);
+      var r = row(c[1], c[0]);
       var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!config[c[0]];
       cb.addEventListener('change', function () { set(c[0], cb.checked); });
       r.appendChild(cb); body.appendChild(r);
     });
 
-    var fr = row('Font');
+    var fr = row('Font', 'font');
     var fs = document.createElement('select'); fs.style.cssText = 'font-size:12px;';
     [['ef', 'EF Script'], ['hershey', 'Hershey']].forEach(function (o) {
       var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; fs.appendChild(op);
@@ -95,7 +160,7 @@
     fs.value = config.font; fs.addEventListener('change', function () { set('font', fs.value); });
     fr.appendChild(fs); body.appendChild(fr);
 
-    var mtr = row('Right-side mark');
+    var mtr = row('Right-side mark', 'markType');
     var mts = document.createElement('select'); mts.style.cssText = 'font-size:12px;';
     [['logo', '90% logo'], ['handwritten', 'Handwritten signature']].forEach(function (o) {
       var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; mts.appendChild(op);
@@ -103,14 +168,14 @@
     mts.value = config.markType; mts.addEventListener('change', function () { set('markType', mts.value); });
     mtr.appendChild(mts); body.appendChild(mtr);
 
-    var mr = row('Custom message');
+    var mr = row('Custom message', 'customMsg');
     var mi = document.createElement('input'); mi.type = 'text'; mi.value = config.customMsg;
     mi.style.cssText = 'font-size:12px;width:130px;';
     mi.addEventListener('input', function () { set('customMsg', mi.value); });
     mr.appendChild(mi); body.appendChild(mr);
 
     NUMS.forEach(function (n) {
-      var r = row(n[1]);
+      var r = row(n[1], n[0]);
       var ni = document.createElement('input'); ni.type = 'number'; ni.step = String(n[2]); ni.value = config[n[0]];
       ni.style.cssText = 'font-size:12px;width:66px;';
       ni.addEventListener('change', function () { var v = parseFloat(ni.value); if (!isNaN(v)) set(n[0], v); });
@@ -119,6 +184,7 @@
 
     panel.appendChild(head); panel.appendChild(body);
     mount.appendChild(panel);
+    applySigPanelHidden();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', buildPanel);

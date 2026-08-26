@@ -9,7 +9,15 @@ window.sketches['artproofs'] = function(p) {
         instanceCount: 1,
         borderProb: 100,
         penWidthMm: 0.4,
-        viewMode: 'multiply'
+        viewMode: 'multiply',
+
+        // ---- Grid layout ----
+        layoutMode: 'scatter',   // 'scatter' (original random placement) | 'grid'
+        gridCols: 3,
+        gridRows: 4,
+        gridPattern: 'all',      // which cells get a proof
+        gridCells: '',           // custom pattern: 1-based, row-major, e.g. "1,3,5,8"
+        gridJitter: 0            // % of a cell that a proof may wander from centre
     };
     // Shared defaults — each instance inherits these unless it has a per-instance override
     var DEFAULTS = {
@@ -83,16 +91,84 @@ window.sketches['artproofs'] = function(p) {
 
     // ---- instance layout ----
 
+    // Which grid cells hold a proof. Row-major, 1-based, so the custom list
+    // reads the way the grid looks on the page.
+    function gridOccupiedCells() {
+        var cols = Math.max(1, Math.round(PARAMS.gridCols));
+        var rows = Math.max(1, Math.round(PARAMS.gridRows));
+        var out = [];
+        var pat = PARAMS.gridPattern || 'all';
+        if (pat === 'custom') {
+            var want = {};
+            String(PARAMS.gridCells || '').split(/[\s,;]+/).forEach(function (t) {
+                var n = parseInt(t, 10);
+                if (!isNaN(n) && n >= 1) want[n] = 1;
+            });
+            for (var r = 0; r < rows; r++) for (var c = 0; c < cols; c++) {
+                if (want[r * cols + c + 1]) out.push({ c: c, r: r });
+            }
+            return out;
+        }
+        for (var r2 = 0; r2 < rows; r2++) {
+            for (var c2 = 0; c2 < cols; c2++) {
+                var keep = true;
+                if (pat === 'checker')          keep = ((r2 + c2) % 2 === 0);
+                else if (pat === 'altRows')     keep = (r2 % 2 === 0);
+                else if (pat === 'altCols')     keep = (c2 % 2 === 0);
+                else if (pat === 'diagonal')    keep = ((r2 % Math.max(1, cols)) === (c2 % Math.max(1, cols)));
+                else if (pat === 'border')      keep = (r2 === 0 || c2 === 0 || r2 === rows - 1 || c2 === cols - 1);
+                if (keep) out.push({ c: c2, r: r2 });
+            }
+        }
+        return out;
+    }
+    function isGrid() { return PARAMS.layoutMode === 'grid'; }
+    // In grid mode the layout decides how many proofs there are, not the
+    // Instances slider -- otherwise the two fight and cells end up empty or
+    // doubled up.
+    function effectiveInstanceCount() {
+        if (!isGrid()) return PARAMS.instanceCount;
+        return Math.max(1, gridOccupiedCells().length);
+    }
+    function gridCellSize() {
+        var marginPx = paper.getMarginPixels(PARAMS.margin);
+        var cols = Math.max(1, Math.round(PARAMS.gridCols));
+        var rows = Math.max(1, Math.round(PARAMS.gridRows));
+        return { w: (canvasW - marginPx * 2) / cols, h: (canvasH - marginPx * 2) / rows, cols: cols, rows: rows, m: marginPx };
+    }
+
     function computeBaseRadius() {
         var marginPx = paper.getMarginPixels(PARAMS.margin);
         var usableW = canvasW - marginPx * 2;
         var usableH = canvasH - marginPx * 2;
+        if (isGrid()) {
+            // Fit the proof inside its cell, with a little breathing room.
+            var g = gridCellSize();
+            return Math.min(g.w, g.h) * 0.44;
+        }
         var n = PARAMS.instanceCount;
         if (n <= 1) return Math.min(usableW, usableH) / 2 - 20;
         return Math.min(usableW, usableH) * 0.21;
     }
 
     function defaultInstPos(i, n) {
+        if (isGrid()) {
+            var cells = gridOccupiedCells();
+            if (!cells.length) return { x: canvasW / 2, y: canvasH / 2 };
+            var cell = cells[i % cells.length];
+            var g = gridCellSize();
+            var cx = g.m + (cell.c + 0.5) * g.w;
+            var cy = g.m + (cell.r + 0.5) * g.h;
+            var j = Math.max(0, Math.min(100, PARAMS.gridJitter)) / 100;
+            if (j > 0) {
+                // Deterministic per-cell wobble -- keeps the grid legible while
+                // avoiding a mechanically perfect lattice.
+                var jr = makeRng((0x5F3A ^ ((cell.r + 1) * 73856093) ^ ((cell.c + 1) * 19349663)) >>> 0);
+                cx += (jr() - 0.5) * g.w * j;
+                cy += (jr() - 0.5) * g.h * j;
+            }
+            return { x: cx, y: cy };
+        }
         var marginPx = paper.getMarginPixels(PARAMS.margin) + baseRadius;
         if (n <= 1) return { x: canvasW / 2, y: canvasH / 2 };
         var rng = makeRng(0xA3F1C2B0 ^ (n * 0x9E3779B9));
@@ -163,7 +239,7 @@ window.sketches['artproofs'] = function(p) {
 
     function resetInstLayout() {
         baseRadius = computeBaseRadius();
-        var n = PARAMS.instanceCount;
+        var n = effectiveInstanceCount();
         instances = [];
         for (var i = 0; i < n; i++) {
             var pos = defaultInstPos(i, n);
@@ -175,7 +251,7 @@ window.sketches['artproofs'] = function(p) {
 
     function buildAllInstances() {
         baseRadius = computeBaseRadius();
-        var n = PARAMS.instanceCount;
+        var n = effectiveInstanceCount();
         while (instances.length < n) {
             var i = instances.length;
             var pos = defaultInstPos(i, n);
@@ -1048,6 +1124,20 @@ window.sketches['artproofs'] = function(p) {
                 selectedInst = -1; resetInstLayout(); try { p.redraw(); } catch(e) {} return;
             }
             if (name === 'penWidthMm') { PARAMS.penWidthMm = Number(rawVal); buildAllInstances(); try { p.redraw(); } catch(e) {} return; }
+            // Grid layout -- each of these changes the layout itself, so they all
+            // rebuild instances (count and positions both derive from the grid).
+            if (name === 'layoutMode' || name === 'gridPattern' || name === 'gridCells') {
+                if (name === 'layoutMode')  PARAMS.layoutMode  = val;
+                if (name === 'gridPattern') PARAMS.gridPattern = val;
+                if (name === 'gridCells')   PARAMS.gridCells   = String(val == null ? '' : val);
+                selectedInst = -1; resetInstLayout(); try { p.redraw(); } catch(e) {} return;
+            }
+            if (name === 'gridCols' || name === 'gridRows' || name === 'gridJitter') {
+                if (name === 'gridCols')   PARAMS.gridCols   = Math.max(1, Math.round(Number(rawVal)));
+                if (name === 'gridRows')   PARAMS.gridRows   = Math.max(1, Math.round(Number(rawVal)));
+                if (name === 'gridJitter') PARAMS.gridJitter = Number(rawVal);
+                selectedInst = -1; resetInstLayout(); try { p.redraw(); } catch(e) {} return;
+            }
             if (name === 'viewMode')   { PARAMS.viewMode = val; try { p.redraw(); } catch(e) {} return; }
 
             // Scopable params — write to selected instance or DEFAULTS

@@ -21,6 +21,27 @@
   data.bounds = data.bounds || {};
   data.showHidden = data.showHidden || {};
   data.suppressed = data.suppressed || {};
+  // Group-level overrides, mirroring the per-param ones: hide a whole
+  // panel from Show mode, and reorder the panels themselves.
+  data.groupHidden = data.groupHidden || {};
+  data.groupOrder = data.groupOrder || [];
+  // Which sketches appear in the chip row in Show mode. Same convention as
+  // params and panels: absent = visible, so every existing sketch and any
+  // added later starts ticked with no migration.
+  data.sketchHidden = data.sketchHidden || {};
+
+  // One-time reset to the new convention: a ticked box means VISIBLE in Show
+  // mode, and everything starts ticked. Entries saved before this meant the
+  // opposite ('ticked = hide'), so carrying them over would leave panels and
+  // controls hidden for reasons nobody could reconstruct. Hard-coded
+  // showModeHidden params in sketch code are untouched -- those live in code,
+  // not here.
+  if (data.visSchema !== 2) {
+    data.groupHidden = {};
+    data.showHidden = {};
+    data.visSchema = 2;
+    try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
+  }
 
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) {}
@@ -47,14 +68,15 @@
     // off; editing def never touches the live control at all.
     getBounds: function (id) { return data.bounds[id] || null; },
     setBounds: function (id, bounds) { data.bounds[id] = bounds || {}; save(); },
-    // Show-mode visibility override: true = force-hide in Show mode even
-    // though the sketch/code didn't mark it showModeHidden. There is
-    // deliberately no way to force a hardcoded showModeHidden param visible.
+    // Show-mode visibility override. The operator's choice is authoritative
+    // in BOTH directions -- it can hide something the sketch didn't mark, and
+    // it can reveal something the sketch DID mark showModeHidden.
+    // Tri-state: true (user hid it) / false (user showed it) / absent (never
+    // touched -> fall back to the sketch's own showModeHidden flag). Storing
+    // an explicit false is what lets a user override a code-level default.
     getShowHidden: function (id) { return !!data.showHidden[id]; },
-    setShowHidden: function (id, on) {
-      if (on) data.showHidden[id] = true; else delete data.showHidden[id];
-      save();
-    },
+    hasShowHidden: function (id) { return Object.prototype.hasOwnProperty.call(data.showHidden, id); },
+    setShowHidden: function (id, on) { data.showHidden[id] = !!on; save(); },
     // Suppressed: fully removed from the UI in both modes, EXCEPT while Edit
     // layout mode is on, where it still renders (grayed out, pushed to the
     // bottom of its group) so it can be found again and un-suppressed.
@@ -63,6 +85,14 @@
       if (on) data.suppressed[id] = true; else delete data.suppressed[id];
       save();
     },
+    getGroupHidden: function (g) { return !!data.groupHidden[g]; },
+    hasGroupHidden: function (g) { return Object.prototype.hasOwnProperty.call(data.groupHidden, g); },
+    setGroupHidden: function (g, on) { data.groupHidden[g] = !!on; save(); },
+    getSketchHidden: function (id) { return !!data.sketchHidden[id]; },
+    hasSketchHidden: function (id) { return Object.prototype.hasOwnProperty.call(data.sketchHidden, id); },
+    setSketchHidden: function (id, on) { data.sketchHidden[id] = !!on; save(); },
+    getGroupOrder: function () { return (data.groupOrder || []).slice(); },
+    setGroupOrder: function (ids) { data.groupOrder = (ids || []).slice(); save(); },
     isEditMode: function () { return editMode; },
     setEditMode: function (on) {
       editMode = !!on;

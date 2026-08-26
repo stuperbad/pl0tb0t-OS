@@ -198,7 +198,7 @@
         sel.setAttribute('data-show-mode-hidden', '1');
         sel.style.cssText = 'flex:0 0 auto;font-size:12px;padding:4px 10px;border:1.5px solid #b39ddb;' +
             'border-radius:16px;height:32px;margin-left:5px;max-width:160px;background:#faf7ff;color:#4a2d7a;';
-        sel.style.display = (window._pl0tMode === 'full') ? '' : 'none';
+        sel.style.display = (window.pl0tIsAdvanced && window.pl0tIsAdvanced()) ? '' : 'none';
 
         var placeholder = document.createElement('option');
         placeholder.value = '';

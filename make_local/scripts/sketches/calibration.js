@@ -31,7 +31,9 @@ window.sketches['calibration'] = function(p) {
         penMin: 0.2,   // pen-width ladder: finest spacing (mm)
         fillMax: 1.0,  // fill swatches: coarsest hatch spacing (mm)
         fillMin: 0.2,  // fill swatches: finest hatch spacing (mm)
-        mixSpacing: 0.5 // color-mix grid: hatch spacing (mm)
+        mixSpacing: 0.5, // color-mix grid: hatch spacing (mm)
+        secMixRamp: 'off', // pairwise overlay DENSITY ramp
+        mixRampSteps: 6    // cells per ramp row
     };
 
     var helpEl = null;
@@ -133,6 +135,7 @@ window.sketches['calibration'] = function(p) {
         if (on(PARAMS.secPenWidth)) secs.push('pen');
         if (on(PARAMS.secFill)) secs.push('fill');
         if (on(PARAMS.secColorMix) && nP >= 2) secs.push('mix');
+        if (on(PARAMS.secMixRamp) && nP >= 2) secs.push('mixramp');
         if (on(PARAMS.secRulers)) secs.push('rul');
         if (on(PARAMS.secGeometry)) secs.push('geo');
 
@@ -145,6 +148,9 @@ window.sketches['calibration'] = function(p) {
         var fslotNat = Math.min(mm(15), (availW - 5 * fillGap) / 6);
         var mixGap = mm(1.5);
         var csqNat = Math.min(mm(12), (availW - (nP - 1) * mixGap) / nP);
+        // ramp: [pair swatch] + N ramp cells across the available width
+        var rampSteps = Math.max(2, Math.min(10, Math.round(PARAMS.mixRampSteps) || 6));
+        var rampCellNat = Math.max(mm(3), Math.min(mm(11), (availW - mm(10) - (rampSteps + 1) * mixGap) / rampSteps));
         var geoNat = Math.min(mm(45), availW);
         var vRulNat = mm(45);
 
@@ -155,6 +161,7 @@ window.sketches['calibration'] = function(p) {
             if (s === 'pen') return nP * penRowNat + labHNat + mm(2);
             if (s === 'fill') return nP * (fslotNat + mm(1.5)) + labHNat + mm(2);
             if (s === 'mix') return nP * (csqNat + mixGap);
+            if (s === 'mixramp') return (nP * (nP - 1) / 2) * (rampCellNat + mixGap) + labHNat;
             if (s === 'rul') return mm(9) + vRulNat;
             if (s === 'geo') return geoNat;
             return 0;
@@ -292,6 +299,43 @@ window.sketches['calibration'] = function(p) {
                 }
                 cy += nP * (csq + mixGap) + gap;
 
+            } else if (sec === 'mixramp') {
+                // Pairwise overlay DENSITY ramp: for every unordered pen pair,
+                // one row where pen A stays at full hatch and pen B ramps from
+                // 0 to full coverage across the row. Hatch coverage is ~1/spacing,
+                // so a target fraction f is drawn at spacing msp/f -- that gives a
+                // real ink-on-paper reading of how the two pens build up together,
+                // which is exactly what a hex value alone can't predict.
+                // Each row is self-labelling: two small solid swatches at the left
+                // show which pair it is (no text needed -- the digit font here only
+                // renders numerals).
+                var rcell = Math.max(mm(2), Math.min(rampCellNat * vs, (availW - mm(10) * vs - (rampSteps + 1) * mixGap) / rampSteps));
+                var swW = mm(4) * vs;
+                var rampMsp = mm(PARAMS.mixSpacing);
+                for (var pa = 0; pa < nP; pa++) {
+                    for (var pb = pa + 1; pb < nP; pb++) {
+                        var rx = sx, ry = cy;
+                        // pair key: two solid-ish swatches
+                        rectOps(ops, rx, ry, swW, rcell, sigCol);
+                        hatchRectOps(ops, rx, ry, swW, rcell, rampMsp, 45, pal[pa]);
+                        rectOps(ops, rx + swW + mixGap * 0.4, ry, swW, rcell, sigCol);
+                        hatchRectOps(ops, rx + swW + mixGap * 0.4, ry, swW, rcell, rampMsp, -45, pal[pb]);
+                        var cx0 = rx + 2 * swW + mixGap * 1.4;
+                        for (var st = 0; st < rampSteps; st++) {
+                            var cxx = cx0 + st * (rcell + mixGap);
+                            if (cxx + rcell > sx + availW) break;
+                            rectOps(ops, cxx, ry, rcell, rcell, sigCol);
+                            // pen A always full
+                            hatchRectOps(ops, cxx, ry, rcell, rcell, rampMsp, 45, pal[pa]);
+                            // pen B ramps 0 -> 1
+                            var f = st / (rampSteps - 1);
+                            if (f > 0.001) hatchRectOps(ops, cxx, ry, rcell, rcell, rampMsp / f, -45, pal[pb]);
+                        }
+                        cy += rcell + mixGap;
+                    }
+                }
+                cy += gap;
+
             } else if (sec === 'rul') {
                 var tickMaj = mm(3.5) * vs, tickMid = mm(2.2) * vs, tickMin = mm(1.1) * vs;
                 var ry2 = cy + mm(1) * vs;
@@ -338,10 +382,11 @@ window.sketches['calibration'] = function(p) {
 
     var api = {
         stylePresets: [
-            { label: 'Full card', values: { secMargin: 'on', secRegistration: 'on', secContinuity: 'on', secVernier: 'on', secPenWidth: 'on', secFill: 'on', secColorMix: 'on', secRulers: 'on', secGeometry: 'on' } },
-            { label: 'Alignment only', values: { secMargin: 'on', secRegistration: 'on', secContinuity: 'on', secVernier: 'on', secPenWidth: 'off', secFill: 'off', secColorMix: 'off', secRulers: 'off', secGeometry: 'off' } },
-            { label: 'Pen + fill', values: { secMargin: 'on', secRegistration: 'off', secContinuity: 'off', secVernier: 'off', secPenWidth: 'on', secFill: 'on', secColorMix: 'off', secRulers: 'off', secGeometry: 'off' } },
-            { label: 'Scale + geometry', values: { secMargin: 'on', secRegistration: 'off', secContinuity: 'off', secVernier: 'off', secPenWidth: 'off', secFill: 'off', secColorMix: 'off', secRulers: 'on', secGeometry: 'on' } }
+            { label: 'Full card', values: { secMixRamp: 'off', secMargin: 'on', secRegistration: 'on', secContinuity: 'on', secVernier: 'on', secPenWidth: 'on', secFill: 'on', secColorMix: 'on', secRulers: 'on', secGeometry: 'on' } },
+            { label: 'Ink overlap test', values: { secMargin: 'on', secRegistration: 'on', secContinuity: 'off', secVernier: 'off', secPenWidth: 'off', secFill: 'off', secColorMix: 'on', secMixRamp: 'on', secRulers: 'off', secGeometry: 'off' } },
+            { label: 'Alignment only', values: { secMixRamp: 'off', secMargin: 'on', secRegistration: 'on', secContinuity: 'on', secVernier: 'on', secPenWidth: 'off', secFill: 'off', secColorMix: 'off', secRulers: 'off', secGeometry: 'off' } },
+            { label: 'Pen + fill', values: { secMixRamp: 'off', secMargin: 'on', secRegistration: 'off', secContinuity: 'off', secVernier: 'off', secPenWidth: 'on', secFill: 'on', secColorMix: 'off', secRulers: 'off', secGeometry: 'off' } },
+            { label: 'Scale + geometry', values: { secMixRamp: 'off', secMargin: 'on', secRegistration: 'off', secContinuity: 'off', secVernier: 'off', secPenWidth: 'off', secFill: 'off', secColorMix: 'off', secRulers: 'on', secGeometry: 'on' } }
         ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'palette', label: 'Pens (colors)', type: 'colorPalette', maxSelect: 6, group: 'color',
@@ -389,6 +434,11 @@ window.sketches['calibration'] = function(p) {
             { id: 'secColorMix', label: 'Color-mix grid', type: 'select', value: 'off', group: 'general',
               tip: 'Every pen overlaid with every other (45° / −45° hatch) to preview overprints / color mixing.',
               options: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }] },
+            { id: 'secMixRamp', label: 'Overlay density ramp', type: 'select', value: 'off', group: 'general',
+              tip: 'One row per pen PAIR: pen A held at full hatch while pen B ramps 0 -> 100% coverage across the row. This is the test for what two inks actually do as they build up on each other - overlap behaviour that a hex value cannot predict. Two small swatches at the left of each row identify the pair.',
+              options: [{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }] },
+            { id: 'mixRampSteps', label: 'Ramp steps', type: 'range', min: 2, max: 10, step: 1, value: 6, group: 'general',
+              tip: 'Cells per ramp row (density stops from 0 to full).' },
             { id: 'mixSpacing', label: 'Mix hatch (mm)', type: 'range', min: 0.2, max: 2.0, step: 0.1, value: 0.5, group: 'general',
               tip: 'Color-mix grid: hatch spacing used for each overlay.' },
             { id: 'secRulers', label: 'Scale rulers', type: 'select', value: 'on', group: 'general',
@@ -444,7 +494,7 @@ window.sketches['calibration'] = function(p) {
             else if (name === 'margin') PARAMS.margin = Number(val);
             else if (name === 'palette') PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette;
             else if (name === 'penWidth' || name === 'penMax' || name === 'penMin' ||
-                     name === 'fillMax' || name === 'fillMin' || name === 'mixSpacing' || name === 'regScale') PARAMS[name] = Number(val);
+                     name === 'fillMax' || name === 'fillMin' || name === 'mixSpacing' || name === 'regScale' || name === 'mixRampSteps') PARAMS[name] = Number(val);
             else if (PARAMS.hasOwnProperty(name)) PARAMS[name] = val;
         }
     };
