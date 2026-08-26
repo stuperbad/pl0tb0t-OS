@@ -291,7 +291,6 @@ def init_db():
             ("started_at",   "REAL DEFAULT NULL"),
             ("finished_at",  "REAL DEFAULT NULL"),
             ("est_s",        "REAL DEFAULT NULL"),   # estimate at dispatch, for residuals
-            ("paused_s",     "REAL DEFAULT 0"),      # human time to subtract (pen changes)
             ("progress",     "REAL DEFAULT NULL"),   # fraction completed if it stopped early
         ]:
             try:
@@ -448,7 +447,7 @@ def update_status(job_id):
             # remember to report it and older callers keep working unchanged.
             if new_status == "plotting":
                 db.execute("UPDATE jobs SET started_at=?, finished_at=NULL, "
-                           "paused_s=0, progress=NULL WHERE id=?", (now, job_id))
+                           "progress=NULL WHERE id=?", (now, job_id))
             elif new_status in ("done", "error", "cancelled"):
                 # Only close a run that actually opened, so a stale row flipped by
                 # hand cannot invent a duration.
@@ -458,10 +457,13 @@ def update_status(job_id):
         # Optional richer detail when the caller knows it. An aborted plot is
         # still a usable sample: with `progress` we can compare elapsed against
         # the estimate for the portion that actually ran, rather than discarding
-        # the run. `paused_s` matters because a multi-pen plot waits on a human
-        # at every pen change -- without subtracting it the model would be
-        # fitting how fast you walk to the machine.
-        for field in ("est_s", "paused_s", "progress"):
+        # the run.
+        #
+        # There is deliberately no "paused" term. Pen changes are performed by
+        # the changer, emitted as ordinary G1 moves at known feed rates, so they
+        # are already in the file and already in the estimate -- no human waits
+        # on the machine mid-plot. Elapsed IS machine time.
+        for field in ("est_s", "progress"):
             if field in data:
                 try:
                     db.execute(f"UPDATE jobs SET {field}=? WHERE id=?",
@@ -486,11 +488,10 @@ def timings():
     with get_db() as db:
         for r in db.execute(
             "SELECT id, sketch_name, paper_size, status, est_s, progress, "
-            "       started_at, finished_at, paused_s "
+            "       started_at, finished_at "
             "FROM jobs WHERE started_at IS NOT NULL AND finished_at IS NOT NULL "
             "ORDER BY finished_at DESC"):
-            elapsed = (r["finished_at"] or 0) - (r["started_at"] or 0)
-            actual = elapsed - (r["paused_s"] or 0)
+            actual = (r["finished_at"] or 0) - (r["started_at"] or 0)
             if actual <= 0:
                 continue
             rows.append({
