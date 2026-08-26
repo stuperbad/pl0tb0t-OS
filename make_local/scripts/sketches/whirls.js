@@ -22,6 +22,8 @@ window.sketches['whirls'] = function(p) {
         cellLenVariability: 0,
         endFray: 0,
         divergentEnds: false,
+        divergeAmount: 0.5,
+        pathJitter: 0,
         symbolScale: 1.0,
         viewMode: 'normal',
         penWidthMm: 0.4,
@@ -60,7 +62,7 @@ window.sketches['whirls'] = function(p) {
             // whirlCount way up, divergentEnds on (that toggle exists specifically to replicate
             // this algorithm's zero-smoothing path-following), border off since the reference
             // has no black grid lines between color segments.
-            { label: 'Noodles', values: { pathMode:'flow', whirlCount:25, rowsBase:2, cellWidth:10, cellLen:35, divergentEnds:'on', showBorder:'off', fillStyle:['hatch'] } }
+            { label: 'Noodles', values: { pathMode:'flow', whirlCount:25, rowsBase:2, cellWidth:10, cellLen:35, pathJitter:100, showBorder:'off', fillStyle:['hatch'] } }
         ],
         params: paper.buildPaperParams(PARAMS.paperSize, PARAMS.margin).concat([
             { id: 'palette', label: 'Colors', type: 'colorPalette', maxSelect: 6,
@@ -98,8 +100,15 @@ window.sketches['whirls'] = function(p) {
               visibleWhen: { param: 'pathMode', values: ['sharedSwirl', 'curlyq'] },
               _toInternal: function(v) { return v / 100; } },
             { id: 'divergentEnds', label: 'Diverging ends', type: 'select', value: 'off',
-              tip: 'Off: current gentle-curve paths. On: the path direction snaps directly to the flow field every step, with no turn-rate smoothing -- matches the original "noodles" algorithm this sketch is based on, which follows the field more literally and looks more erratic/spread, especially near the ends.',
+              tip: 'Where a multi-row whirl terminates, its rows split apart and repel each other instead of ending as one flat bundle. Rows either side of the whirl centreline push outward, ramping in over the tail so the split opens gradually. Needs 2+ rows to show. (This used to mean "snap the path to the field with no smoothing" -- that is now the separate Wiggle slider.)',
               options: [{ value: 'off', label: 'Off' }, { value: 'on', label: 'On' }] },
+            { id: 'divergeAmount', label: 'Divergence', type: 'range', min: 0, max: 100, step: 1, value: 50,
+              visibleWhen: { param: 'divergentEnds', values: ['on'] },
+              tip: 'How far the rows repel at the very end. Each row also gets its own strength sampled from the Perlin field, so the split is uneven -- some fingers fly out, others barely part.',
+              _toInternal: function(v) { return v / 100; } },
+            { id: 'pathJitter', label: 'Wiggle', type: 'range', min: 0, max: 100, step: 1, value: 0,
+              tip: 'How literally the path follows the flow field. At 0 the direction eases toward the field, giving smooth curves. At 100 it snaps straight to the field every step with no turn-rate smoothing -- the original "noodles" algorithm, erratic and spread out. In between blends the two.',
+              _toInternal: function(v) { return v / 100; } },
             { id: 'fillStyle', label: 'Fills', type: 'select', multiSelect: true, value: ['hatch'], group: 'textures',
               options: [
                 { value: 'contour', label: 'Contour' },
@@ -118,7 +127,11 @@ window.sketches['whirls'] = function(p) {
             { id: 'borderVariability', label: 'Border variability', type: 'range', min: 0, max: 100, step: 5, value: 0,
               tip: 'Percentage of cells that skip their border, chosen per cell from the sketch seed so it is stable across redraws and matches the SVG export. 0 = every cell bordered (the old behaviour); 100 = none, same as turning Cell border off.' },
         ]),
-        regenerate: function() { resizeIfNeeded(); p.redraw(); },
+        regenerate: function() {
+            // Flush any rebuild that Delay render deferred (see requestRebuild).
+            if (_rebuildPending) { _rebuildPending = false; buildAllWhirls(); }
+            resizeIfNeeded(); p.redraw();
+        },
         reseed: function() { globalSeed = Math.floor(Math.random() * 1e8) + 1; buildAllWhirls(); p.redraw(); },
         getRecipe: function() {
             return { state: { globalSeed: globalSeed } };
@@ -158,6 +171,8 @@ window.sketches['whirls'] = function(p) {
             if (name === 'cellLenVariability') PARAMS.cellLenVariability = val;
             if (name === 'endFray')    PARAMS.endFray = val;
             if (name === 'divergentEnds') PARAMS.divergentEnds = val === 'on';
+            if (name === 'divergeAmount') PARAMS.divergeAmount = val;
+            if (name === 'pathJitter')    PARAMS.pathJitter = val;
             if (name === 'fieldScale')  PARAMS.fieldScale = (Number(val) || 3) * 0.001;
             if (name === 'pathMode')    PARAMS.pathMode = val;
             if (name === 'swirlStrength') PARAMS.swirlStrength = val;
@@ -176,8 +191,8 @@ window.sketches['whirls'] = function(p) {
             if (name === 'viewMode')    PARAMS.viewMode = val;
             if (name === 'palette')     { PARAMS.palette = Array.isArray(val) && val.length ? val : PARAMS.palette; }
             if (name === '_renderMode') { p.redraw(); }
-            var rebuilds = ['cellCurviness','borderVariability','whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','endFray','divergentEnds','fieldScale','pathMode','swirlStrength','paperSize','margin'];
-            if (rebuilds.indexOf(name) !== -1) buildAllWhirls();
+            var rebuilds = ['cellCurviness','borderVariability','whirlCount','cellLen','cellWidth','rowsBase','rowsSpread','laneVariability','cellLenVariability','endFray','divergentEnds','divergeAmount','pathJitter','fieldScale','pathMode','swirlStrength','paperSize','margin'];
+            if (rebuilds.indexOf(name) !== -1) requestRebuild();
         },
         saveSVG: function() { exportSVG(); },
         getPlotColors: function() {
@@ -344,19 +359,18 @@ window.sketches['whirls'] = function(p) {
                 var swirlAng = orbitAng + radialError * center.dir * 0.7;
                 fieldAng = mixAngles(fieldAng, swirlAng, PARAMS.swirlStrength);
             }
-            if (PARAMS.divergentEnds) {
-                // Original "noodles" algorithm (main2.py, construct_points()) sets the
-                // direction directly to the field angle every step -- no turn-rate
-                // easing at all: `angle = field.get_angle(...)`. That zero-inertia
-                // following is what makes those paths visibly more erratic/spread,
-                // especially near their ends where the least path history has
-                // accumulated to average out the field's local jumpiness. Replicated
-                // faithfully here rather than tuned by eye.
-                ang = fieldAng;
-            } else {
-                var diff = normAngleDiff(fieldAng, ang);
-                ang += diff * (center ? 0.22 : 0.15) * _sm;
-            }
+            // Turn-rate easing gives smooth curves; the original "noodles"
+            // algorithm (main2.py, construct_points()) instead sets direction
+            // straight to the field every step -- `angle = field.get_angle(...)`
+            // -- and that zero-inertia following is what makes those paths look
+            // erratic and spread out. Wiggle blends continuously between the
+            // two, so 100 reproduces the original exactly and anything below it
+            // is a partially-damped version. (This used to be bolted onto the
+            // Diverging-ends toggle, where it had nothing to do with ends.)
+            var _diff = normAngleDiff(fieldAng, ang);
+            var _eased = ang + _diff * (center ? 0.22 : 0.15) * _sm;
+            var _jit = PARAMS.pathJitter || 0;
+            ang = _jit > 0.001 ? mixAngles(_eased, fieldAng, _jit) : _eased;
             x += Math.cos(ang) * cl;
             y += Math.sin(ang) * cl;
             pts.push({x:x, y:y});
@@ -378,6 +392,9 @@ window.sketches['whirls'] = function(p) {
     function inBounds(pt, w, h, pad) {
         return pt.x > -pad && pt.x < w+pad && pt.y > -pad && pt.y < h+pad;
     }
+
+    // Fraction of a row's length over which the end-divergence ramps in.
+    var DIVERGE_SPAN = 0.4;
 
     function buildWhirl(pathRng, rowsRng, dims, zIndex) {
         var path = generatePath(pathRng, dims.width, dims.height);
@@ -409,6 +426,8 @@ window.sketches['whirls'] = function(p) {
         // one by one as ci advances, which is what actually reads as
         // "fraying" (progressively narrower toward the end), rather than
         // every row cutting off at once.
+        var divergeOn = !!PARAMS.divergentEnds;
+        var divergeAmt = PARAMS.divergeAmount == null ? 0.5 : PARAMS.divergeAmount;
         var endFray = PARAMS.endFray || 0;
         var rowEndCi = [];
         for (var r=0; r<rows; r++) {
@@ -437,12 +456,38 @@ window.sketches['whirls'] = function(p) {
                 // rows after it keep their correct lane position) but stop
                 // generating cells for THIS row past its own end point.
                 if (ci >= rowEndCi[r]) continue;
+
+                // Diverging ends: rows either side of the whirl's centreline push
+                // outward as they approach their own termination, so a wide whirl
+                // splits into repelling fingers instead of stopping as one flat
+                // bundle. Ramped over the tail (quadratic, so it opens gradually
+                // rather than kinking), and scaled per row by the Perlin field --
+                // that is what makes the split uneven, some fingers flying wide
+                // while their neighbours barely part.
+                var _push0 = 0, _rowSide = 0, _rowStr = 1, _rowEnd = 1;
+                if (divergeOn && rows > 1) {
+                    _rowSide = ((io + oo) / 2 - totalRowW / 2);
+                    _rowSide = _rowSide >= 0 ? 1 : -1;
+                    _rowEnd = Math.max(2, Math.min(rowEndCi[r], path.length));
+                    var _sp = path[Math.min(ci, path.length - 1)];
+                    var _fs = (PARAMS.fieldScale || 0.003) * 4;
+                    _rowStr = 0.35 + 1.30 * p.noise((_sp.x + r * 37) * _fs,
+                                                    (_sp.y + r * 37) * _fs);
+                    _push0 = divergeAmt * cw * 3 * _rowStr * _rowSide;
+                }
+
                 var innerPts=[], outerPts=[];
                 for (var j=0; j<=segsPerCell; j++) {
                     var pi=Math.min(ci+j, path.length-1);
                     var n=normalAt(path,pi);
-                    innerPts.push({x:path[pi].x+n.x*io, y:path[pi].y+n.y*io});
-                    outerPts.push({x:path[pi].x+n.x*oo, y:path[pi].y+n.y*oo});
+                    var _pu = 0;
+                    if (_push0 !== 0) {
+                        var _d = (pi / (_rowEnd - 1) - (1 - DIVERGE_SPAN)) / DIVERGE_SPAN;
+                        _d = _d <= 0 ? 0 : (_d >= 1 ? 1 : _d);
+                        _pu = _d * _d * _push0;
+                    }
+                    innerPts.push({x:path[pi].x+n.x*(io+_pu), y:path[pi].y+n.y*(io+_pu)});
+                    outerPts.push({x:path[pi].x+n.x*(oo+_pu), y:path[pi].y+n.y*(oo+_pu)});
                 }
                 var _np=innerPts.length;
                 // Curviness blend: lerp every sample toward where it would sit
@@ -500,6 +545,20 @@ window.sketches['whirls'] = function(p) {
         h = (h ^ (h >>> 13)) >>> 0;
         return ((h % 100) >= v);
     }
+    // Delay render only ever deferred the DRAW -- setParam still ran a full
+    // buildAllWhirls() on every slider event, so dragging a param that rebuilds
+    // geometry stayed just as expensive with the toggle on, and the queued
+    // events kept rebuilding after the render finished. That is the lingering
+    // sluggishness. Defer the rebuild too, and flush it when Render is hit.
+    var _rebuildPending = false;
+
+    function requestRebuild() {
+        var delayed = false;
+        try { delayed = !!window._pl0tDelayRender && window.pl0tIsAdvanced(); } catch (e) {}
+        if (delayed) { _rebuildPending = true; return; }
+        buildAllWhirls();
+    }
+
     function buildAllWhirls() {
         p.noiseSeed(globalSeed);
         // Per-seed angle offset — rotates the entire Perlin field so dominant flow
@@ -514,6 +573,8 @@ window.sketches['whirls'] = function(p) {
             targetRadius: Math.min(dims.width, dims.height) * (0.14 + centerRng() * 0.18)
         };
         whirls = [];
+        // Debug hook: lets a harness measure built geometry without re-deriving it.
+        try { window.__whirls = whirls; } catch(e) {}
         for (var i=0; i<PARAMS.whirlCount; i++) {
             var pathRng = makeRng((globalSeed ^ (i * 2654435761)) >>> 0);
             var rowsRng = makeRng(((globalSeed * 1000003) ^ (i * 2246822519)) >>> 0);

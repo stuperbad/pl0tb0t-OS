@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.220"
+__version__ = "0.5.221"
 import os
 import sys
 import time
@@ -2511,10 +2511,21 @@ if has_display:
                 ey = QLineEdit("0.0" if ay != "tool_safe_z_edit" else "50")
                 setattr(self, ay, ey)
                 eg.addWidget(ey, row, 3)
-            # (Pen type intentionally NOT edited here -- the loaded pen is
-            # declared in the Make tab's pen panel, which _effective_pen_type()
-            # already treats as the source of truth. This panel is only for the
-            # holder's physical location.)
+            # Pen type is normally inferred from the Make tab's palette by
+            # colour, which is right for anything generated in the Make tab.
+            # But a plot driven straight from the machine tab -- an archived SVG,
+            # or a colour the JS registry has never seen -- has nothing to infer
+            # from, and there was then no way to say which pen is in the holder.
+            # This is that escape hatch: leave it on Auto to keep the old
+            # behaviour, or pin a type to override it.
+            eg.addWidget(QLabel("Pen type:"), 3, 0)
+            self.tool_pen_type_combo = QComboBox()
+            self.tool_pen_type_combo.setToolTip(
+                "Auto: use the Make tab palette's pen for this holder's colour.\n"
+                "Pinning a type overrides that -- needed when plotting an SVG\n"
+                "straight from the machine tab.")
+            eg.addWidget(self.tool_pen_type_combo, 3, 1, 1, 3)
+            self._reload_tool_pen_types()
             eg.setColumnStretch(1, 1)
             eg.setColumnStretch(3, 1)
             cl.addWidget(edit_grp)
@@ -3566,11 +3577,32 @@ if has_display:
             self.tool_y_edit.setText(str(t.y))
             self.tool_z_edit.setText(str(t.z))
             self.tool_safe_z_edit.setText(str(t.safe_z))
+            self._reload_tool_pen_types(getattr(t, 'pen_type', '') or '')
+
+        AUTO_PEN_LABEL = "\u2014 Auto (from Make palette) \u2014"
+
+        def _reload_tool_pen_types(self, current=''):
+            """Refill the pen-type combo, preserving/selecting `current`.
+
+            Rebuilt rather than filled once, because pen types can be added in
+            the Pen Type Offsets panel while this panel is already on screen.
+            """
+            combo = getattr(self, 'tool_pen_type_combo', None)
+            if combo is None:
+                return
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(self.AUTO_PEN_LABEL, "")
+            for pt in self._pen_types():
+                combo.addItem(pt, pt)
+            idx = combo.findData(current or "")
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
 
         def _current_tool_pen_type(self) -> str:
-            # Carry forward the stored value for the holder being edited. The
-            # pen actually loaded is declared in the Make tab; this is only a
-            # fallback for colours the JS registry doesn't know about.
+            combo = getattr(self, 'tool_pen_type_combo', None)
+            if combo is not None:
+                return combo.currentData() or ''
             try:
                 idx = self.tools_list.currentRow()
                 if 0 <= idx < len(self.tools):
@@ -3615,11 +3647,27 @@ if has_display:
             if not tool.name:
                 QMessageBox.warning(self, "Warning", "Enter a tool name")
                 return
-            add_or_update_tool(self.tools, tool)
+            # Add must ADD. This used to call add_or_update_tool(), which matches
+            # on name -- and the form still holds the selected holder's name, so
+            # pressing Add silently overwrote that holder and then reported that
+            # it had added one. Overwriting is what Save is for.
+            if any(t.name == tool.name for t in self.tools):
+                tool.name = self._unique_tool_name(tool.name)
+            self.tools.append(tool)
             save_tools(tools=self.tools)
             self.refresh_tool_list()
             self.refresh_pen_buttons()
-            QMessageBox.information(self, "Success", f"Tool '{tool.name}' added")
+            self.tools_list.setCurrentRow(len(self.tools) - 1)
+            QMessageBox.information(self, "Added", f"Holder '{tool.name}' added.")
+
+        def _unique_tool_name(self, base):
+            """First free 'name N' derived from base, so Add never collides."""
+            taken = {t.name for t in self.tools}
+            stem = re.sub(r'\s*\d+$', '', base).strip() or "Holder"
+            n = 1
+            while f"{stem} {n}" in taken:
+                n += 1
+            return f"{stem} {n}"
 
         def save_tool(self):
             idx = self.tools_list.currentRow()
