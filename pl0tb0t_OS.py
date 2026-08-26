@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.221"
+__version__ = "0.5.222"
 import os
 import sys
 import time
@@ -601,16 +601,6 @@ def find_tool(tools: List[Tool], name: str) -> Optional[Tool]:
     return None
 
 
-def add_or_update_tool(tools: List[Tool], tool: Tool) -> None:
-    existing = find_tool(tools, tool.name)
-    if existing is None:
-        tools.append(tool)
-    else:
-        existing.color = tool.color
-        existing.x = tool.x
-        existing.y = tool.y
-        existing.z = tool.z
-        existing.safe_z = tool.safe_z
 
 
 def remove_tool(tools: List[Tool], name: str) -> bool:
@@ -1356,9 +1346,8 @@ if has_display:
                 ("Pen Type Offsets",   self._scrolled(self._build_pen_offsets_panel()), False, 0),
                 ("Pen Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
                 ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), True,  1),
-                # "Signature Settings" panel removed -- signature is now owned by the make
-                # tab (make_local/scripts/signatureSettings.js). _build_signature_panel
-                # remains defined but unused; slated for deletion in a later cleanup.
+                # "Signature Settings" panel removed -- signature is now owned by the
+                # make tab (make_local/scripts/signatureSettings.js).
             ])
             right_col = self._panel_column([
                 ("Print Queue",     self._scrolled(self._build_queue_panel()),  False, 1),
@@ -1888,76 +1877,9 @@ if has_display:
             if code != 0:
                 self._web_sync_log.appendPlainText("\nFailed (exit %s)." % code)
 
-        def _build_show_palette_panel(self):
-            w = QWidget()
-            layout = QVBoxLayout(w)
-            layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(6)
-            info = QLabel("Show-mode colour palette \u2014 one swatch per holder. Click a swatch to set the colour used for that slot in Show mode. This palette drives every Show-mode colour picker across sketches.")
-            info.setWordWrap(True)
-            info.setStyleSheet("color:#666; font-size:11px;")
-            layout.addWidget(info)
-            self._show_palette_row = QWidget()
-            self._show_palette_layout = QHBoxLayout(self._show_palette_row)
-            self._show_palette_layout.setContentsMargins(0, 0, 0, 0)
-            self._show_palette_layout.setSpacing(6)
-            layout.addWidget(self._show_palette_row)
-            refresh = QPushButton("\u21bb Match holders")
-            refresh.setToolTip("Rebuild the swatch row to match the current number of holders")
-            refresh.clicked.connect(self._rebuild_show_palette_swatches)
-            layout.addWidget(refresh)
-            layout.addStretch()
-            self._rebuild_show_palette_swatches()
-            return w
 
-        def _style_show_swatch(self, btn, col):
-            if col:
-                btn.setStyleSheet("background:%s; border:1px solid #888; border-radius:5px;" % col)
-                btn.setText("")
-            else:
-                btn.setStyleSheet("background:#eee; border:1px dashed #aaa; border-radius:5px; color:#999; font-size:16px;")
-                btn.setText("+")
 
-        def _rebuild_show_palette_swatches(self):
-            lay = getattr(self, "_show_palette_layout", None)
-            if lay is None:
-                return
-            while lay.count():
-                it = lay.takeAt(0)
-                wdg = it.widget()
-                if wdg:
-                    wdg.deleteLater()
-            n = max(1, len(self.tools))
-            pal = list(self.config.show_palette or [])
-            while len(pal) < n:
-                pal.append("")
-            self.config.show_palette = pal[:max(n, len(pal))]
-            for i in range(n):
-                col = self.config.show_palette[i] if i < len(self.config.show_palette) else ""
-                btn = QPushButton()
-                btn.setFixedSize(34, 34)
-                nm = self.tools[i].name if i < len(self.tools) else ("Slot %d" % (i + 1))
-                btn.setToolTip("%s \u2014 click to set Show-mode colour" % nm)
-                self._style_show_swatch(btn, col)
-                btn.clicked.connect(lambda checked=False, idx=i: self._pick_show_color(idx))
-                lay.addWidget(btn)
-            lay.addStretch()
 
-        def _pick_show_color(self, idx):
-            from PyQt6.QtGui import QColor
-            while len(self.config.show_palette) <= idx:
-                self.config.show_palette.append("")
-            cur = self.config.show_palette[idx]
-            initial = QColor(cur) if cur else QColor("#888888")
-            c = QColorDialog.getColor(initial, self, "Pick Show-mode colour")
-            if c.isValid():
-                self.config.show_palette[idx] = c.name()
-                save_config(self.config)
-                item = self._show_palette_layout.itemAt(idx)
-                btn = item.widget() if item else None
-                if btn:
-                    self._style_show_swatch(btn, c.name())
-                self._push_show_palette()
 
         def _push_show_palette(self):
             try:
@@ -1969,89 +1891,6 @@ if has_display:
             except Exception:
                 pass
 
-        def _build_signature_panel(self):
-            w = QWidget()
-            layout = QVBoxLayout(w)
-            layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(8)
-
-            def _sig_check(label, attr, tip=''):
-                cb = QCheckBox(label)
-                cb.setChecked(bool(getattr(self.config, attr)))
-                if tip: cb.setToolTip(tip)
-                def _toggle(state, a=attr):
-                    setattr(self.config, a, bool(state))
-                    save_config(self.config)
-                    self._push_signature_config()
-                cb.stateChanged.connect(_toggle)
-                layout.addWidget(cb)
-                return cb
-
-            def _sig_field(label, attr, w_px=70, tip=''):
-                row = QHBoxLayout()
-                lbl = QLabel(label)
-                lbl.setFixedWidth(160)
-                if tip: lbl.setToolTip(tip)
-                row.addWidget(lbl)
-                edit = QLineEdit(str(getattr(self.config, attr)))
-                if tip: edit.setToolTip(tip)
-                def _save(a=attr, e=edit):
-                    try:
-                        setattr(self.config, a, float(e.text()))
-                        save_config(self.config)
-                        self._push_signature_config()
-                    except ValueError:
-                        pass
-                edit.editingFinished.connect(_save)
-                row.addWidget(edit, 1)
-                layout.addLayout(row)
-                return edit
-
-            self._sig_enabled_cb  = _sig_check('Enable signature',          'sig_enabled',  tip='Draw an attribution band at the bottom of every sketch')
-            self._sig_preview_cb  = _sig_check('Show preview on canvas',    'sig_show_preview', tip='Render the band in the Make tab canvas (does not affect SVG export)')
-            self._sig_suppress_cb = _sig_check('Suppress from SVG export',  'sig_suppress_export', tip='Omit the signature band from SVG files sent to the plotter')
-            self._sig_logo_cb     = _sig_check('Include 90% logo',          'sig_show_logo',  tip='Add the 90percent art logo flush with the right margin')
-            self._sig_seed_cb     = _sig_check('Include random seed name',   'sig_show_seed_name', tip='Print the auto-generated seed name (e.g. "rust lace") in the signature band')
-
-            # Font selector
-            font_row = QHBoxLayout()
-            font_lbl = QLabel('Font:')
-            font_lbl.setFixedWidth(160)
-            font_row.addWidget(font_lbl)
-            self._sig_font_combo = QComboBox()
-            self._sig_font_combo.addItems(['EF Script', 'Hershey'])
-            self._sig_font_combo.setCurrentIndex(0 if self.config.sig_font == 'ef' else 1)
-            def _on_font_change(idx):
-                self.config.sig_font = 'ef' if idx == 0 else 'hershey'
-                save_config(self.config)
-                self._push_signature_config()
-            self._sig_font_combo.currentIndexChanged.connect(_on_font_change)
-            font_row.addWidget(self._sig_font_combo)
-            font_row.addStretch()
-            layout.addLayout(font_row)
-
-            # Numeric fields
-            self._sig_height_edit   = _sig_field('Text height (mm):',        'sig_height_mm',  tip='Height of the signature text in mm (e.g. 2.0)')
-            self._sig_scale_edit    = _sig_field('Scale:',                   'sig_scale',      tip='Multiplies text height — scale the whole band up/down without changing the mm value')
-            self._sig_frombottom_edit = _sig_field('Offset into margin (mm):', 'sig_from_margin_mm', tip='Distance from the art/margin boundary downward into the margin. 0 = text flush with art edge. Leave at -1 to auto-center within whatever margin you have set.')
-            self._sig_hpad_edit     = _sig_field('Band padding (mm):',        'sig_h_pad_mm',   tip='Pulls the text and logo inward from the margin edges on both sides of the signature band')
-            self._sig_logo_scale_edit = _sig_field('Logo scale:',              'sig_logo_scale', tip='Scale the 90% logo independently from the text (1.0 = same height as text)')
-            self._sig_sep_scale_edit  = _sig_field('Separator scale:',          'sig_sep_scale',  tip='Makes | dividers taller than the text — 1.3 = 30% taller')
-            self._sig_sep_pad_edit    = _sig_field('Separator padding (em):',    'sig_sep_pad',    tip='Gap on each side of | in multiples of text height (1 em = 1x text height). Increase to spread text away from the | dividers equally on both sides.')
-
-            # Custom message (full-width)
-            msg_lbl = QLabel('Custom message:')
-            layout.addWidget(msg_lbl)
-            self._sig_msg_edit = QLineEdit(self.config.sig_custom_msg)
-            def _on_msg_done():
-                self.config.sig_custom_msg = self._sig_msg_edit.text()
-                save_config(self.config)
-                self._push_signature_config()
-            self._sig_msg_edit.editingFinished.connect(_on_msg_done)
-            layout.addWidget(self._sig_msg_edit)
-
-            layout.addStretch()
-            return w
 
         def _push_pen_types_to_make(self):
             try:
@@ -2127,38 +1966,6 @@ if has_display:
             except Exception:
                 return set()
 
-        def _read_js_pen_slot_map(self):
-            # MAIN THREAD ONLY. Returns {colour_lower: index} from the JS Pens
-            # registry's own order (index 0 = slot 1 = rightmost chip in the
-            # editor). This is the user-declared holder position for each
-            # colour and should drive which physical tool a colour's tool
-            # change goes to -- NOT whichever order colours happen to appear
-            # in this particular file (the old behaviour, which meant the
-            # same colour could land on a different holder plot to plot).
-            from PyQt6.QtCore import QEventLoop
-            import json as _json
-            result = ['[]']
-            loop = QEventLoop()
-            js = ('(function(){try{if(window.plotPens&&window.plotPens.pens){'
-                  'return JSON.stringify(window.plotPens.pens().map(function(p){'
-                  'return (p.color||"").toLowerCase();}));}}'
-                  'catch(e){}return "[]";})()')
-            def _cb(val):
-                result[0] = val or '[]'
-                loop.quit()
-            try:
-                self._make_webview.page().runJavaScript(js, _cb)
-                loop.exec()
-            except Exception:
-                return {}
-            out = {}
-            try:
-                for i, c in enumerate(_json.loads(result[0])):
-                    if c and c not in out:
-                        out[c] = i
-            except Exception:
-                pass
-            return out
 
         def _read_js_draw_order(self):
             # MAIN THREAD ONLY. Reads window._pl0tDrawOrder (set by the Make
