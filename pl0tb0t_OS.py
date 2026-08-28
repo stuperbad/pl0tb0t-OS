@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.223"
+__version__ = "0.5.224"
 import os
 import sys
 import time
@@ -3995,21 +3995,26 @@ if has_display:
                     continue
                 slot_idx += 1
                 seen_rows[key] = {"color": color, "tool": tool, "slot": slot_idx, "count": 1}
+            # Which holder renders a colour is a decision about THIS RUN, not about
+            # the artwork and not about the machine -- swapping in a different pen
+            # to re-run something is routine. So the binding is editable right
+            # here, at the moment it is being committed, rather than only being
+            # changeable by going back to the Make tab and re-exporting.
+            _picks = {}
+
+            def _describe(color, tool):
+                ept = self._effective_pen_type(color, tool)
+                contact = self.config.pen_contact_z + self._pen_tip_delta(ept)[2]
+                loaded = ((getattr(self, '_active_pen_map', None) or {}).get((color or '').lower()))
+                src = "loaded" if (loaded and loaded in self._pen_types()) else "holder default"
+                side = self._holder_side_label(tool)
+                where = f"   \u00b7   {side} (X {tool.x:+.1f})" if side else ""
+                return f"{where}   \u00b7   {ept} ({src})   \u00b7   Z {contact:+.2f} mm"
+
             for entry in seen_rows.values():
                 color = entry["color"]
                 tool = entry["tool"]
-                slot_label = tool.name if tool else f"Slot {entry['slot']}"
-                extra = f"  ×{entry['count']} layers" if entry["count"] > 1 else ""
-                # Effective pen type + the exact Z it will draw at -- the safety
-                # info that catches a loaded-pen / holder-type mismatch.
-                ept = self._effective_pen_type(color, tool)
-                zoff = self._pen_tip_delta(ept)[2]
-                contact = self.config.pen_contact_z + zoff
-                loaded = ((getattr(self, '_active_pen_map', None) or {}).get((color or '').lower()))
-                if loaded and loaded in self._pen_types():
-                    pen_note = f"{ept} (loaded)"
-                else:
-                    pen_note = f"{ept} (holder default)"
+                extra = f"  \u00d7{entry['count']} layers" if entry["count"] > 1 else ""
                 row = QWidget()
                 rl = QHBoxLayout(row)
                 rl.setContentsMargins(0, 2, 0, 2)
@@ -4019,12 +4024,27 @@ if has_display:
                 fill = color if (color.startswith("#") and len(color) in (4, 7)) else "#888888"
                 swatch.setStyleSheet(f"background:{fill}; border:1px solid #555;")
                 rl.addWidget(swatch)
-                _side = self._holder_side_label(tool)
-                _where = f"   \u00b7   {_side} (X {tool.x:+.1f})" if _side else ""
-                rl.addWidget(QLabel(
-                    f"{color}   \u2192   Slot {entry['slot']}: {slot_label}{extra}{_where}"
-                    f"   \u00b7   {pen_note}   \u00b7   Z {contact:+.2f} mm"))
+                rl.addWidget(QLabel(f"{color}{extra}   \u2192   Slot {entry['slot']}:"))
+
+                combo = QComboBox()
+                for t in self.tools:
+                    combo.addItem(t.name, t)
+                idx = next((k for k, t in enumerate(self.tools) if t is tool), -1)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                combo.setToolTip("Substitute a different holder for this colour, just for this plot.")
+                rl.addWidget(combo)
+
+                detail = QLabel(_describe(color, tool))
+                rl.addWidget(detail)
                 rl.addStretch()
+
+                def _on_pick(_i, _c=color, _combo=combo, _lbl=detail):
+                    t = _combo.currentData()
+                    _picks[_c] = t
+                    _lbl.setText(_describe(_c, t))
+                combo.currentIndexChanged.connect(_on_pick)
+                _picks[color] = tool
                 layout.addWidget(row)
             btns = QDialogButtonBox(
                 QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -4033,7 +4053,17 @@ if has_display:
             btns.accepted.connect(dlg.accept)
             btns.rejected.connect(dlg.reject)
             layout.addWidget(btns)
-            return dlg.exec() == QDialog.DialogCode.Accepted
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return False
+            # Push any substitution back into the caller's list, in place, so the
+            # plot that follows uses the holders actually confirmed on screen.
+            for i, (layer, tool) in enumerate(assignments):
+                pick = _picks.get((layer.get("color") or "").lower())
+                if pick is None:
+                    pick = _picks.get(layer.get("color") or "")
+                if pick is not None and pick is not tool:
+                    assignments[i] = (layer, pick)
+            return True
 
         def _split_svg_by_color(self, svg_path: str, target_color: str, tmp_path: str) -> bool:
             for prefix, uri in [
