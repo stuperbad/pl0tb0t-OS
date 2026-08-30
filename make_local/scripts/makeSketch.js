@@ -2499,6 +2499,9 @@
                 var m = window.pl0tNormalizeMode ? window.pl0tNormalizeMode(window._pl0tMode) : (window._pl0tMode || 'fast');
                 if (window.makeSketchApp && window.makeSketchApp.setRenderMode) window.makeSketchApp.setRenderMode(m);
             } catch (e) {}
+            // Real mode is now applied, so the pre-paint guard can stand down and
+            // normal toggling takes over.
+            try { document.documentElement.classList.remove('pl0t-boot-show'); } catch (e) {}
         }, 120);
     } else {
         // no selector present - fallback to default

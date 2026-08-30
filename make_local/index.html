@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
     <title>Make</title>
     <link rel="stylesheet" href="lib/bootstrap.min.css">
+    <script>
+    // Stamp the boot mode on <html> BEFORE anything paints. setRenderMode only
+    // runs ~120ms after make(), so Show mode used to paint the full Advanced
+    // surface first and then yank the side columns away -- visible as a flash on
+    // every page load. Hiding them up front means Show mode simply never shows
+    // them; the class is removed once the real mode has been applied.
+    (function () {
+        try {
+            var m = window._pl0tMode || 'fast';
+            if (m !== 'full') document.documentElement.classList.add('pl0t-boot-show');
+        } catch (e) {}
+    })();
+    </script>
     <script src="lib/jquery.min.js"></script>
     <script src="lib/p5.min.js"></script>
     <script src="lib/p5.svg.js"></script>
@@ -61,7 +74,10 @@
            margins on the child centre it when there is room and collapse to
            0 when there is not, so both edges stay reachable AND a zoomed-out
            artboard sits centred instead of pinned to a corner. */
-        #make-sketch { flex: 1 1 0; overflow: auto; display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; padding: 8px; }
+        /* Reserve the scrollbar gutter on BOTH edges: the artboard is centred in
+           the content box, but a scrollbar on one side only makes it read ~15px
+           off-centre, which is exactly the amount it looked wrong by. */
+        #make-sketch { flex: 1 1 0; overflow: auto; scrollbar-gutter: stable both-edges; display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; padding: 8px; }
         #make-sketch > canvas, #make-sketch > svg, #sketch-scroll-wrapper { margin: auto; }
         #make-sketch canvas, #make-sketch svg { width: auto !important; height: auto !important; max-width: 100%; max-height: 100%; border-radius: 8px; display: block; }
 
@@ -71,6 +87,10 @@
         #resize-handle:hover::after, #global-resize-handle:hover::after { background: #888; }
 
         /* Right: controls panel */
+        html.pl0t-boot-show #ctrl-col,
+        html.pl0t-boot-show #global-col,
+        html.pl0t-boot-show #resize-handle,
+        html.pl0t-boot-show #global-resize-handle { display: none !important; }
         #ctrl-col { flex: 0 0 320px; min-width: 0; overflow: hidden; display: flex; flex-direction: column; padding: 10px 10px 10px 0; }
         #ctrl-card { flex: 1 1 0; background: #f8f9fb; border: 1px solid #e0e0e0; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
         #ctrl-scroll { flex: 1 1 0; overflow-y: auto; padding: 14px; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
