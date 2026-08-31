@@ -10,7 +10,7 @@
     "sharpie": 0.0,
     "stabilo": 8.0
   },
-  "pen_lift_z": 3.5,
+  "pen_lift_z": 3.0,
   "pen_offsets": {
     "micron": [
       0.0,
@@ -118,5 +118,6 @@
   "travel_speed": 6000,
   "vpype_config": "pl0tb0t_0x0_config.cfg",
   "vpype_profile": "pl0tb0t_0x0",
+  "x_plus_is_right": true,
   "zero_pen_type": "stabilo"
 }

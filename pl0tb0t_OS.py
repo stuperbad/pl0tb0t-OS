@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.225"
+__version__ = "0.5.226"
 import os
 import sys
 import time
@@ -112,6 +112,12 @@ class OSConfig:
     pen_contact_z: float = 0.0    # mm — Z when pen contacts paper
     # Tool-change parameters
     tc_unplug_mm: float = 20.0    # mm — Y approach/release offset from dock centre
+    # Sideways break-away for the magnet joint on pen DROP. A magnet pair holds
+    # far less in shear than in tension, and a lateral load bears against the
+    # magnet's pocket wall instead of trying to pull it straight back out of the
+    # press fit -- which is the load that has been unseating them. 0 keeps the
+    # old straight-Y release.
+    tc_shear_mm: float = 0.0
     tc_rapid: int = 800           # mm/min — rapid moves during tool change
     tc_approach: int = 50         # mm/min — slow docking/undocking moves
     draw_speed: int = 3000        # mm/min — G1 feed rate while drawing
@@ -168,6 +174,7 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         pen_lift_z=float(data.get("pen_lift_z", 3.5)),
         pen_contact_z=float(data.get("pen_contact_z", 0.0)),
         tc_unplug_mm=float(data.get("tc_unplug_mm", 20.0)),
+        tc_shear_mm=float(data.get("tc_shear_mm", 0.0)),
         tc_rapid=int(data.get("tc_rapid", 800)),
         tc_approach=int(data.get("tc_approach", 50)),
         draw_speed=int(data.get("draw_speed", 3000)),
@@ -1792,6 +1799,15 @@ if has_display:
             _section("Tool Changes")
             self._cfg_tc_unplug   = _field("Unplug offset (mm):",  "tc_unplug_mm",
                                            "Y distance behind dock centre for approach/release")
+            self._cfg_tc_shear    = _field("Magnet shear offset (mm):", "tc_shear_mm",
+                                           "On drop, slide X by this much before retracting in Y, to break the\n"
+                                           "magnet joint sideways instead of pulling it straight off.\n"
+                                           "Magnets hold far less in shear than in tension, and a sideways load\n"
+                                           "pushes against the magnet's pocket wall rather than pulling it out of\n"
+                                           "the press fit -- which is what has been unseating them.\n"
+                                           "0 disables it (original straight-Y release). Try 8.\n"
+                                           "Keep it well under the gap between holders (~39 mm here) or the\n"
+                                           "carriage will reach the neighbouring dock. Sign sets the direction.")
             self._cfg_tc_rapid    = _field("Rapid speed (mm/min):", "tc_rapid",
                                            "Travel speed for non-contact tool-change moves")
             self._cfg_tc_approach = _field("Approach speed (mm/min):", "tc_approach",
@@ -2228,7 +2244,12 @@ if has_display:
             dyn = QWidget()
             v = QVBoxLayout(dyn); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
             zrow = QHBoxLayout()
-            zlbl = QLabel("Zeroed with:"); zlbl.setFixedWidth(90); zrow.addWidget(zlbl)
+            zlbl = QLabel("Zeroed with:"); zlbl.setFixedWidth(90)
+            zlbl.setToolTip(
+                "The reference pen. Every other pen's offsets are expressed relative\n"
+                "to this one, so changing it re-bases the whole table. Pick the pen\n"
+                "you physically zeroed the machine with.")
+            zrow.addWidget(zlbl)
             self._zero_pen_combo = QComboBox()
             for pt in self._pen_types(): self._zero_pen_combo.addItem(pt.capitalize(), pt)
             _zi = self._zero_pen_combo.findData(getattr(self.config, 'zero_pen_type', 'stabilo'))
@@ -2237,8 +2258,25 @@ if has_display:
             zrow.addWidget(self._zero_pen_combo, 1); v.addLayout(zrow)
             grid = QGridLayout(); grid.setSpacing(4)
             grid.addWidget(QLabel("Pen type"), 0, 0)
+            _COL_TIPS = {
+                "Ø mm":   "Barrel diameter where the V-groove grips the pen.\n"
+                          "Drives the automatic Y correction: a fatter barrel sits further\n"
+                          "out of the groove, so its tip lands off-centre by 0.577 x the\n"
+                          "diameter difference against the 'Zeroed with' pen.",
+                "Tip mm": "Nib width. Used for fill density and stroke weight in the\n"
+                          "sketches -- it does not move the pen.",
+                "Y trim": "Manual Y correction on top of the automatic V-groove maths,\n"
+                          "for when a pen still lands off after the diameter is right.\n"
+                          "Measure it with the Calibration sketch's vernier gauge.\n"
+                          "This is per PEN TYPE -- if identical pens in different holders\n"
+                          "disagree, that is the holder, so use the holder's own Y trim.",
+                "Z off":  "Tip length relative to the 'Zeroed with' pen. A longer pen\n"
+                          "needs Z to stop higher, or it presses into the paper.",
+            }
             for _c, _h in enumerate(["Ø mm", "Tip mm", "Y trim", "Z off"], start=1):
-                _hl = QLabel(_h); _hl.setAlignment(Qt.AlignmentFlag.AlignCenter); grid.addWidget(_hl, 0, _c)
+                _hl = QLabel(_h); _hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                _hl.setToolTip(_COL_TIPS.get(_h, ""))
+                grid.addWidget(_hl, 0, _c)
             self._pen_offset_edits = {}
             for _r, pt in enumerate(self._pen_types(), start=1):
                 grid.addWidget(QLabel(pt.capitalize()), _r, 0)
@@ -2247,6 +2285,9 @@ if has_display:
                 _eds = []
                 for _c in range(4):
                     _e = QLineEdit(str(_vals[_c])); _e.setFixedWidth(58)
+                    # Same explanation on the cell as on its column header, so it is
+                    # reachable without hunting for the header.
+                    _e.setToolTip(_COL_TIPS.get(["Ø mm", "Tip mm", "Y trim", "Z off"][_c], ""))
                     _e.editingFinished.connect(self._save_pen_offsets)
                     grid.addWidget(_e, _r, _c + 1); _eds.append(_e)
                 self._pen_offset_edits[pt] = _eds
@@ -2272,6 +2313,9 @@ if has_display:
             self._pen_outer.addWidget(info)
             arow = QHBoxLayout()
             self._new_pen_edit = QLineEdit(); self._new_pen_edit.setPlaceholderText("New pen type (e.g. posca)")
+            self._new_pen_edit.setToolTip(
+                "Add a pen brand/model so it can be assigned to a holder and given its\n"
+                "own diameter, nib width and Z offset.")
             self._new_pen_edit.returnPressed.connect(self._add_pen_type)
             arow.addWidget(self._new_pen_edit, 1)
             _addbtn = QPushButton("➕ Add"); _addbtn.clicked.connect(self._add_pen_type)
@@ -2485,6 +2529,7 @@ if has_display:
             svg_row = QHBoxLayout()
             svg_row.addWidget(QLabel("SVG:"))
             self.vpype_svg_edit = QLineEdit()
+            self.vpype_svg_edit.setToolTip("Source SVG to convert. Set by Browse, or by picking a job in the queue.")
             svg_row.addWidget(self.vpype_svg_edit, 1)
             b = QPushButton("Browse")
             b.clicked.connect(self.browse_vpype_svg)
@@ -2511,6 +2556,7 @@ if has_display:
             out_row = QHBoxLayout()
             out_row.addWidget(QLabel("Output:"))
             self.vpype_output_edit = QLineEdit()
+            self.vpype_output_edit.setToolTip("Where the generated G-code is written.")
             out_row.addWidget(self.vpype_output_edit, 1)
             bb = QPushButton("Browse")
             bb.clicked.connect(self.browse_vpype_output)
@@ -2520,12 +2566,24 @@ if has_display:
             opt_row = QHBoxLayout()
             self.vpype_splitall_cb    = QCheckBox("splitall"); self.vpype_splitall_cb.setToolTip("Break paths into individual segments before linemerge — use for Rhino/GH exports with disconnected segments.")
             self.vpype_linemerge_cb   = QCheckBox("linemerge");   self.vpype_linemerge_cb.setChecked(True)
+            self.vpype_linemerge_cb.setToolTip(
+                "Join paths whose endpoints nearly touch into one continuous stroke.\n"
+                "Fewer pen lifts, so faster plots and cleaner joins.")
             self.vpype_linemerge_tol_edit = QLineEdit("0.5"); self.vpype_linemerge_tol_edit.setFixedWidth(46)
             self.vpype_linemerge_tol_edit.setToolTip("linemerge tolerance (mm) — raise to join near-miss endpoints in Rhino/GH exports")
             self.vpype_linesort_cb    = QCheckBox("linesort");    self.vpype_linesort_cb.setChecked(True)
+            self.vpype_linesort_cb.setToolTip(
+                "Reorder paths so the pen travels less between strokes.\n"
+                "Does not change what is drawn, only the order it is drawn in.")
             self.vpype_twoopt_cb      = QCheckBox("two-opt"); self.vpype_twoopt_cb.setToolTip("Extra linesort optimization; slower, good for final plots.")
             self.vpype_reloop_cb      = QCheckBox("reloop")
+            self.vpype_reloop_cb.setToolTip(
+                "Randomise where each closed loop starts, so the small blot left at a\n"
+                "loop's start/end does not line up across the drawing.")
             self.vpype_toolchanges_cb = QCheckBox("tool changes"); self.vpype_toolchanges_cb.setChecked(True)
+            self.vpype_toolchanges_cb.setToolTip(
+                "Split the SVG by colour and emit pick-up/drop moves so one file plots\n"
+                "in several pens. Off: everything plots in whatever pen is loaded.")
             for cb in [self.vpype_splitall_cb, self.vpype_linemerge_cb]:
                 opt_row.addWidget(cb)
             opt_row.addWidget(self.vpype_linemerge_tol_edit)
@@ -2537,6 +2595,9 @@ if has_display:
 
             simp_row = QHBoxLayout()
             self.vpype_linesimplify_cb = QCheckBox("linesimplify"); self.vpype_linesimplify_cb.setChecked(True)
+            self.vpype_linesimplify_cb.setToolTip(
+                "Drop points that sit within the tolerance of the line they are on.\n"
+                "Smaller files and smoother motion; too high and curves go faceted.")
             simp_row.addWidget(self.vpype_linesimplify_cb)
             simp_row.addWidget(QLabel("tol (mm):"))
             self.vpype_simplify_tol_edit = QLineEdit("0.1")
@@ -4211,6 +4272,7 @@ if has_display:
             rapid    = self.config.tc_rapid
             approach = self.config.tc_approach
             ay = tool.y + self.config.tc_unplug_mm
+            shear = float(getattr(self.config, 'tc_shear_mm', 0.0) or 0.0)
             lines = [
                 f"; === DROP: {tool.name} ===",
                 f"G53 G1 Z{tool.safe_z:.3f} F{rapid}",   # raise Z with pen (fast)
@@ -4218,8 +4280,17 @@ if has_display:
                 f"G53 G1 X{tool.x:.3f} F{rapid}",         # X to dock column (fast)
                 f"G53 G1 Y{tool.y:.3f} F{rapid}",         # Y to dock while up (fast)
                 f"G53 G1 Z{tool.z:.3f} F{approach}",      # Z down to seat pen (slow)
-                f"G53 G1 Y{ay:.3f} F{rapid}",             # Y retract to unplug — undock carriage (fast)
             ]
+            if abs(shear) > 1e-4:
+                # Break the magnet joint in SHEAR before retracting. Pulling
+                # straight out in Y loads the magnet along its strongest axis and
+                # in the exact direction that extracts it from its press fit. A
+                # lateral slide separates at a fraction of that force and reacts
+                # against the pocket wall instead. The holder is captive in the
+                # dock, so it is the carriage that slides off it. Slow feed on
+                # purpose: a controlled peel, not an impulse.
+                lines.append(f"G53 G1 X{tool.x + shear:.3f} F{approach}")
+            lines.append(f"G53 G1 Y{ay:.3f} F{rapid}")    # Y retract to unplug — undock carriage (fast)
             if not chain_next:
                 # Last drop before end: raise Z so final park move is safe
                 lines.append(f"G53 G1 Z{tool.safe_z:.3f} F{rapid}")
