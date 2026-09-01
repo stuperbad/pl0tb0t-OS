@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.226"
+__version__ = "0.5.227"
 import os
 import sys
 import time
@@ -4894,7 +4894,21 @@ if has_display:
                     ingested = 0
                     for cj in cloud_jobs:
                         cid = cj.get("id")
-                        if not cid or cid in existing:
+                        if not cid:
+                            continue
+                        if cid in existing:
+                            # Already ingested, but the cloud still lists it as
+                            # queued -- so the status PATCH failed on an earlier
+                            # pass. Skipping outright (what this used to do) left
+                            # it queued forever, which reads as an unfulfilled
+                            # order that has in fact already been collected.
+                            # Retry just the status update.
+                            try:
+                                self._queue_http(f"/jobs/{cid}/status", "PATCH",
+                                                 {"status": "plotting"},
+                                                 base_url=cloud_url, key=cloud_key)
+                            except Exception:
+                                pass
                             continue
                         try:
                             svg = self._queue_fetch_text(
