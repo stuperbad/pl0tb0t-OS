@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.227"
+__version__ = "0.5.228"
 import os
 import sys
 import time
@@ -33,6 +33,12 @@ def _debug_log(msg: str):
             f.write(f"[{ts}] {msg}\n")
     except Exception:
         pass
+
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pl0tb0t_probe as _probe
+except Exception:
+    _probe = None
 
 try:
     import serial
@@ -152,6 +158,35 @@ class OSConfig:
     sig_logo_scale: float = 1.0    # logo size multiplier (relative to text height)
     sig_sep_scale: float = 1.3     # | separator height multiplier relative to text
     sig_sep_pad: float = 1.3       # horizontal gap on each side of | (in text-height ems)
+    # ── Live pen offsets + pen-tip probe (see pl0tb0t_probe.py) ──────────
+    # live_offsets: generate NEUTRAL G-code and let the daemon add each pen's
+    # offset while streaming (from the probe, or predicted from the pen-type
+    # table). Off = the old baked-in behaviour, byte-identical output.
+    live_offsets: bool = False
+    probe_enabled: bool = False
+    probe_x: float = 0.0
+    probe_y: float = 0.0
+    probe_travel_z: float = -5.0
+    probe_travel_feed: int = 800
+    probe_z_search: float = 30.0
+    probe_z_clear: float = 4.0
+    probe_xy_clear: float = 4.0
+    probe_xy_depth: float = 1.0
+    probe_xy_lift: float = 2.0
+    probe_search_step: float = 0.8
+    probe_search_rings: int = 2
+    probe_retract: float = 1.0
+    probe_fast_feed: int = 150
+    probe_slow_feed: int = 30
+    probe_samples: int = 2
+    probe_tol: float = 0.03
+    probe_max_corr_xy: float = 5.0
+    probe_max_corr_z: float = 40.0
+    probe_on_fail: str = "stop"
+    probe_ref: Optional[list] = None
+    probe_ref_type: str = ""
+    probe_z_trim: dict = field(default_factory=dict)
+    probe_last: dict = field(default_factory=dict)   # {holder name: last result}
 
 
 def _load_json(path: str, default: dict) -> dict:
@@ -205,7 +240,34 @@ def load_config(path: str = CONFIG_PATH) -> OSConfig:
         sig_logo_scale=float(data.get("sig_logo_scale", 1.0)),
         sig_sep_scale=float(data.get("sig_sep_scale", 1.3)),
         sig_sep_pad=float(data.get("sig_sep_pad", 1.3)),
+        **_load_probe_fields(data),
     )
+
+
+def _load_probe_fields(data: dict) -> dict:
+    """live_offsets + probe_* keys, typed from the dataclass defaults."""
+    out = {"live_offsets": bool(data.get("live_offsets", False))}
+    defaults = OSConfig.__dataclass_fields__
+    for name, f in defaults.items():
+        if not name.startswith("probe_") or name not in data:
+            continue
+        val = data[name]
+        try:
+            if name in ("probe_ref",):
+                out[name] = [float(v) for v in val][:3] if val else None
+            elif name in ("probe_z_trim", "probe_last"):
+                out[name] = dict(val or {})
+            elif f.type in (bool, "bool"):
+                out[name] = bool(val)
+            elif f.type in (int, "int"):
+                out[name] = int(float(val))
+            elif f.type in (float, "float"):
+                out[name] = float(val)
+            else:
+                out[name] = val
+        except (TypeError, ValueError):
+            pass
+    return out
 
 
 def save_config(config: OSConfig, path: str = CONFIG_PATH) -> None:
@@ -408,6 +470,7 @@ class DaemonClient:
         self.on_gcode_done  = None  # () → None
         self.on_gcode_error = None  # (line_num, line, msg) → None
         self.on_grbl_line   = None  # (sent, response) → None
+        self.on_probe       = None  # (event dict) → None
         self.on_daemon_gone = None  # () → None
 
     # ── Connect / disconnect to daemon socket ─────────────────────────────
@@ -486,6 +549,10 @@ class DaemonClient:
                 try: self.on_gcode_error(
                     data.get("line_num", 0), data.get("line", ""), data.get("message", ""))
                 except: pass
+        elif ev == "probe":
+            if self.on_probe:
+                try: self.on_probe(data)
+                except: pass
         elif ev == "grbl_line":
             if self.on_grbl_line:
                 try: self.on_grbl_line(data.get("sent", ""), data.get("response", ""))
@@ -521,7 +588,13 @@ class DaemonClient:
         return self.cmd({"cmd": "send", "line": line, "wait": wait}, timeout=30.0)
     def realtime(self, byte_val: int):       self.cmd({"cmd": "realtime", "byte": byte_val}, timeout=2.0)
     def home(self)                  -> dict: return self.cmd({"cmd": "home"}, timeout=120.0)
-    def stream(self, path: str, est_s: float = 0) -> dict: return self.cmd({"cmd": "stream", "path": path, "est_s": est_s}, timeout=5.0)
+    def stream(self, path: str, est_s: float = 0, probe=None) -> dict:
+        return self.cmd({"cmd": "stream", "path": path, "est_s": est_s, "probe": probe}, timeout=5.0)
+    def probe(self, cfg: dict, pred=(0.0, 0.0, 0.0), pen_type: str = "", go_back: bool = False,
+              tag=None) -> dict:
+        """Starts a probe in the daemon; the result arrives as a probe event."""
+        return self.cmd({"cmd": "probe", "cfg": cfg, "pred": list(pred), "type": pen_type,
+                         "return": go_back, "tag": tag or {}}, timeout=5.0)
     def pause(self)                 -> dict: return self.cmd({"cmd": "pause"})
     def resume(self)                -> dict: return self.cmd({"cmd": "resume"})
     def stop(self)                  -> dict: return self.cmd({"cmd": "stop"})
@@ -659,6 +732,7 @@ if has_display:
         gcode_status   = pyqtSignal(str)
         gcode_highlight = pyqtSignal(int)
         grbl_log       = pyqtSignal(str)
+        probe_ui       = pyqtSignal(object)  # dict from the daemon / probe buttons -> Pen Probe panel
         queue_jobs_ready = pyqtSignal(list)
         queue_pen_assign = pyqtSignal(object)  # carries ctx dict from _queue_plot_selected
         confirm_and_run_gcode = pyqtSignal(str, str, object, str, str)  # job_id, gcode_path, paper_mm, base_url, key -- marshals the single-pass plot path's g-code-ready confirm dialog onto the main thread
@@ -1087,6 +1161,7 @@ if has_display:
             self._daemon.on_gcode_done  = self._on_daemon_gcode_done
             self._daemon.on_gcode_error = self._on_daemon_gcode_error
             self._daemon.on_grbl_line   = self._on_daemon_grbl_line
+            self._daemon.on_probe       = self._on_daemon_probe
             self._daemon.on_daemon_gone = self._on_daemon_gone
             self._daemon_proc   = None   # subprocess handle
             self._daemon_status_label = None  # set in _build_connection_panel
@@ -1110,6 +1185,7 @@ if has_display:
             self.signals.gcode_status.connect(lambda s: self.gcode_status_label.setText(s))
             self.signals.gcode_highlight.connect(self._highlight_gcode_line_at)
             self.signals.grbl_log.connect(self._append_grbl_log)
+            self.signals.probe_ui.connect(self._probe_ui_event)
             self.signals.queue_jobs_ready.connect(self._queue_apply_jobs)
             self.signals.queue_pen_assign.connect(self._queue_on_pen_assign)
             self.signals.confirm_and_run_gcode.connect(self._on_confirm_and_run_gcode)
@@ -1364,6 +1440,7 @@ if has_display:
             ])
             middle_col = self._panel_column([
                 ("Pen Type Offsets",   self._scrolled(self._build_pen_offsets_panel()), False, 0),
+                ("Pen Probe",          self._scrolled(self._build_probe_panel()),       True,  0),
                 ("Pen Holder Management",  self._scrolled(self._build_tool_panel()),    False, 2),
                 ("Test Pen Generator", self._scrolled(self._build_testpen_panel()), True,  1),
                 # "Signature Settings" panel removed -- signature is now owned by the
@@ -2128,6 +2205,36 @@ if has_display:
                 dy += float(getattr(tool, 'trim_y', 0.0) or 0.0)
             return (dx, dy)
 
+        # ── Live offsets: neutral G-code + per-layer directives ─────────────
+        def _live_offsets_on(self):
+            return bool(getattr(self.config, "live_offsets", False)) and _probe is not None
+
+        def _baked_offsets(self, ept, tool):
+            """(z_offset, (dx, dy)) to bake into a layer. Zero in live mode --
+            the daemon applies them while streaming instead."""
+            if self._live_offsets_on():
+                return 0.0, (0.0, 0.0)
+            return self._pen_tip_delta(ept)[2], self._plot_xy_offset(ept, tool)
+
+        def _live_pen_lines(self, tool, ept):
+            """Directive right after a pickup: which pen, and the offsets we
+            would have baked (the prediction the probe aims with / falls back to)."""
+            if not self._live_offsets_on():
+                return []
+            dx, dy = self._plot_xy_offset(ept, tool)
+            dz = self._pen_tip_delta(ept)[2]
+            return [_probe.directive_comment({
+                "op": "pen", "tool": getattr(tool, "name", "?"), "type": ept or "",
+                "pred": [round(dx, 4), round(dy, 4), round(dz, 4)]})]
+
+        def _live_clear_lines(self):
+            if not self._live_offsets_on():
+                return []
+            return [_probe.directive_comment({"op": "clear"})]
+
+        def _probe_cfg(self):
+            return _probe.probe_cfg_from(self.config) if _probe is not None else {}
+
         _ORDINALS = ("2nd", "3rd", "4th", "5th", "6th", "7th", "8th")
 
         def _holder_side_label(self, tool):
@@ -2324,6 +2431,312 @@ if has_display:
             self._pen_dyn = None
             self._rebuild_pen_dyn()
             return w
+
+        # ======================================================================
+        # Pen Probe panel (fixed touch probe in the utility lane)
+        # ======================================================================
+
+        def _build_probe_panel(self):
+            w = QWidget()
+            lay = QVBoxLayout(w)
+            lay.setContentsMargins(8, 8, 8, 8)
+            lay.setSpacing(6)
+            cfg = self.config
+
+            info = QLabel(
+                "A fixed 3-axis touch probe (stylus pointing up) in the utility lane. "
+                "At every pen pickup the carriage touches the pen tip on it from above and "
+                "from both sides in X and Y, and the plot is shifted by (this pen − reference pen). "
+                "Wiring: NC probe → GRBL probe pin, power from 5 V, then send $6=1.")
+            info.setWordWrap(True)
+            info.setStyleSheet("color:#667085;font-size:11px;")
+            lay.addWidget(info)
+            if _probe is None:
+                warn = QLabel("pl0tb0t_probe.py not found next to pl0tb0t_OS.py — probing unavailable.")
+                warn.setStyleSheet("color:#b42318;")
+                lay.addWidget(warn)
+                return w
+
+            def _check(label, attr, tip):
+                cb = QCheckBox(label)
+                cb.setChecked(bool(getattr(cfg, attr)))
+                cb.setToolTip(tip)
+                def _t(v, a=attr):
+                    setattr(self.config, a, bool(v))
+                    save_config(self.config)
+                    self._probe_refresh_summary()
+                cb.toggled.connect(_t)
+                lay.addWidget(cb)
+                return cb
+
+            self._probe_live_cb = _check(
+                "Live pen offsets (neutral G-code)", "live_offsets",
+                "Generate G-code WITHOUT per-pen offsets baked in, and have the daemon add\n"
+                "each pen's offset while streaming. The file then works with any pens.\n"
+                "With the probe off, the offsets come from the Pen Type Offsets table (same\n"
+                "numbers that used to be baked in) -- so you can turn this on today, before\n"
+                "the probe exists, and plots should come out identical.\n"
+                "Old G-code (no ;@PL0T lines) always streams exactly as before.\n"
+                "Takes effect for G-code generated after you tick it.")
+            self._probe_en_cb = _check(
+                "Probe every pen at pickup", "probe_enabled",
+                "Needs 'Live pen offsets' G-code and a reference (below).\n"
+                "Each pickup adds ~20-40 s.")
+
+            self._probe_pin_lbl = QLabel("Probe input: (no status yet)")
+            lay.addWidget(self._probe_pin_lbl)
+            self._probe_sum_lbl = QLabel("")
+            self._probe_sum_lbl.setWordWrap(True)
+            lay.addWidget(self._probe_sum_lbl)
+
+            trow = QHBoxLayout()
+            trow.addWidget(QLabel("Loaded pen type:"))
+            self._probe_type_combo = QComboBox()
+            for pt in self._pen_types():
+                self._probe_type_combo.addItem(pt)
+            zt = getattr(cfg, "zero_pen_type", "")
+            i = self._probe_type_combo.findText(zt)
+            if i >= 0:
+                self._probe_type_combo.setCurrentIndex(i)
+            self._probe_type_combo.setToolTip(
+                "Which pen is in the carriage right now, for the buttons below.\n"
+                "Used to aim (predicted offset) and for its Z trim.")
+            trow.addWidget(self._probe_type_combo, 1)
+            lay.addLayout(trow)
+
+            brow = QHBoxLayout()
+            b_teach = QPushButton("Teach XY here")
+            b_teach.setToolTip(
+                "Jog so the loaded REFERENCE pen's tip sits roughly over the stylus\n"
+                "(within ~1 mm), then press. Stores the carriage's machine X/Y.\n"
+                "Only used until a reference is measured.")
+            b_teach.clicked.connect(self._probe_teach_xy)
+            brow.addWidget(b_teach)
+            b_ref = QPushButton("Set reference")
+            b_ref.setToolTip(
+                "Probe the loaded pen and store it as the reference. Load your 'Zeroed with'\n"
+                "pen -- the one Work Zero / Contact Z were set with -- so a correction of\n"
+                "zero means 'draws where it always did'. Redo this if the probe is moved.")
+            b_ref.clicked.connect(lambda: self._probe_run(set_ref=True))
+            brow.addWidget(b_ref)
+            b_test = QPushButton("Probe loaded pen")
+            b_test.setToolTip("Measure the loaded pen and show its correction. Changes nothing.")
+            b_test.clicked.connect(lambda: self._probe_run(set_ref=False))
+            brow.addWidget(b_test)
+            lay.addLayout(brow)
+
+            self._probe_result_lbl = QLabel("")
+            self._probe_result_lbl.setWordWrap(True)
+            self._probe_result_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            lay.addWidget(self._probe_result_lbl)
+
+            sec = QLabel("Motion (machine coordinates, mm, mm/min)")
+            sec.setStyleSheet("font-weight: bold; color: #444;")
+            lay.addWidget(sec)
+            grid = QGridLayout()
+            fields = [
+                ("probe_travel_z",   "Travel Z",        "Machine Z that clears the stylus with the LONGEST pen loaded."),
+                ("probe_travel_feed","Travel feed",     "Positioning moves to/around the probe."),
+                ("probe_z_search",   "Z search",        "How far to plunge looking for the stylus when there is no reference yet."),
+                ("probe_z_clear",    "Z clearance",     "With a reference: start this far above the predicted contact, search twice this far."),
+                ("probe_xy_clear",   "XY clearance",    "Side probes start this far from the stylus centre. Must exceed ball radius + tip radius."),
+                ("probe_xy_depth",   "XY depth",        "Drop this far below the Z contact before touching the sides (≈ ball radius; 1.0 for a 2 mm ball)."),
+                ("probe_xy_lift",    "XY hop",          "Lift this far above the Z contact to step over the stylus."),
+                ("probe_retract",    "Retract",         "Back-off before each slow touch."),
+                ("probe_fast_feed",  "Fast feed",       "Search touch. Keep it low -- the stylus only has ~2 mm of Z overtravel."),
+                ("probe_slow_feed",  "Slow feed",       "Measuring touches."),
+                ("probe_samples",    "Samples",         "Slow touches per surface (averaged)."),
+                ("probe_tol",        "Tolerance",       "Max spread between slow touches before the probe is called a failure."),
+                ("probe_search_step","Miss grid step",  "If the first plunge misses the crown, walk a grid with this pitch..."),
+                ("probe_search_rings","Miss grid rings","...this many rings out (2 = 5×5)."),
+                ("probe_max_corr_xy","Max XY corr",     "Reject a measured XY correction bigger than this (wrong pen / stylus knocked)."),
+                ("probe_max_corr_z", "Max Z corr",      "Reject a measured Z correction bigger than this."),
+            ]
+            for k, (attr, label, tip) in enumerate(fields):
+                lbl = QLabel(label)
+                lbl.setToolTip(tip)
+                ed = QLineEdit(f"{getattr(cfg, attr)}")
+                ed.setToolTip(tip)
+                ed.setFixedWidth(70)
+                def _save(e=ed, a=attr):
+                    try:
+                        cur = getattr(self.config, a)
+                        v = float(e.text())
+                        setattr(self.config, a, int(v) if isinstance(cur, int) and not isinstance(cur, bool) else v)
+                        save_config(self.config)
+                    except ValueError:
+                        e.setText(f"{getattr(self.config, a)}")
+                ed.editingFinished.connect(_save)
+                r, c = divmod(k, 2)
+                grid.addWidget(lbl, r, c * 2)
+                grid.addWidget(ed, r, c * 2 + 1)
+            lay.addLayout(grid)
+
+            frow = QHBoxLayout()
+            frow.addWidget(QLabel("If a probe fails mid-plot:"))
+            self._probe_fail_combo = QComboBox()
+            self._probe_fail_combo.addItem("Stop the plot", "stop")
+            self._probe_fail_combo.addItem("Warn, use predicted offsets", "predicted")
+            self._probe_fail_combo.setCurrentIndex(0 if cfg.probe_on_fail != "predicted" else 1)
+            def _fail(_i):
+                self.config.probe_on_fail = self._probe_fail_combo.currentData()
+                save_config(self.config)
+            self._probe_fail_combo.currentIndexChanged.connect(_fail)
+            frow.addWidget(self._probe_fail_combo, 1)
+            lay.addLayout(frow)
+
+            sec2 = QLabel("Z trim per pen type (added after probing, mm)")
+            sec2.setStyleSheet("font-weight: bold; color: #444;")
+            sec2.setToolTip("The probe pushes with ~2.7 N; soft tips squash a little. Tune each type here\n"
+                            "after a test plot: + raises that pen, − lowers it.")
+            lay.addWidget(sec2)
+            tgrid = QGridLayout()
+            for k, pt in enumerate(self._pen_types()):
+                ed = QLineEdit(f"{float((cfg.probe_z_trim or {}).get(pt, 0.0)):g}")
+                ed.setFixedWidth(60)
+                def _save_trim(e=ed, t=pt):
+                    try:
+                        v = float(e.text())
+                    except ValueError:
+                        return
+                    d = dict(self.config.probe_z_trim or {})
+                    if abs(v) < 1e-9:
+                        d.pop(t, None)
+                    else:
+                        d[t] = v
+                    self.config.probe_z_trim = d
+                    save_config(self.config)
+                ed.editingFinished.connect(_save_trim)
+                r, c = divmod(k, 3)
+                tgrid.addWidget(QLabel(pt), r, c * 2)
+                tgrid.addWidget(ed, r, c * 2 + 1)
+            lay.addLayout(tgrid)
+
+            lay.addStretch()
+            self._probe_refresh_summary()
+            return w
+
+        def _probe_refresh_summary(self):
+            lbl = getattr(self, "_probe_sum_lbl", None)
+            if lbl is None:
+                return
+            c = self.config
+            ref = c.probe_ref
+            if ref:
+                rs = (f"Reference ({c.probe_ref_type or '?'}): X{ref[0]:.3f} Y{ref[1]:.3f} Z{ref[2]:.3f}")
+            else:
+                rs = f"No reference yet. Taught XY: X{c.probe_x:.3f} Y{c.probe_y:.3f}"
+            mode = ("offsets from PROBE" if (c.live_offsets and c.probe_enabled and ref) else
+                    "probe ON but NO REFERENCE -- plots will stop at the first pen" if (c.live_offsets and c.probe_enabled) else
+                    "offsets PREDICTED from pen table" if c.live_offsets else
+                    "offsets baked into G-code (classic)")
+            lbl.setText(f"{rs}\nLive mode: {mode}")
+
+        def _probe_teach_xy(self):
+            mp = getattr(self, "machine_pos", None) or {}
+            if not self._daemon.machine_connected:
+                QMessageBox.warning(self, "Probe", "Connect to the machine first.")
+                return
+            self.config.probe_x = float(mp.get("x", 0.0))
+            self.config.probe_y = float(mp.get("y", 0.0))
+            save_config(self.config)
+            self._probe_refresh_summary()
+            self.signals.grbl_log.emit(f"probe: taught X{self.config.probe_x:.3f} Y{self.config.probe_y:.3f}")
+
+        def _probe_run(self, set_ref: bool):
+            if not self._daemon.machine_connected:
+                QMessageBox.warning(self, "Probe", "Connect to the machine first.")
+                return
+            if getattr(self, "gcode_running", False):
+                QMessageBox.warning(self, "Probe", "A plot is running.")
+                return
+            ptype = self._probe_type_combo.currentText()
+            cfg = self._probe_cfg()
+            if set_ref:
+                zt = getattr(self.config, "zero_pen_type", "")
+                if ptype != zt and QMessageBox.question(
+                        self, "Set reference",
+                        f"The reference is normally the '{zt}' pen (the one Work Zero / Contact Z "
+                        f"were set with).\nUse the loaded '{ptype}' anyway?") != QMessageBox.StandardButton.Yes:
+                    return
+                cfg["ref"] = None     # aim with the taught XY, full Z search
+                pred = (0.0, 0.0, 0.0)
+            else:
+                dx, dy = self._pen_xy_delta(ptype)
+                pred = (dx, dy, self._pen_tip_delta(ptype)[2])
+            self._probe_result_lbl.setText("Probing… (the carriage will move)")
+
+            r = self._daemon.probe(cfg, pred=pred, pen_type=ptype, go_back=False,
+                                   tag={"set_ref": bool(set_ref), "type": ptype})
+            if not r.get("ok"):
+                self._probe_result_lbl.setText(f"Probe failed to start: {r.get('error', '?')}")
+
+        def _on_daemon_probe(self, data: dict):
+            self.signals.probe_ui.emit(data)
+
+        def _probe_ui_event(self, d: dict):
+            """Main thread. Daemon probe events, manual results and pin changes."""
+            kind = d.get("kind")
+            res = getattr(self, "_probe_result_lbl", None)
+            if kind == "pins":
+                lbl = getattr(self, "_probe_pin_lbl", None)
+                if lbl is not None:
+                    trig = "P" in (d.get("pins") or "")
+                    lbl.setText("Probe input: TRIGGERED" if trig else "Probe input: open")
+                    lbl.setStyleSheet("color:#b42318;font-weight:bold;" if trig else "color:#067647;")
+                return
+            if kind == "manual":
+                _tag = d.get("tag") or {}
+                d = dict(d, _set_ref=bool(_tag.get("set_ref")), _type=_tag.get("type", ""))
+                if not d.get("ok"):
+                    msg = f"Probe failed: {d.get('error', '?')}"
+                    if res is not None: res.setText(msg)
+                    self.signals.grbl_log.emit(msg)
+                    return
+                m = d.get("measured") or [0, 0, 0]
+                info = d.get("info") or {}
+                txt = (f"{d.get('_type')}: X{m[0]:.3f} Y{m[1]:.3f} Z{m[2]:.3f}  "
+                       f"(contact widths X {info.get('width_x', 0):.2f} / Y {info.get('width_y', 0):.2f})")
+                if d.get("_set_ref"):
+                    self.config.probe_ref = [float(v) for v in m[:3]]
+                    self.config.probe_ref_type = d.get("_type") or ""
+                    save_config(self.config)
+                    txt = "Reference set.  " + txt
+                    self._probe_refresh_summary()
+                elif "correction" in d:
+                    c = d["correction"]
+                    txt += f"\nCorrection vs reference: X{c[0]:+.3f} Y{c[1]:+.3f} Z{c[2]:+.3f}"
+                elif "correction_error" in d:
+                    txt += f"\n{d['correction_error']}"
+                if res is not None: res.setText(txt)
+                self.signals.grbl_log.emit("probe: " + txt.replace("\n", "  "))
+                return
+            if kind == "log":
+                self.signals.grbl_log.emit(d.get("message", ""))
+                return
+            if kind == "start":
+                self.signals.update_banner.emit(f"● Probing pen: {d.get('tool', '')}")
+                return
+            if kind in ("result", "offset", "warn"):
+                tool = d.get("tool", "?")
+                if kind == "warn":
+                    self.signals.grbl_log.emit("⚠ " + d.get("message", ""))
+                    self.signals.update_banner.emit("⚠ " + d.get("message", ""))
+                    return
+                if kind == "result":
+                    last = dict(self.config.probe_last or {})
+                    last[tool] = {"type": d.get("type", ""), "measured": d.get("measured"),
+                                  "correction": d.get("correction"), "predicted": d.get("predicted"),
+                                  "t": time.strftime("%Y-%m-%d %H:%M")}
+                    self.config.probe_last = last
+                    save_config(self.config)
+                    self.signals.update_banner.emit("")
+                    return
+                o = d.get("offset") or [0, 0, 0]
+                line = f"{tool} ({d.get('type', '')}): offset X{o[0]:+.3f} Y{o[1]:+.3f} Z{o[2]:+.3f} [{d.get('source', '')}]"
+                self.signals.grbl_log.emit(line)
+                if res is not None:
+                    res.setText(line)
 
         def _build_tool_panel(self):
             splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2830,6 +3243,10 @@ if has_display:
             # Keep self.port in sync — this is how the UI learns the daemon (re)connected
             self.port = True if data.get("connected") else None
             self.signals.update_status.emit(state)
+            _pins = data.get("pins", "") or ""
+            if _pins != getattr(self, "_last_pins", None):
+                self._last_pins = _pins
+                self.signals.probe_ui.emit({"kind": "pins", "pins": _pins})
             self.signals.update_dro.emit(self.machine_pos, self.work_pos)
             self.signals.daemon_indicator.emit()
 
@@ -4617,15 +5034,16 @@ if has_display:
                         tmp_gcode = os.path.join(tmp_dir, f"layer_{orig_i}.gcode")
                         err_out.clear()
                         _ept = self._effective_pen_type(color, tool)
-                        self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
+                        self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._baked_offsets(_ept, tool)[0])
                         if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                    tmp_gcode, silent=True, _err_out=err_out,
-                                                   xy_offset=self._plot_xy_offset(_ept, tool)):
+                                                   xy_offset=self._baked_offsets(_ept, tool)[1]):
                             msg = err_out[0] if err_out else "vpype failed"
                             result[0] = ("err", f"vpype failed for layer {label}: {msg}")
                             return
                         is_last = (j == n_layers - 1)
                         final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
+                        final_lines.extend(self._live_pen_lines(tool, _ept))
                         first_xy = self._first_draw_xy(tmp_gcode)
                         if first_xy:
                             final_lines.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
@@ -4638,6 +5056,7 @@ if has_display:
                                 ln = ln.strip()
                                 if ln:
                                     final_lines.append(ln)
+                        final_lines.extend(self._live_clear_lines())
                         final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
                     final_lines += [
                         "; === END ===",
@@ -5789,15 +6208,16 @@ if has_display:
                             l_gcode = str(gen_tmp / f"layer_{orig_i}.gcode")
                             err_out.clear()
                             _ept = self._effective_pen_type(color, tool)
-                            self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._pen_tip_delta(_ept)[2])
+                            self._write_layer_vpype_config(layer_cfg, safe_z=safe_z, z_offset=self._baked_offsets(_ept, tool)[0])
                             if not self._run_vpype_cmd(pre_svg, layer_cfg, "pl0tb0t_layer",
                                                        l_gcode, silent=True, _err_out=err_out,
-                                                       xy_offset=self._plot_xy_offset(_ept, tool)):
+                                                       xy_offset=self._baked_offsets(_ept, tool)[1]):
                                 msg = err_out[0] if err_out else "vpype failed"
                                 result[0] = ("err", f"vpype failed for {label}: {msg}")
                                 return
                             is_last = (j == n_layers - 1)
                             final_lines.extend(self._tool_pickup_gcode(tool, from_drop=(j > 0)))
+                            final_lines.extend(self._live_pen_lines(tool, _ept))
                             first_xy = self._first_draw_xy(l_gcode)
                             if first_xy:
                                 final_lines.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
@@ -5810,6 +6230,7 @@ if has_display:
                                     ln = ln.strip()
                                     if ln:
                                         final_lines.append(ln)
+                            final_lines.extend(self._live_clear_lines())
                             final_lines.extend(self._tool_drop_gcode(tool, chain_next=not is_last))
                         final_lines += [
                             "; === END ===",
@@ -5904,14 +6325,15 @@ if has_display:
                 try:
                     import subprocess as _sp
                     layer_cfg = tmp / "layer.cfg"
-                    _z0 = self._pen_tip_delta(getattr(self.tools[0], 'pen_type', 'custom'))[2] if self.tools else 0.0
+                    _ept0 = getattr(self.tools[0], 'pen_type', 'custom') if self.tools else 'custom'
+                    _z0 = (self._baked_offsets(_ept0, self.tools[0])[0] if self.tools else 0.0)
                     self._write_layer_vpype_config(str(layer_cfg), z_offset=_z0)
                     vpype_exe = str(pathlib.Path.home() / ".local/bin/vpype")
                     try:
                         simplify_tol = float(self.vpype_simplify_tol_edit.text())
                     except (ValueError, AttributeError):
                         simplify_tol = 0.1
-                    _xy = (self._plot_xy_offset(getattr(self.tools[0], 'pen_type', 'custom'), self.tools[0])
+                    _xy = (self._baked_offsets(_ept0, self.tools[0])[1]
                            if self.tools else (0.0, 0.0))
                     _err_out = []
                     if not self._run_vpype_cmd(str(svg_path), str(layer_cfg), "pl0tb0t_layer", str(gcode_path),
@@ -5928,12 +6350,14 @@ if has_display:
                             f"G1 F{self.config.draw_speed}",
                         ]
                         wrapped.extend(self._tool_pickup_gcode(tool, from_drop=False))
+                        wrapped.extend(self._live_pen_lines(tool, _ept0))
                         _fxy = self._first_draw_xy(str(gcode_path))
                         if _fxy:
                             wrapped.append("; traverse X in the safe-Y lane first, then drop Y into the drawing")
                             wrapped.append(f"G0 X{_fxy[0]:.4f}")
                             wrapped.append(f"G0 Y{_fxy[1]:.4f}")
                         wrapped.extend(body)
+                        wrapped.extend(self._live_clear_lines())
                         wrapped.extend(self._tool_drop_gcode(tool, chain_next=False))
                         wrapped += [
                             "; === END ===",
@@ -6443,7 +6867,24 @@ if has_display:
                     import tempfile
                     with open(self.gcode_path, "r", encoding="utf-8", errors="ignore") as f_in:
                         raw_lines = f_in.readlines()
-                    cleaned = [c for c in (self._clean_gcode_line(r) for r in raw_lines) if c]
+                    # Live-offset directives (;@PL0T {...}) are comments to every
+                    # other tool, so they don't count as lines -- the viewer, resume
+                    # numbers and progress all stay exactly as before. Keep them
+                    # attached to the executable line they precede.
+                    cleaned, _dirs_before, _pending = [], {}, []
+                    for r in raw_lines:
+                        _d = _probe.comment_to_directive(r) if _probe is not None else None
+                        if _d:
+                            _pending.append(_d)
+                            continue
+                        c = self._clean_gcode_line(r)
+                        if c:
+                            if _pending:
+                                _dirs_before[len(cleaned)] = _pending
+                                _pending = []
+                            cleaned.append(c)
+                    _dirs_tail = _pending
+                    _has_dirs = bool(_dirs_before or _dirs_tail)
                     # "Line N" here matches the G-code Text Viewer's numbering (cleaned,
                     # non-blank/non-comment lines only, 1-indexed) -- same convention the
                     # existing Send Selected/Next Line debug tool already uses.
@@ -6455,6 +6896,20 @@ if has_display:
                     with tempfile.NamedTemporaryFile(
                             mode="w", suffix=".gcode", delete=False, encoding="utf-8") as f_tmp:
                         self._gcode_tmp_path = f_tmp.name
+                        if _has_dirs and resume_active and start_idx > 0:
+                            # Resuming mid-layer: re-issue that layer's pen directive
+                            # first, so the pen is re-probed (it may have been
+                            # re-seated after whatever stopped the plot) and the
+                            # preamble moves below get the right offset.
+                            _last = None
+                            for _k in sorted(_dirs_before):
+                                if _k > start_idx:
+                                    break
+                                for _d in _dirs_before[_k]:
+                                    _op = (_probe.parse_directive(_d) or {}).get("op")
+                                    _last = _d if _op == "pen" else (None if _op == "clear" else _last)
+                            if _last:
+                                f_tmp.write(_last + "\n")
                         if resume_active and start_idx > 0:
                             # Rebuild modal state AND physically re-establish the pen:
                             # lift, rapid to the resume position, drop to the draw Z.
@@ -6462,11 +6917,23 @@ if has_display:
                             # air and slashed a line from home. See _resume_preamble.)
                             for _pl in self._resume_preamble(cleaned, start_idx):
                                 f_tmp.write(_pl + "\n")
-                        for line in cleaned[start_idx:]:
-                            line = self._apply_feed_override(line)
+                        for _i in range(start_idx, len(cleaned)):
+                            # a resume point's own directives were handled above
+                            if _i != start_idx or not (resume_active and start_idx > 0):
+                                for _d in _dirs_before.get(_i, ()):
+                                    f_tmp.write(_d + "\n")
+                            line = self._apply_feed_override(cleaned[_i])
                             f_tmp.write(line + "\n")
+                        for _d in _dirs_tail:
+                            f_tmp.write(_d + "\n")
+                    _probe_arg = None
+                    if _has_dirs:
+                        _probe_arg = self._probe_cfg()
+                        _src = "probe" if _probe_arg.get("enabled") else "predicted"
+                        self.signals.grbl_log.emit(f"live pen offsets: {_src}")
                     _debug_log(f"runner: streaming {self._gcode_tmp_path}")
-                    result = self._daemon.stream(self._gcode_tmp_path, est_s=getattr(self, "_gcode_est_s", 0))
+                    result = self._daemon.stream(self._gcode_tmp_path, est_s=getattr(self, "_gcode_est_s", 0),
+                                                 probe=_probe_arg)
                     _debug_log(f"runner: stream result={result}")
                     if not result.get("ok"):
                         self.signals.show_error.emit("Stream Error", result.get("error", "?"))

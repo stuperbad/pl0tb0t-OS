@@ -25,6 +25,12 @@ except ImportError:
     serial = None
     def _list_ports(): return []
 
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pl0tb0t_probe as _probe
+except Exception as _e:          # never let the probe module stop the daemon
+    _probe = None
+
 
 def _fmt_dur(s):
     s = int(s)
@@ -64,6 +70,10 @@ class GrblDaemon:
         self._wx = self._wy = self._wz = 0.0
         self._wco = [0.0, 0.0, 0.0]
         self._wcs = "G54"
+        self._pins = ""                      # GRBL "Pn:" field, e.g. "P" = probe
+        self._status_evt = threading.Event()  # set on every <...> report
+        self._probing = False
+        self._probe_stop = threading.Event()   # Stop button aborts a manual probe
 
         # Clients: list of (socket, write_lock)
         self._clients      = []
@@ -192,7 +202,10 @@ class GrblDaemon:
         try:
             parts = s[1:].rstrip(">").split("|")
             self._state = parts[0]
+            pins = ""
             for p in parts[1:]:
+                if p.startswith("Pn:"):
+                    pins = p[3:]
                 if p.startswith("MPos:"):
                     xyz = p[5:].split(",")
                     self._mx, self._my, self._mz = float(xyz[0]), float(xyz[1]), float(xyz[2])
@@ -204,8 +217,10 @@ class GrblDaemon:
                     self._wx, self._wy, self._wz = float(xyz[0]), float(xyz[1]), float(xyz[2])
                 elif p.startswith("WCO:"):
                     self._wco = [float(x) for x in p[4:].split(",")]
+            self._pins = pins      # GRBL omits Pn entirely when nothing is active
         except Exception:
             pass
+        self._status_evt.set()
 
     # ── Broadcast ──────────────────────────────────────────────────────────
 
@@ -236,6 +251,8 @@ class GrblDaemon:
             "wx": self._wx, "wy": self._wy, "wz": self._wz,
             "wco":       self._wco,
             "wcs":       self._wcs,
+            "pins":      self._pins,
+            "probing":   self._probing,
         })
 
     # ── Command handlers ───────────────────────────────────────────────────
@@ -319,7 +336,148 @@ class GrblDaemon:
             "wx": self._wx, "wy": self._wy, "wz": self._wz,
             "wco":       self._wco,
             "wcs":       self._wcs,
+            "pins":      self._pins,
         }
+
+    # ── Pen probing ────────────────────────────────────────────────────────
+
+    def _fresh_status(self, timeout=1.5):
+        """Ask for a status report and wait for it (the poller is only 2 Hz)."""
+        self._status_evt.clear()
+        self._realtime(b"?")
+        self._status_evt.wait(timeout)
+
+    def _wait_idle(self, timeout=180.0):
+        """Let everything already sent finish moving. G4 P0 makes GRBL drain
+        its planner before it answers ok; then confirm Idle from a status."""
+        _, err = self._grbl_send("G4 P0.01", wait_ok=True, timeout=timeout)
+        if err:
+            raise RuntimeError(f"waiting for motion to finish: {err}")
+        t_end = time.time() + 10.0
+        while time.time() < t_end:
+            self._fresh_status()
+            if self._state.startswith("Idle"):
+                return
+            time.sleep(0.1)
+        raise RuntimeError(f"machine not idle before probing (state {self._state})")
+
+    def _probe_pen(self, cfg, pred=(0.0, 0.0, 0.0), stop_evt=None, return_home=True):
+        """Measure the loaded pen. Returns (measured_xyz, info). Raises on failure."""
+        if _probe is None:
+            raise RuntimeError("pl0tb0t_probe.py missing next to the daemon")
+        self._wait_idle()
+        self._fresh_status()
+        if "P" in (self._pins or ""):
+            raise _probe.ProbeError("probe input reads TRIGGERED before moving -- "
+                                    "check wiring and $6 (NC probe needs $6=1)")
+        start = (self._mx, self._my, self._mz)
+
+        def _send(line, timeout=90.0):
+            return self._grbl_send(line, wait_ok=True, timeout=timeout)
+
+        def _say(msg):
+            _log(msg)
+            self._broadcast({"event": "probe", "kind": "log", "message": msg})
+
+        pr = _probe.Prober(_send, cfg, log=_say, stop_evt=stop_evt)
+        self._probing = True
+        try:
+            meas, info = pr.measure(tuple(pred or (0.0, 0.0, 0.0)))
+            if return_home:
+                pr.go_back(start)
+            return meas, info
+        except Exception:
+            # leave the pen up and clear of the stylus whatever happened
+            try:
+                self._grbl_send("G90", wait_ok=True, timeout=5.0)
+                self._grbl_send(f"G53 G1 Z{float(cfg.get('travel_z', -5.0)):.4f} "
+                                f"F{int(cfg.get('travel_feed', 800))}", wait_ok=True, timeout=60.0)
+            except Exception:
+                pass
+            raise
+        finally:
+            self._probing = False
+
+    def _h_probe(self, data):
+        """Manual probe from the UI (test / set reference). Runs in the
+        background so Stop and status keep working; the result comes back as
+        a {"event": "probe", "kind": "manual", ...} broadcast carrying `tag`."""
+        if self._streaming:
+            return {"ok": False, "error": "busy streaming"}
+        if self._probing:
+            return {"ok": False, "error": "already probing"}
+        if not self._ser:
+            return {"ok": False, "error": "not connected"}
+        cfg = data.get("cfg") or {}
+        tag = data.get("tag") or {}
+        self._probe_stop.clear()
+
+        def _run():
+            out = {"event": "probe", "kind": "manual", "tag": tag}
+            try:
+                meas, info = self._probe_pen(cfg, data.get("pred") or (0.0, 0.0, 0.0),
+                                             stop_evt=self._probe_stop,
+                                             return_home=bool(data.get("return", False)))
+                out.update({"ok": True, "measured": list(meas), "info": info})
+                if cfg.get("ref"):
+                    try:
+                        out["correction"] = list(_probe.correction_from(meas, cfg, data.get("type", "")))
+                    except Exception as e:
+                        out["correction_error"] = str(e)
+                _log(f"Probe: {meas}")
+            except Exception as e:
+                _log(f"Probe failed: {e}")
+                out.update({"ok": False, "error": str(e)})
+            finally:
+                self._probing = False
+            self._broadcast(out)
+
+        self._probing = True     # claim it before the thread starts
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def _stream_directive(self, d, xf, probe_cfg):
+        """Handle one @PL0T directive mid-stream. Returns an error string to
+        stop the stream, or None to carry on."""
+        op = d.get("op")
+        if op == "clear":
+            xf.clear()
+            return None
+        if op != "pen":
+            return f"unknown stream directive: {d}"
+        tool = d.get("tool", "?")
+        ptype = d.get("type", "")
+        pred = [float(v) for v in (d.get("pred") or [0.0, 0.0, 0.0])][:3]
+        off, source = pred, "predicted"
+        if probe_cfg and probe_cfg.get("enabled"):
+            try:
+                if not probe_cfg.get("ref"):
+                    raise _probe.ProbeError("no probe reference set -- use Pen Probe > "
+                                            "Set reference with the zero pen first")
+                self._broadcast({"event": "probe", "kind": "start", "tool": tool, "type": ptype})
+                meas, info = self._probe_pen(probe_cfg, pred, stop_evt=self._stream_stop)
+                off = list(_probe.correction_from(meas, probe_cfg, ptype))
+                source = "probed"
+                self._broadcast({"event": "probe", "kind": "result", "tool": tool, "type": ptype,
+                                 "measured": list(meas), "correction": off,
+                                 "predicted": pred, "info": info})
+            except Exception as e:
+                if self._stream_stop.is_set():
+                    return "stopped"
+                msg = f"probe failed for {tool} ({ptype}): {e}"
+                _log(msg)
+                if str(probe_cfg.get("on_fail", "stop")) != "predicted":
+                    return msg
+                self._broadcast({"event": "probe", "kind": "warn", "tool": tool,
+                                 "message": msg + " -- using predicted offsets"})
+                off, source = pred, "predicted (probe failed)"
+            if xf.last_f:
+                self._grbl_send(f"F{xf.last_f:g}", wait_ok=True)   # G38 changed modal feed
+        xf.set(*off)
+        _log(f"Pen {tool} ({ptype}): offset {off[0]:+.3f} {off[1]:+.3f} {off[2]:+.3f} [{source}]")
+        self._broadcast({"event": "probe", "kind": "offset", "tool": tool, "type": ptype,
+                         "offset": off, "source": source})
+        return None
 
     def _h_stream(self, data):
         path = data.get("path", "")
@@ -332,7 +490,11 @@ class GrblDaemon:
                 lines = [l.strip() for l in f if l.strip() and not l.strip().startswith(";")]
         except Exception as e:
             return {"ok": False, "error": str(e)}
-        total = len(lines)
+        is_dir = (lambda l: _probe is not None and l.startswith(_probe.DIRECTIVE_PREFIX))
+        if _probe is None and any(l.startswith("@PL0T") for l in lines):
+            return {"ok": False, "error": "file has live-offset directives but pl0tb0t_probe.py is missing"}
+        probe_cfg = data.get("probe") or None
+        total = sum(1 for l in lines if not is_dir(l))
         self._stream_pause.set()
         self._stream_stop.clear()
         self._streaming = True
@@ -342,8 +504,9 @@ class GrblDaemon:
         _stream_t0 = time.time()
 
         def _run():
+            sent = 0
+            xf = _probe.OffsetTransformer() if _probe is not None else None
             try:
-                sent = 0
                 _last_progress = time.time()
                 for line in lines:
                     if self._stream_stop.is_set():
@@ -351,6 +514,17 @@ class GrblDaemon:
                     self._stream_pause.wait()
                     if self._stream_stop.is_set():
                         break
+                    if is_dir(line):
+                        d = _probe.parse_directive(line)
+                        derr = self._stream_directive(d, xf, probe_cfg)
+                        if derr:
+                            if derr != "stopped":
+                                self._broadcast({"event": "gcode_error", "line_num": sent,
+                                                 "line": line, "message": derr})
+                            break
+                        continue
+                    if xf is not None:
+                        line = xf.apply(line)
                     resp_lines, err = self._grbl_send(line, wait_ok=True)
                     # Do NOT broadcast grbl_line per move — sendall() blocks when the
                     # UI socket buffer fills, stalling the GRBL planner between lines.
@@ -392,6 +566,7 @@ class GrblDaemon:
         return {"ok": True}
 
     def _h_stop(self, _):
+        self._probe_stop.set()
         self._stream_stop.set()
         self._stream_pause.set()   # unblock wait so thread can see stop
         self._realtime(b"!")
@@ -429,6 +604,7 @@ class GrblDaemon:
         "pause":      _h_pause,
         "resume":     _h_resume,
         "stop":       _h_stop,
+        "probe":      _h_probe,
         "ping":       _h_ping,
         "shutdown":   _h_shutdown,
     }
