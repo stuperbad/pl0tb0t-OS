@@ -4,7 +4,7 @@ Pl0tb0t Local Control - PyQt6 GUI (falls back to terminal)
 Direct control + tool management with dockable graphical interface
 """
 
-__version__ = "0.5.228"
+__version__ = "0.5.229"
 import os
 import sys
 import time
@@ -183,6 +183,9 @@ class OSConfig:
     probe_max_corr_xy: float = 5.0
     probe_max_corr_z: float = 40.0
     probe_on_fail: str = "stop"
+    probe_power_on: str = "M7"       # G-code that powers the probe ("" = powered elsewhere)
+    probe_power_off: str = "M9"
+    probe_power_settle: float = 0.3
     probe_ref: Optional[list] = None
     probe_ref_type: str = ""
     probe_z_trim: dict = field(default_factory=dict)

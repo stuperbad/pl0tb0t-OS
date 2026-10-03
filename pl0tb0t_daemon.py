@@ -73,6 +73,7 @@ class GrblDaemon:
         self._pins = ""                      # GRBL "Pn:" field, e.g. "P" = probe
         self._status_evt = threading.Event()  # set on every <...> report
         self._probing = False
+        self._probe_powered = False          # True while we hold the probe's supply on
         self._probe_stop = threading.Event()   # Stop button aborts a manual probe
 
         # Clients: list of (socket, write_lock)
@@ -361,15 +362,59 @@ class GrblDaemon:
             time.sleep(0.1)
         raise RuntimeError(f"machine not idle before probing (state {self._state})")
 
+    def _probe_power(self, cfg, on):
+        """Switch the probe's supply through a GRBL coolant output (M7 on / M9 off).
+
+        The probe is an NPN normally-open sensor fed from the X-Controller's mist
+        line, so it has no power -- and its signal pin reads TRIGGERED -- unless M7
+        is on. Set power_on/power_off to "" if it is powered some other way.
+        Returns True if power was switched on.
+        """
+        key, default = ("power_on", "M7") if on else ("power_off", "M9")
+        line = str(cfg.get(key, default) or "").strip()
+        if not line:
+            return False
+        if on:
+            _, err = self._grbl_send(line, wait_ok=True, timeout=10.0)
+            if err:
+                raise RuntimeError(f"could not power the probe ({line}): {err}")
+            self._probe_powered = True
+            # Coolant words run in planner order: drain, then let the sensor settle.
+            self._grbl_send("G4 P0.01", wait_ok=True, timeout=10.0)
+            time.sleep(max(0.0, float(cfg.get("power_settle", 0.3))))
+            return True
+        try:
+            self._grbl_send(line, wait_ok=True, timeout=10.0)
+        except Exception as e:                      # never mask the real failure
+            _log(f"probe power-off failed: {e}")
+        self._probe_powered = False
+        return False
+
     def _probe_pen(self, cfg, pred=(0.0, 0.0, 0.0), stop_evt=None, return_home=True):
-        """Measure the loaded pen. Returns (measured_xyz, info). Raises on failure."""
+        """Measure the loaded pen. Returns (measured_xyz, info). Raises on failure.
+
+        The probe is powered only for the measurement and is always switched off
+        again afterwards, including when the measurement fails or is stopped.
+        """
+        self._probe_powered = False
+        try:
+            return self._probe_pen_run(cfg, pred, stop_evt, return_home)
+        finally:
+            if self._probe_powered:
+                self._probe_power(cfg, False)
+
+    def _probe_pen_run(self, cfg, pred, stop_evt, return_home):
         if _probe is None:
             raise RuntimeError("pl0tb0t_probe.py missing next to the daemon")
         self._wait_idle()
+        # Power BEFORE reading the pin: an unpowered probe reads TRIGGERED.
+        self._probe_power(cfg, True)
         self._fresh_status()
         if "P" in (self._pins or ""):
-            raise _probe.ProbeError("probe input reads TRIGGERED before moving -- "
-                                    "check wiring and $6 (NC probe needs $6=1)")
+            raise _probe.ProbeError("probe input reads TRIGGERED before moving -- is the "
+                                    "probe powered (M7 on)? Otherwise check wiring and $6 "
+                                    "($6=0 for an NPN normally-open probe, $6=1 for a "
+                                    "normally-closed one)")
         start = (self._mx, self._my, self._mz)
 
         def _send(line, timeout=90.0):

@@ -34,9 +34,17 @@ GRBL's G54/G92/TLO, so an aborted plot can't leave a stale offset behind.
 
 ## Bring-up when the probe arrives
 
-1. **Wire it:** red → 5 V, black → GND, yellow → GRBL probe pin. **Use 5 V, not
-   24 V** (some of these pull the signal up to their supply).
-2. Send `$6=1` (NC probe: the pin is low at rest, high when triggered).
+1. **Wire it.** Verified on the X-Controller with a CNCTOPBAOS V6, which is an
+   NPN normally-**open** sensor: yellow → PROBE, black → the GND beside it, red →
+   the **M7 (mist)** terminal, which reads a steady 5 V while M7 is on (5 V is also
+   the safe level for this probe). Never put red on a limit or PROBE terminal.
+   The probe therefore only has power while M7 is on: the daemon sends `M7` before
+   each measurement and `M9` after (`probe_power_on` / `probe_power_off` /
+   `probe_power_settle`; set them to `""` if the probe is powered another way).
+   In our setup an unpowered probe reads TRIGGERED, which is expected, not a fault.
+2. Leave `$6=0` (the default). An NPN-NO sensor pulls the line to ground when
+   triggered, which is what GRBL's normal setting expects; `$6=1` is only for a
+   normally-closed probe. Verified: open at rest, TRIGGERED when pressed.
 3. *Pen Probe* panel should say **Probe input: open**; push the stylus and it
    should say **TRIGGERED**. If it's backwards, `$6` is wrong. If it shows
    TRIGGERED with the stylus untouched and won't clear, check the wiring —

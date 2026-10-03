@@ -74,6 +74,12 @@ PROBE_DEFAULTS = {
     "max_corr_xy": 5.0,     # sanity limit on a measured XY correction
     "max_corr_z":  40.0,    # sanity limit on a measured Z correction
     "on_fail":     "stop",  # "stop" the plot, or "predicted" = warn and use the prediction
+    # The probe is powered from a GRBL coolant output (X-Controller: M7 = steady 5 V),
+    # so it is dead -- and its pin reads TRIGGERED -- unless that output is on. The
+    # daemon switches it around each measurement. "" = powered some other way.
+    "power_on":     "M7",
+    "power_off":    "M9",
+    "power_settle": 0.3,    # seconds to let the sensor come up before reading the pin
     "ref":         None,    # [x, y, z] machine coords measured with the reference pen
     "z_trim":      {},      # {pen_type: mm} added to Z after probing (tip squash etc.)
 }

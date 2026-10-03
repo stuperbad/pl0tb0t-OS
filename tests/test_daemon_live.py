@@ -32,10 +32,17 @@ class PtyGrbl(FakeGrbl):
         self.fd = fd
         self.received = []
         self.tip_now = tip
+        self.powered = False          # the probe is fed from the M7 output
 
     def send(self, line, timeout=30):
         u = line.upper().strip()
         g = [float(v) for v in re.findall(r"G([\d.]+)", u)]
+        if u == "M7":
+            self.powered = True
+            return ["ok"], None
+        if u == "M9":
+            self.powered = False
+            return ["ok"], None
         if u.startswith("F") or u.startswith("G4") or u == "M2" or u.startswith("G21"):
             return ["ok"], None
         if 53 not in g and 38.3 not in g and any(a in u for a in "XYZ") and self.absolute and not (91 in g):
@@ -55,7 +62,9 @@ class PtyGrbl(FakeGrbl):
                 return
             for ch in data:
                 if ch == ord("?"):
-                    pn = "|Pn:P" if self._contact(self.pos) else ""
+                    # Bench behaviour: an UNPOWERED NPN probe leaves the pin reading
+                    # triggered, so the daemon has to power it before it checks.
+                    pn = "|Pn:P" if (self._contact(self.pos) or not self.powered) else ""
                     st = f"<Idle|MPos:{self.pos[0]:.3f},{self.pos[1]:.3f},{self.pos[2]:.3f}|FS:0,0{pn}>\r\n"
                     os.write(self.fd, st.encode())
                     continue
@@ -204,6 +213,22 @@ def session(tip_seq, probe_cfg, pens, live=True, port=5102):
         os.close(master)
 
 
+def power_trace(rec):
+    """Walk the lines GRBL received: (probe left on?, G38 lines sent while unpowered,
+    number of M7, number of M9)."""
+    on, bad, n_on, n_off = False, [], 0, 0
+    for l in rec:
+        if l == "M7":
+            on = True
+            n_on += 1
+        elif l == "M9":
+            on = False
+            n_off += 1
+        elif l.startswith("G38") and not on:
+            bad.append(l)
+    return on, bad, n_on, n_off
+
+
 REF_TIP = (0.0, 0.0, -55.0)
 LONG_TIP = (0.4, -0.7, -66.25)
 base = dict(P.PROBE_DEFAULTS, x=-300.0, y=-560.0, travel_z=-5.0)
@@ -221,6 +246,24 @@ e = wait_event(lambda e: e.get("event") == "probe" and e.get("kind") == "manual"
 ok(e and e.get("ok"), f"manual reference probe result: {e and (e.get('measured'), e.get('error'))}")
 ok(e and e.get("tag", {}).get("set_ref") is True, "tag echoed back")
 ref = e["measured"]
+_on, _bad, _n_on, _n_off = power_trace(fake.received)
+ok(_n_on == 1 and _n_off == 1 and not _on and not _bad,
+   f"manual probe powered once, only while touching ({_n_on} on / {_n_off} off, unpowered touches: {len(_bad)})")
+d.terminate(); d.wait(); os.close(master)
+
+# 0b. with power switching disabled the (unpowered) probe reads TRIGGERED: the daemon
+#     must refuse to move, and say why.
+master, slave = pty.openpty(); tty.setraw(slave)
+fake = PtyGrbl(master, REF_TIP)
+threading.Thread(target=fake.loop, daemon=True).start()
+d = run_daemon(5107)
+cmd, wait_event, events = client(5107)
+assert cmd({"cmd": "connect", "port": os.ttyname(slave)}, timeout=15).get("ok")
+cmd({"cmd": "probe", "cfg": dict(base, power_on=""), "tag": {}})
+e = wait_event(lambda e: e.get("event") == "probe" and e.get("kind") == "manual", timeout=120)
+ok(e and not e.get("ok") and "powered" in (e.get("error") or ""),
+   f"unpowered probe refused with a power hint: {e and e.get('error')}")
+ok(not any("G38" in l for l in fake.received), "nothing moved toward the stylus while it read triggered")
 d.terminate(); d.wait(); os.close(master)
 
 cfg = dict(base, enabled=True, ref=ref)
@@ -248,6 +291,12 @@ if len(offs) == 2:
     g53 = [l for l in rec if l.startswith("G53 G1 Y-582")]
     ok(g53 == ["G53 G1 Y-582.000 F450"] * 2, "tool-change G53 lines untouched")
 
+# 1b. the probe is powered only while it is being used
+_on, _bad, _n_on, _n_off = power_trace(fake.received)
+ok(not _bad, f"every probe touch happens with the probe powered ({len(_bad)} unpowered)")
+ok(_n_on == 2 and _n_off == 2, f"power cycled once per pen ({_n_on} on / {_n_off} off)")
+ok(not _on, "probe left unpowered at the end")
+
 # 2. probing off -> predicted offsets
 fake, events, errs, _ = session([REF_TIP, LONG_TIP], dict(cfg, enabled=False),
                                 [("Ref Pen", [0, 0, 0]), ("Long Pen", [0.1, 0.2, 11.0])], port=5104)
@@ -255,6 +304,7 @@ offs = [e for e in events if e.get("event") == "probe" and e.get("kind") == "off
 ok(not errs and [o["source"] for o in offs] == ["predicted"] * 2, "probe off -> predicted offsets")
 ok(any(l == "G1 X30.1000 Y20.2000 F3000" for l in fake.received), "predicted shift applied")
 ok(not any("G38" in l for l in fake.received), "no probing when disabled")
+ok(not any(l in ("M7", "M9") for l in fake.received), "no probe power switching when disabled")
 
 # 3. legacy file: identical stream
 fake, events, errs, r = session([REF_TIP, REF_TIP], cfg, [("A", [0, 0, 0]), ("B", [0, 0, 0])],
@@ -262,12 +312,15 @@ fake, events, errs, r = session([REF_TIP, REF_TIP], cfg, [("A", [0, 0, 0]), ("B"
 want = [l for l in plot_file(tempfile.mktemp(), [("A", [0, 0, 0]), ("B", [0, 0, 0])], live=False)]
 ok(not errs and fake.received[-len(want):] == want, "legacy file streams unchanged")
 ok(r.get("total") == len(want), f"progress total unchanged ({r.get('total')} == {len(want)})")
+ok(not any(l in ("M7", "M9") for l in fake.received), "legacy file never touches the coolant outputs")
 
 # 4. probe failure stops the plot (no pen in carriage = tip far above stylus)
 fake, events, errs, _ = session([REF_TIP, (0, 0, -20.0)], cfg,
                                 [("Ref Pen", [0, 0, 0]), ("Missing", [0, 0, 0])], port=5106)
 ok(errs and "probe failed for Missing" in errs[0].get("message", ""), f"failed probe stops the stream: {errs[:1]}")
 ok(not any(l.startswith("G1 X") for l in fake.received[-20:]), "nothing drawn after the failure")
+_on, _bad, _n_on, _n_off = power_trace(fake.received)
+ok(not _on and _n_on == _n_off, f"probe switched off even though the probe failed ({_n_on} on / {_n_off} off)")
 
 print("\nALL PASS" if not FAILED else "\nSOME FAILED")
 sys.exit(1 if FAILED else 0)
