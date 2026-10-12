@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pl0tb0t coupling v3 viewer</title>
+<style>
+  :root{--bg:#15171b;--panel:#1d2026;--line:#2c3038;--ink:#e6e8ec;--dim:#9aa1ad;--acc:#e8963a;--ok:#4cc38a;--bad:#ef6a5b}
+  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,Segoe UI,sans-serif}
+  #app{display:flex;height:100%}
+  #view{flex:1;position:relative;min-width:0;overflow:hidden}
+  /* canvas is out of layout so resizing it can never change its container (no scrollbar feedback loop) */
+  canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+  #panel{width:320px;max-width:42vw;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px 14px 24px}
+  h1{font-size:15px;margin:0 0 2px} .sub{color:var(--dim);margin:0 0 12px;font-size:12px}
+  h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:16px 0 6px;font-weight:600}
+  label.row{display:flex;align-items:center;gap:8px;padding:2px 0;cursor:pointer}
+  .sw{width:11px;height:11px;border-radius:2px;flex:none}
+  .ctl{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin:6px 0}
+  .ctl span.v{color:var(--acc);font-variant-numeric:tabular-nums} .ctl input[type=range]{grid-column:1/3;width:100%}
+  select,button{background:#262a32;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:5px 8px;font:inherit}
+  button{cursor:pointer} button:hover{border-color:var(--acc)}
+  .btns{display:flex;flex-wrap:wrap;gap:6px}
+  #verdict{margin:8px 0;padding:8px 10px;border-radius:6px;border:1px solid var(--line);font-weight:600}
+  #verdict.ok{color:var(--ok);border-color:#2f6b50} #verdict.bad{color:var(--bad);border-color:#7a3a33}
+  .num{width:100%;border-collapse:collapse;font-size:12px} .num td{padding:2px 0;border-bottom:1px solid var(--line)} .num td:last-child{text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
+  .note{color:var(--dim);font-size:11.5px;margin-top:8px}
+  #hud{position:absolute;right:12px;bottom:10px;color:var(--dim);font-size:11px;text-align:right;pointer-events:none}
+  @media (max-width:760px){#app{flex-direction:column}#panel{width:100%;max-width:none;height:42%}}
+</style></head>
+<body><div id="app">
+<div id="panel">
+  <h1>Tool coupling v3 (latch)</h1>
+  <p class="sub">Kinematic seats + spring-closed latch, solenoid-released. Drag to orbit, right-drag to pan, scroll to zoom.</p>
+
+  <h2>Parts</h2>
+  <div id="parts"></div>
+
+  <h2>Pickup pose</h2>
+  <div class="ctl"><span>Approach (0 = seated, 100 = first contact)</span><span class="v" id="v_appr">0</span>
+    <input id="appr" type="range" min="0" max="100" value="0"></div>
+  <div class="ctl"><span>Lateral error (mm)</span><span class="v" id="v_lat">2.0</span>
+    <input id="lat" type="range" min="0" max="3.6" step="0.05" value="2.0"></div>
+  <div class="ctl"><span>Error direction (deg)</span><span class="v" id="v_dir">0</span>
+    <input id="dir" type="range" min="0" max="360" step="1" value="0"></div>
+  <div id="verdict" class="ok">-</div>
+  <h2>Latch</h2>
+  <div class="ctl"><span>Solenoid (0 = off/locked, 100 = energised/open)</span><span class="v" id="v_lat2">0</span>
+    <input id="lock" type="range" min="0" max="100" value="0"></div>
+  <div id="lockmsg" class="note"></div>
+  <div class="ctl"><span>Pull apart (mm)</span><span class="v" id="v_exp">0</span>
+    <input id="exp" type="range" min="0" max="30" step="0.5" value="14"></div>
+  <p class="note">Poses between first contact and seated are interpolated for illustration. They are not a physics simulation.</p>
+
+  <h2>Section</h2>
+  <div class="btns" style="margin-bottom:6px">
+    <label class="row"><input type="checkbox" id="clipOn"> clip</label>
+    <select id="clipAxis"><option value="x">plane X</option><option value="y">plane Y</option><option value="z" selected>plane Z</option></select>
+    <label class="row"><input type="checkbox" id="clipFlip"> flip</label>
+  </div>
+  <div class="ctl"><span>Position (mm)</span><span class="v" id="v_clip">25</span>
+    <input id="clip" type="range" min="-30" max="45" step="0.1" value="25"></div>
+
+  <h2>View</h2>
+  <div class="btns">
+    <button id="vFace">Face-on</button><button id="vSide">Side</button>
+    <button id="vIso">Iso</button><button id="vVee">Cut across top V</button><button id="vBalls">Tool face (balls)</button><button id="vGroove">Carriage face (V-grooves)</button>
+  </div>
+
+  <h2>Numbers</h2>
+  <table class="num" id="nums"></table>
+  <p class="note">Estimates from the CAD and a pole-model magnet calculation. Nothing here has been printed or measured.</p>
+</div>
+<div id="view"><div id="hud">grey ghost = your current tool / carriage / base (plates not integrated)</div></div>
+</div>
+
+<script>/*__THREE__*/</script>
+<script>/*__ORBIT__*/</script>
+<script>/*__STL__*/</script>
+<script>
+const MESH = /*__MESHES__*/;     // name -> {b64, group, color, opacity, label}
+const P = /*__PARAMS__*/;        // geometry constants from coupling_v2.py
+
+function b64buf(s){const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}
+
+const view=document.getElementById('view');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.localClippingEnabled=true;
+view.appendChild(renderer.domElement);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x15171b);
+const camera=new THREE.PerspectiveCamera(35,1,1,2000); camera.up.set(0,0,1);
+const controls=new THREE.OrbitControls(camera,renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff,0x303642,0.9));
+const k1=new THREE.DirectionalLight(0xffffff,0.8); k1.position.set(40,60,80); scene.add(k1);
+const k2=new THREE.DirectionalLight(0xffffff,0.35); k2.position.set(-50,-30,20); scene.add(k2);
+scene.add(new THREE.AxesHelper(12));
+
+const clipPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),25);
+const toolGroup=new THREE.Group(); scene.add(toolGroup);
+const objs={}; const mats=[]; const boxes={};
+const loader=new THREE.STLLoader();
+const partsDiv=document.getElementById('parts');
+
+Object.keys(MESH).forEach(name=>{
+  const d=MESH[name];
+  const geo=loader.parse(b64buf(d.b64));
+  const m=new THREE.MeshStandardMaterial({color:d.color,metalness:d.metal||0.1,roughness:d.rough||0.55,
+      transparent:d.opacity<1,opacity:d.opacity,side:THREE.DoubleSide,clippingPlanes:[],depthWrite:d.opacity>=1});
+  mats.push(m);
+  const mesh=new THREE.Mesh(geo,m);
+  (d.group==='tool'?toolGroup:scene).add(mesh);
+  objs[name]=mesh;
+  const row=document.createElement('label'); row.className='row';
+  row.innerHTML='<input type="checkbox" '+(d.on===false?'':'checked')+'><span class="sw" style="background:#'+d.color.toString(16).padStart(6,'0')+'"></span>'+d.label;
+  boxes[name]=row.querySelector('input');
+  row.querySelector('input').addEventListener('change',e=>{mesh.visible=e.target.checked;});
+  mesh.visible=d.on!==false; partsDiv.appendChild(row);
+});
+
+// ---- geometry model (mirrors coupling_v2.py)
+const S=P.S, RB=P.rb, RD=P.rd, DELTA=P.delta, YB=P.yBall, HALF=P.dowelL/2;
+const GRV=P.angles.map(a=>{const r=a*Math.PI/180;return {d:[Math.cos(r),Math.sin(r)],n:[-Math.sin(r),Math.cos(r)]};});
+
+function verdict(ex,ez){
+  let worst=0,wi=0,along=0;
+  GRV.forEach((g,i)=>{const ac=Math.abs(ex*g.n[0]+ez*g.n[1]), al=Math.abs(ex*g.d[0]+ez*g.d[1]);
+    if(ac>worst){worst=ac;wi=i;} if(al>along)along=al;});
+  return {worst,along,wi,ok:(worst<S/2)&&(along<HALF)};
+}
+const $=id=>document.getElementById(id);
+function setText(id,t){$(id).textContent=t;}
+
+function pose(){
+  const e=+$('lat').value, ang=+$('dir').value*Math.PI/180;
+  const ex=e*Math.cos(ang), ez=e*Math.sin(ang);
+  const v=verdict(ex,ez);
+  let t=+$('appr').value/100;
+  const dl=Math.abs(S/2-v.worst);
+  const yFirst=-DELTA+Math.sqrt(Math.max(0,(RB+RD)*(RB+RD)-dl*dl));
+  const travel=yFirst-YB;
+  const ver=$('verdict');
+  if(v.ok){
+    ver.className='ok';
+    ver.textContent='Captured: slides into the V ('+v.worst.toFixed(2)+' of '+(S/2).toFixed(2)+' mm across a groove)';
+  }else{
+    ver.className='bad';
+    ver.textContent=(v.worst>=S/2?'Not captured: ball rides over a pin ('+v.worst.toFixed(3)+' >= '+(S/2).toFixed(3)+' mm across)'
+                                 :'Not captured: ball runs off the end of a dowel');
+    t=1;
+  }
+  const lk=+$('lock').value/100;
+  if(objs.tongue){objs.tongue.position.z=-P.travel*(1-lk);}
+  if(objs.rod){objs.rod.position.z=-P.travel*(1-lk);}
+  if(objs.spring){const L=P.wallZ-(P.zOpen+P.tongueAbove), s2=(L+P.travel*(1-lk))/L; objs.spring.scale.z=s2; objs.spring.position.z=P.wallZ*(1-s2);}
+  let exp=+$('exp').value; const released=lk>0.95;
+  const lm=$('lockmsg');
+  if(!released && exp>P.headGap){exp=P.headGap; lm.textContent='LOCKED: the stud head is caught by the tongue lip. The tool cannot leave (only '+P.headGap+' mm of play).'; lm.style.color='var(--ok)';}
+  else if(released){lm.textContent='UNLOCKED: hole is over the stud, tool pulls straight off.'; lm.style.color='var(--acc)';}
+  else {lm.textContent='Locked (spring holds the tongue closed with no power).'; lm.style.color='var(--ok)';}
+  setText('v_lat2',Math.round(lk*100));
+  toolGroup.position.set(ex*t, travel*t+exp, ez*t);
+  setText('v_appr',Math.round(t*100)); setText('v_lat',e.toFixed(2)); setText('v_dir',Math.round(ang*180/Math.PI));
+  setText('v_exp',exp.toFixed(1));
+  nums(v,travel);
+}
+function nums(v,travel){
+  const rows=[
+    ['Capture across a groove','+/-'+(S/2).toFixed(2)+' mm'],
+    ['Worst-direction lateral capture','+/-'+(S/2).toFixed(2)+' mm'],
+    ['Dowel spacing (V)',S.toFixed(2)+' mm'],
+    ['Y travel, first contact to seated','1.25 mm @ 2.5 mm error'],
+    ['Face gap seated',P.gap.toFixed(2)+' mm'],
+    ['Magnet air gap seated',P.magGap.toFixed(2)+' mm'],
+    ['Magnet preload (2x D6x6, ~1.6 mm gap)','~10-14 N, preload only'],['Retention','stud head vs tongue lip (shear)'],
+    ['Pose: lateral error',(+$('lat').value).toFixed(2)+' mm'],
+    ['Pose: Y above seated',(travel*(+$('appr').value/100)).toFixed(2)+' mm']
+  ];
+  $('nums').innerHTML=rows.map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td></tr>').join('');
+}
+
+// ---- clipping
+function clip(){
+  const on=$('clipOn').checked, ax=$('clipAxis').value, pos=+$('clip').value, flip=$('clipFlip').checked?-1:1;
+  const n={x:[1,0,0],y:[0,1,0],z:[0,0,1]}[ax];
+  // three.js keeps points where normal.p + constant >= 0
+  clipPlane.normal.set(-n[0]*flip,-n[1]*flip,-n[2]*flip); clipPlane.constant=pos*flip;
+  mats.forEach(m=>{m.clippingPlanes=on?[clipPlane]:[]; m.needsUpdate=true;});
+  setText('v_clip',pos.toFixed(1));
+}
+
+// ---- views
+const C0=new THREE.Vector3(0,2,15);
+function cam(pos,up,tgt){camera.up.set(up[0],up[1],up[2]);camera.position.set(pos[0],pos[1],pos[2]);
+  controls.target.set(tgt[0],tgt[1],tgt[2]);camera.lookAt(tgt[0],tgt[1],tgt[2]);controls.update();}
+$('vFace').onclick=()=>cam([0,110,15],[0,0,1],[0,2,15]);
+$('vSide').onclick=()=>cam([110,0,15],[0,0,1],[0,2,15]);
+$('vIso').onclick=()=>cam([-45,-60,52],[0,0,1],[0,6,15]);   // from the carriage side, looking at the tool-side parts
+$('vVee').onclick=()=>{$('clipOn').checked=true;$('clipAxis').value='z';$('clip').value=P.topZ;$('clipFlip').checked=false;clip();
+  cam([0,1.5,60],[0,1,0],[0,1.5,P.topZ]);};
+function only(names){Object.keys(objs).forEach(n=>{if(n==='context')return;const on=names.indexOf(n)>=0;objs[n].visible=on;if(boxes[n])boxes[n].checked=on;});}
+$('vBalls').onclick=()=>{only(['tool_plate','balls','tool_magnet','stud']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,-95,15],[0,0,1],[0,2,15]);};
+$('vGroove').onclick=()=>{only(['carriage_nose','dowels','carriage_magnet','tongue','rod','spring']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,95,15],[0,0,1],[0,2,15]);};
+['appr','lat','dir','exp','lock'].forEach(id=>$(id).addEventListener('input',pose));
+['clipOn','clipAxis','clipFlip','clip'].forEach(id=>$(id).addEventListener('input',clip));
+
+function resize(){
+  // fall back to the window size if the container has not been laid out yet (hidden pane / background tab)
+  let w=view.clientWidth, h=view.clientHeight;
+  if(!w||!h){w=Math.max(300,innerWidth-330);h=Math.max(300,innerHeight);}
+  renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
+}
+addEventListener('resize',resize);
+if(window.ResizeObserver){new ResizeObserver(resize).observe(view);}
+resize();
+$('vIso').onclick(); pose(); clip();
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);})();
+window.__viewer={ready:true,parts:Object.keys(MESH).length};
+</script></body></html>

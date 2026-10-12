@@ -26,3 +26,6 @@ calibrate_estimator.py
 *.log
 *.pid
 scripts/.last_launch_sync.json
+
+# CAD: generated standalone viewers (rebuild with build_viewer.py)
+cad/**/viewer.html
