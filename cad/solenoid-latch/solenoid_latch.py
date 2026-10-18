@@ -23,8 +23,8 @@ X across the 30 mm face, Z up it, face centre (0, 15).  All mm.  Run to rebuild 
 import math, os, sys
 import cadquery as cq
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "v2"))
-import coupling_v2 as C
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "kinematic-seats"))
+import kinematic_seats as C
 
 V = cq.Vector
 cyl, box, sph = C.cyl, C.box, C.sph

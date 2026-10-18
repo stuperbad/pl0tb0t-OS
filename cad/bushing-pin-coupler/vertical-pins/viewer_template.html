@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pl0tb0t coupling vertical-pins viewer</title>
+<style>
+  :root{--bg:#15171b;--panel:#1d2026;--line:#2c3038;--ink:#e6e8ec;--dim:#9aa1ad;--acc:#e8963a;--ok:#4cc38a;--bad:#ef6a5b}
+  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,Segoe UI,sans-serif}
+  #app{display:flex;height:100%}
+  #view{flex:1;position:relative;min-width:0;overflow:hidden}
+  /* canvas is out of layout so resizing it can never change its container (no scrollbar feedback loop) */
+  canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+  #panel{width:320px;max-width:42vw;overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:14px 14px 24px}
+  h1{font-size:15px;margin:0 0 2px} .sub{color:var(--dim);margin:0 0 12px;font-size:12px}
+  h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:16px 0 6px;font-weight:600}
+  label.row{display:flex;align-items:center;gap:8px;padding:2px 0;cursor:pointer}
+  .sw{width:11px;height:11px;border-radius:2px;flex:none}
+  .ctl{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin:6px 0}
+  .ctl span.v{color:var(--acc);font-variant-numeric:tabular-nums} .ctl input[type=range]{grid-column:1/3;width:100%}
+  select,button{background:#262a32;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:5px 8px;font:inherit}
+  button{cursor:pointer} button:hover{border-color:var(--acc)}
+  .btns{display:flex;flex-wrap:wrap;gap:6px}
+  #verdict{margin:8px 0;padding:8px 10px;border-radius:6px;border:1px solid var(--line);font-weight:600}
+  #verdict.ok{color:var(--ok);border-color:#2f6b50} #verdict.bad{color:var(--bad);border-color:#7a3a33}
+  .num{width:100%;border-collapse:collapse;font-size:12px} .num td{padding:2px 0;border-bottom:1px solid var(--line)} .num td:last-child{text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
+  .note{color:var(--dim);font-size:11.5px;margin-top:8px}
+  #hud{position:absolute;right:12px;bottom:10px;color:var(--dim);font-size:11px;text-align:right;pointer-events:none}
+  @media (max-width:760px){#app{flex-direction:column}#panel{width:100%;max-width:none;height:42%}}
+</style></head>
+<body><div id="app">
+<div id="panel">
+  <h1>Bushing-pin coupler, vertical pins</h1>
+  <p class="sub">Tool hangs below the carriage. Pins point down into stacked bushings. Drag to orbit, right-drag to pan, scroll to zoom.</p>
+
+  <h2>Parts</h2>
+  <div id="parts"></div>
+
+  <h2>Pickup pose</h2>
+  <div class="ctl"><span>Pull apart (mm) - 0 = seated</span><span class="v" id="v_exp">0</span>
+    <input id="exp" type="range" min="0" max="30" step="0.1" value="14"></div>
+  <div class="ctl"><span>Sideways error at first touch (mm)</span><span class="v" id="v_lat">2.0</span>
+    <input id="lat" type="range" min="0" max="4" step="0.05" value="2.0"></div>
+  <div class="ctl"><span>Error direction (deg)</span><span class="v" id="v_dir">0</span>
+    <input id="dir" type="range" min="0" max="360" step="1" value="0"></div>
+  <div id="verdict" class="ok">-</div>
+  <p class="note">Below the funnel depth the funnels slide the tool to centre (illustrative, not a simulation).</p>
+  <h2>Section</h2>
+  <div class="btns" style="margin-bottom:6px">
+    <label class="row"><input type="checkbox" id="clipOn"> clip</label>
+    <select id="clipAxis"><option value="x">plane X</option><option value="y">plane Y</option><option value="z" selected>plane Z</option></select>
+    <label class="row"><input type="checkbox" id="clipFlip"> flip</label>
+  </div>
+  <div class="ctl"><span>Position (mm)</span><span class="v" id="v_clip">25</span>
+    <input id="clip" type="range" min="-30" max="45" step="0.1" value="25"></div>
+
+  <h2>View</h2>
+  <div class="btns">
+    <button id="vFace">Face-on</button><button id="vSide">Side</button>
+    <button id="vIso">Iso</button><button id="vVee">Section through pins</button><button id="vBalls">Tool block top face</button><button id="vGroove">Carriage block underside</button>
+  </div>
+
+  <h2>Numbers</h2>
+  <table class="num" id="nums"></table>
+  <p class="note">Estimates from the CAD and a pole-model magnet calculation. Nothing here has been printed or measured.</p>
+</div>
+<div id="view"><div id="hud">grey ghost = your current tool / carriage / base (plates not integrated)</div></div>
+</div>
+
+<script>/*__THREE__*/</script>
+<script>/*__ORBIT__*/</script>
+<script>/*__STL__*/</script>
+<script>
+const MESH = /*__MESHES__*/;     // name -> {b64, group, color, opacity, label}
+const P = /*__PARAMS__*/;        // geometry constants from coupling_v2.py
+
+function b64buf(s){const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}
+
+const view=document.getElementById('view');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.localClippingEnabled=true;
+view.appendChild(renderer.domElement);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x15171b);
+const camera=new THREE.PerspectiveCamera(35,1,1,2000); camera.up.set(0,0,1);
+const controls=new THREE.OrbitControls(camera,renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff,0x303642,0.9));
+const k1=new THREE.DirectionalLight(0xffffff,0.8); k1.position.set(40,60,80); scene.add(k1);
+const k2=new THREE.DirectionalLight(0xffffff,0.35); k2.position.set(-50,-30,20); scene.add(k2);
+scene.add(new THREE.AxesHelper(12));
+
+const clipPlane=new THREE.Plane(new THREE.Vector3(0,0,-1),25);
+const toolGroup=new THREE.Group(); scene.add(toolGroup);
+const objs={}; const mats=[]; const boxes={};
+const loader=new THREE.STLLoader();
+const partsDiv=document.getElementById('parts');
+
+Object.keys(MESH).forEach(name=>{
+  const d=MESH[name];
+  const geo=loader.parse(b64buf(d.b64));
+  const m=new THREE.MeshStandardMaterial({color:d.color,metalness:d.metal||0.1,roughness:d.rough||0.55,
+      transparent:d.opacity<1,opacity:d.opacity,side:THREE.DoubleSide,clippingPlanes:[],depthWrite:d.opacity>=1});
+  mats.push(m);
+  const mesh=new THREE.Mesh(geo,m);
+  (d.group==='tool'?toolGroup:scene).add(mesh);
+  objs[name]=mesh;
+  const row=document.createElement('label'); row.className='row';
+  row.innerHTML='<input type="checkbox" '+(d.on===false?'':'checked')+'><span class="sw" style="background:#'+d.color.toString(16).padStart(6,'0')+'"></span>'+d.label;
+  boxes[name]=row.querySelector('input');
+  row.querySelector('input').addEventListener('change',e=>{mesh.visible=e.target.checked;});
+  mesh.visible=d.on!==false; partsDiv.appendChild(row);
+});
+
+const $=id=>document.getElementById(id);
+function setText(id,t){$(id).textContent=t;}
+function pose(){
+  const e=+$('lat').value, ang=+$('dir').value*Math.PI/180, exp=+$('exp').value;
+  const cap=P.capture, fd=P.funDepth;
+  const ok=e<=cap, ver=$('verdict');
+  ver.className=ok?'ok':'bad';
+  ver.textContent=ok?('Captured: '+e.toFixed(2)+' of '+cap.toFixed(2)+' mm, funnels centre the tool before the pins meet the bushings')
+                    :('Not captured: '+e.toFixed(2)+' mm is past the funnel mouth ('+cap.toFixed(2)+' mm)');
+  const k=Math.min(1,exp/fd);          // 1 above the funnel, 0 when seated
+  const lat=ok?e*k:e;
+  toolGroup.position.set(lat*Math.cos(ang), lat*Math.sin(ang), -exp);
+  setText('v_exp',exp.toFixed(1)); setText('v_lat',e.toFixed(2)); setText('v_dir',Math.round(ang*180/Math.PI));
+  $('nums').innerHTML=[['Lateral capture (funnel)','+/-'+cap.toFixed(1)+' mm'],['Funnel depth',fd.toFixed(1)+' mm @ 45 deg'],
+   ['Pin','3 mm hardened dowel x 14'],['Bushing','3 ID x 5 OD x 5 L'],['Magnet air gap (2 skins)',P.gap.toFixed(1)+' mm'],
+   ['Magnet pull (est., 1 pair D6x6)','~5-6 N'],['Pin protrusion',P.pinP.toFixed(1)+' mm']].map(r=>'<tr><td>'+r[0]+'</td><td>'+r[1]+'</td></tr>').join('');
+}
+// ---- clipping
+function clip(){
+  const on=$('clipOn').checked, ax=$('clipAxis').value, pos=+$('clip').value, flip=$('clipFlip').checked?-1:1;
+  const n={x:[1,0,0],y:[0,1,0],z:[0,0,1]}[ax];
+  // three.js keeps points where normal.p + constant >= 0
+  clipPlane.normal.set(-n[0]*flip,-n[1]*flip,-n[2]*flip); clipPlane.constant=pos*flip;
+  mats.forEach(m=>{m.clippingPlanes=on?[clipPlane]:[]; m.needsUpdate=true;});
+  setText('v_clip',pos.toFixed(1));
+}
+
+// ---- views
+function cam(pos,up,tgt){camera.up.set(up[0],up[1],up[2]);camera.position.set(pos[0],pos[1],pos[2]);
+  controls.target.set(tgt[0],tgt[1],tgt[2]);camera.lookAt(tgt[0],tgt[1],tgt[2]);controls.update();}
+function only(names){Object.keys(objs).forEach(n=>{const on=names.indexOf(n)>=0;objs[n].visible=on;if(boxes[n])boxes[n].checked=on;});}
+$('vFace').onclick=()=>cam([0,0,160],[0,1,0],[0,0,-4]);
+$('vSide').onclick=()=>cam([0,-160,-2],[0,0,1],[0,0,-2]);
+$('vIso').onclick=()=>cam([70,-90,45],[0,0,1],[0,0,-3]);
+$('vVee').onclick=()=>{$('clipOn').checked=true;$('clipAxis').value='y';$('clip').value=0;$('clipFlip').checked=true;clip();cam([0,-120,-2],[0,0,1],[0,0,-2]);};
+$('vBalls').onclick=()=>{only(['tool_block','bushings','tool_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,0,120],[0,1,0],[0,0,-4]);};
+$('vGroove').onclick=()=>{only(['carriage_block','pins','carriage_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,0,-120],[0,1,0],[0,0,4]);};
+['lat','dir','exp'].forEach(id=>$(id).addEventListener('input',pose));
+['clipOn','clipAxis','clipFlip','clip'].forEach(id=>$(id).addEventListener('input',clip));
+
+function resize(){
+  // fall back to the window size if the container has not been laid out yet (hidden pane / background tab)
+  let w=view.clientWidth, h=view.clientHeight;
+  if(!w||!h){w=Math.max(300,innerWidth-330);h=Math.max(300,innerHeight);}
+  renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
+}
+addEventListener('resize',resize);
+if(window.ResizeObserver){new ResizeObserver(resize).observe(view);}
+resize();
+$('vIso').onclick(); pose(); clip();
+(function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera);})();
+window.__viewer={ready:true,parts:Object.keys(MESH).length};
+</script></body></html>

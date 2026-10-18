@@ -1,6 +1,6 @@
 """Assemble viewer.html: one standalone file (three.js + the CAD meshes embedded, works offline).
 
-The meshes come straight from coupling_v2.py, so the viewer always matches the parametric model.
+The meshes come straight from kinematic_seats.py, so the viewer always matches the parametric model.
 Run:  python build_viewer.py      then open viewer.html in any browser.
 """
 import base64, json, os, io
@@ -8,9 +8,9 @@ import numpy as np
 import trimesh
 import cadquery as cq
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'v2'))
-import coupling_v2 as C
-import coupling_v3 as L
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'kinematic-seats'))
+import kinematic_seats as C
+import solenoid_latch as L
 
 here = os.path.dirname(os.path.abspath(__file__))
 V = cq.Vector

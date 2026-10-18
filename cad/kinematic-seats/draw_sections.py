@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import cadquery as cq
-import coupling_v2 as C
+import kinematic_seats as C
 
 out = os.path.dirname(os.path.abspath(__file__))
 

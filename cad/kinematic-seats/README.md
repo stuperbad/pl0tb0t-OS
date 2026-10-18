@@ -1,9 +1,9 @@
 # pl0tb0t tool coupling v2
 
 Three-groove kinematic coupling. Hardened-steel contacts, magnet only preloads, magnet held by a screw.
-Rebuild + self-check: `python coupling_v2.py`   Section drawings: `python draw_sections.py`
+Rebuild + self-check: `python kinematic_seats.py`   Section drawings: `python draw_sections.py`
 Files: `carriage_plate.step/.stl`, `tool_plate.step/.stl`, `hardware_dowels_balls.step`,
-`coupling_face.png`, `coupling_section.png`.  Every dimension is a parameter at the top of `coupling_v2.py`.
+`coupling_face.png`, `coupling_section.png`.  Every dimension is a parameter at the top of `kinematic_seats.py`.
 
 ## Why it is built this way
 * A printed seat cannot take a point contact. 2.6 N through a 4 mm ball onto PLA is ~175 MPa Hertz
