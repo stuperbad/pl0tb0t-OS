@@ -1,15 +1,16 @@
-"""Bushing-pin coupler fitted to the user's existing carriage + pen holder (Onshape STEP export).
+"""Bushing-pin coupler fitted to the existing carriage + pen holder (Onshape STEP export).  Rev 2.
 
-What the STEP is (solids, as exported):  s2 = carriage (rides on 8 mm rods at X +/-22 with 15 mm bearings),
-s0 = hex pen holder, s3 = cup under it, s1 = dock/base, s4 = a small cylinder.  Today s0 mates to the carriage face at
-Y = -10 with horizontal pegs.  Here that is replaced:
+Nothing is moved: carriage (s2), hex pen holder (s0), cup (s3), dock (s1) stay where the STEP has them.
+The holder's rear face (Y = -10) already sits flat against the carriage's front face.  Changes:
 
-  * the carriage's lower stem (X +/-15, Y -28..-10, Z 0..20 -- it only carried the old pegs) is rebuilt solid and gets
-    the vertical pin holes + one magnet pocket in its underside (seat plane Z = 0)
-  * the pen holder (and cup, dock ghost) move DOWN 30 mm so the holder's top is at the seat plane, and a new tab under
-    the carriage stem (Y -28..-10) is fused to the holder's rear face: 2 x 2 stacked bushings, funnels, one magnet.
+  * the old coupling is removed: the five D6 magnet pockets (+ their small screw/push-out holes) on BOTH mating faces are filled
+  * the carriage gets a SHELF protruding forward off its front face, over the holder's rear slab
+    (X +/-15, Y -10..0, Z 30..44.5).  Its underside (Z = 30 = the holder's top) carries 2 funnels + 2 stacked bushings
+    and ONE magnet pocket.
+  * the holder gets 2 steel pins pointing UP out of its top (Z = 30) plus ONE magnet pocket, so the holder just falls
+    straight off the carriage when the carriage is lifted and the dock holds the holder back.
 
-Everything is in the STEP's own frame.  Run:  python fit.py
+Run:  python fit.py   (needs 'Pen Holder assembly.step' in Downloads)
 """
 import math, os
 import cadquery as cq
@@ -19,23 +20,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STEP = r"C:\Users\evanf\Downloads\Pen Holder assembly.step"
 
 # ------------------------------------------------------------------ parameters
-CY = -19.0                          # coupler centre Y (middle of the 18 mm deep stem)
-STEM_X, STEM_Y0, STEM_Y1 = 15.0, -28.0, -10.0
-STEM_TOP = 20.0                     # stem is rebuilt up to the carriage's wide section
-DROP = 30.0                         # pen holder / cup / dock move down by this
-PIN_SP = 16.0                       # stem is 30 wide: mouth R4.5 at +/-8 leaves 2.5 mm side walls
+SEAT_Z = 30.0                       # top of the pen holder = underside of the shelf
+FACE_Y = -10.0                      # carriage front face / holder rear face
+CY = -6.0                           # pin + magnet line (Y)
+SHELF_X, SHELF_Y1 = 15.0, 0.0       # shelf spans X +/-15, Y -10..0
+PIN_SP = 16.0
 PINS_X = (-PIN_SP / 2, PIN_SP / 2)
-PIN_D, PIN_L, PIN_EMBED, TIP_CH = 3.0, 20.0, 6.5, 0.5
+PIN_D, PIN_L, PIN_EMBED, TIP_CH = 3.0, 20.0, 7.5, 0.5
 PIN_P = PIN_L - PIN_EMBED
 PIN_HOLE_D = 3.05
 BUSH_ID, BUSH_OD, BUSH_L, BUSH_N = 3.0, 5.0, 5.0, 2
 BUSH_POCKET_D = BUSH_OD + 0.1
 BUSH_STACK = BUSH_L * BUSH_N
-FUN_R_MOUTH, FUN_R_BOT = 4.5, 2.0
+FUN_R_MOUTH, FUN_R_BOT = 3.8, 2.0
 FUN_DEPTH = FUN_R_MOUTH - FUN_R_BOT
 RELIEF_D, RELIEF_L, FLOOR = 3.4, 1.5, 1.2
-T_T = FUN_DEPTH + BUSH_STACK + RELIEF_L + FLOOR
+T_SHELF = FUN_DEPTH + BUSH_STACK + RELIEF_L + FLOOR
 MAG_D, MAG_L, MAG_CL, SKIN = 6.0, 6.0, 0.2, 1.0
+# old magnet pockets (X, Z): five per face, D6 pockets, small bores behind
+OLD_HOLES = [(-10, 5), (0, 5), (10, 5), (-10, 25), (10, 25)]
 UP, DOWN = (0, 0, 1), (0, 0, -1)
 
 
@@ -58,39 +61,54 @@ def load():
     return cq.importers.importStep(STEP).solids().vals()
 
 
-def shifted(s, dz):
-    return s.moved(cq.Location(V(0, 0, dz)))
+# ------------------------------------------------------------------ patches
+def patched_carriage(s2):
+    body = s2
+    for (x, z) in OLD_HOLES:     # D6 pockets + D3.5 bores run Y -28 .. -10 (open at the rear)
+        body = body.fuse(cyl(3.35, 18.1, (x, -28.1, z), (0, 1, 0)))
+    return body.clean()
 
 
-# ------------------------------------------------------------------ carriage
+def patched_holder(s0):
+    body = s0
+    for (x, z) in OLD_HOLES:     # D6 pockets to Y -4.3, D3.5-3.8 bores to -3.2 (centre one to -1.5)
+        centre = (x, z) == (0, 5)
+        end = -1.4 if centre else -3.2
+        body = body.fuse(cyl(1.85 if centre else 3.35, end - FACE_Y, (x, FACE_Y, z), (0, 1, 0)))
+        if centre:
+            body = body.fuse(cyl(3.35, -3.2 - FACE_Y, (x, FACE_Y, z), (0, 1, 0)))
+    return body.clean()
+
+
+# ------------------------------------------------------------------ new interface
+def shelf_block():
+    sh = (cq.Workplane("XY").box(2 * SHELF_X, SHELF_Y1 - FACE_Y + 0.4, T_SHELF, centered=False)
+          .translate((-SHELF_X, FACE_Y - 0.4, SEAT_Z)))
+    sh = sh.edges("|Z and >Y").fillet(3.0).faces("<Z").edges("not <Y").chamfer(1.0).faces(">Z").edges("not <Y").fillet(1.5)
+    return sh.val()
+
+
 def carriage_new(s2):
-    top = s2.cut(cq.Solid.makeBox(120, 120, 40, V(-60, -80, -20)))        # keep everything at Z >= 20
-    stem = (cq.Workplane("XY").box(2 * STEM_X, STEM_Y1 - STEM_Y0, STEM_TOP + 0.4, centered=False)
-            .translate((-STEM_X, STEM_Y0, 0)))
-    stem = stem.edges("|Z and <Y").fillet(3.0).faces("<Z").edges().chamfer(1.0).val()
-    body = top.fuse(stem).clean()
+    body = patched_carriage(s2).fuse(shelf_block()).clean()
     for x in PINS_X:
-        body = body.cut(cyl(PIN_HOLE_D / 2, PIN_EMBED + 0.2, (x, CY, PIN_EMBED), DOWN))
-    body = body.cut(cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, SKIN), UP))
+        body = body.cut(cone(FUN_R_MOUTH + 0.2, FUN_R_BOT, FUN_DEPTH + 0.2, (x, CY, SEAT_Z - 0.2), UP))
+        body = body.cut(cyl(BUSH_POCKET_D / 2, BUSH_STACK, (x, CY, SEAT_Z + FUN_DEPTH), UP))
+        body = body.cut(cyl(RELIEF_D / 2, RELIEF_L + 0.01, (x, CY, SEAT_Z + FUN_DEPTH + BUSH_STACK), UP))
+    body = body.cut(cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, SEAT_Z + SKIN), UP))
     return body
 
 
-# ------------------------------------------------------------------ tool
-def tool_new(s0_moved):
-    tab = (cq.Workplane("XY").box(2 * STEM_X, STEM_Y1 - STEM_Y0, T_T, centered=False).translate((-STEM_X, STEM_Y0, -T_T)))
-    tab = tab.edges("|Z and <Y").fillet(3.0).faces("<Z").edges("not >Y").fillet(1.5).faces(">Z").edges("not >Y").chamfer(1.0).val()
-    body = s0_moved.fuse(tab).clean()
+def holder_new(s0):
+    body = patched_holder(s0)
     for x in PINS_X:
-        body = body.cut(cone(FUN_R_MOUTH + 0.2, FUN_R_BOT, FUN_DEPTH + 0.2, (x, CY, 0.2), DOWN))
-        body = body.cut(cyl(BUSH_POCKET_D / 2, BUSH_STACK, (x, CY, -FUN_DEPTH), DOWN))
-        body = body.cut(cyl(RELIEF_D / 2, RELIEF_L + 0.01, (x, CY, -FUN_DEPTH - BUSH_STACK), DOWN))
-    body = body.cut(cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, -SKIN), DOWN))
+        body = body.cut(cyl(PIN_HOLE_D / 2, PIN_EMBED + 0.2, (x, CY, SEAT_Z - PIN_EMBED), UP))
+    body = body.cut(cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, SEAT_Z - SKIN - MAG_L - MAG_CL), UP))
     return body
 
 
 def pin(x, dx=0.0, dy=0.0, dz=0.0):
-    p = cyl(PIN_D / 2, PIN_L - TIP_CH, (x + dx, CY + dy, PIN_EMBED + dz), DOWN)
-    t = cone(PIN_D / 2, PIN_D / 2 - TIP_CH, TIP_CH, (x + dx, CY + dy, -(PIN_P - TIP_CH) + dz), DOWN)
+    p = cyl(PIN_D / 2, PIN_L - TIP_CH, (x + dx, CY + dy, SEAT_Z - PIN_EMBED + dz), UP)
+    t = cone(PIN_D / 2, PIN_D / 2 - TIP_CH, TIP_CH, (x + dx, CY + dy, SEAT_Z - PIN_EMBED + PIN_L - TIP_CH + dz), UP)
     return p.fuse(t)
 
 
@@ -102,20 +120,21 @@ def bushings():
     out = []
     for x in PINS_X:
         for k in range(BUSH_N):
-            z = -FUN_DEPTH - k * BUSH_L
-            out.append(cyl(BUSH_OD / 2, BUSH_L, (x, CY, z), DOWN).cut(cyl(BUSH_ID / 2, BUSH_L + 0.2, (x, CY, z + 0.1), DOWN)))
+            z = SEAT_Z + FUN_DEPTH + k * BUSH_L
+            out.append(cyl(BUSH_OD / 2, BUSH_L, (x, CY, z), UP).cut(cyl(BUSH_ID / 2, BUSH_L + 0.2, (x, CY, z - 0.1), UP)))
     return out
 
 
 def magnet_carriage():
-    return cyl(MAG_D / 2, MAG_L, (0, CY, SKIN), UP)
+    return cyl(MAG_D / 2, MAG_L, (0, CY, SEAT_Z + SKIN), UP)
 
 
 def magnet_tool():
-    return cyl(MAG_D / 2, MAG_L, (0, CY, -SKIN), DOWN)
+    return cyl(MAG_D / 2, MAG_L, (0, CY, SEAT_Z - SKIN - MAG_L), UP)
 
 
-def self_check(s, cn, tn, cup, dock):
+def self_check(s, cn, hn):
+    s1, s3 = s[1], s[3]
     ok = True
 
     def chk(label, cond, detail=""):
@@ -123,38 +142,45 @@ def self_check(s, cn, tn, cup, dock):
         ok &= bool(cond)
         print("  [%s] %s %s" % ("PASS" if cond else "FAIL", label, detail))
 
+    print("PATCHES (solid fraction of a D5.8 x 8 mm probe where each old hole was):")
+    for (x, z) in OLD_HOLES:
+        pc = vol(cyl(2.9, 8, (x, -17.5, z), (0, 1, 0)), cn) / cyl(2.9, 8, (x, -17.5, z), (0, 1, 0)).Volume()
+        ph = vol(cyl(2.9, 5, (x, -9.8, z), (0, 1, 0)), hn) / cyl(2.9, 5, (x, -9.8, z), (0, 1, 0)).Volume()
+        print("   old hole (%3d,%3d): carriage %.0f%%  holder %.0f%%" % (x, z, 100 * pc, 100 * ph))
     print("SEATED:")
-    chk("pins only inside the bushings (clear of tool)", all(vol(p, tn) < 1e-3 for p in pins()))
-    chk("pins sit in the carriage holes", all(vol(p, cn) < 1e-3 for p in pins()))
-    chk("bushings clear the printed pockets", all(vol(b, tn) < 1e-3 for b in bushings()))
-    chk("magnets clear their cavities", vol(magnet_carriage(), cn) < 1e-3 and vol(magnet_tool(), tn) < 1e-3)
-    chk("new carriage and new tool do not overlap", vol(cn, tn) < 1e-3, "(%.3f)" % vol(cn, tn))
-    chk("pin tip stays in the relief", FUN_DEPTH + BUSH_STACK < PIN_P < FUN_DEPTH + BUSH_STACK + RELIEF_L - 0.2)
-    print("FUNNEL CAPTURE (tip 0.2 mm inside the face):")
-    for e in (2.0, 2.5):
+    chk("pins clear both bodies (only inside holes/bushings)",
+        all(vol(p, hn) < 1e-3 for p in pins()) and all(vol(p, cn) < 1e-3 for p in pins()))
+    chk("bushings clear the shelf pockets", all(vol(b, cn) < 1e-3 for b in bushings()))
+    chk("magnets clear their cavities", vol(magnet_carriage(), cn) < 1e-3 and vol(magnet_tool(), hn) < 1e-3)
+    chk("carriage and holder do not overlap", vol(cn, hn) < 1e-3, "(%.3f)" % vol(cn, hn))
+    chk("pin tip stays in the relief",
+        SEAT_Z + FUN_DEPTH + BUSH_STACK < SEAT_Z - PIN_EMBED + PIN_L < SEAT_Z + FUN_DEPTH + BUSH_STACK + RELIEF_L - 0.2)
+    print("FUNNEL CAPTURE (pins with tip 0.2 mm into the funnel mouth plane, offset sideways):")
+    for e in (1.5, 2.0, 2.3):
         worst = 0.0
         for a in range(0, 360, 45):
             dx, dy = e * math.cos(math.radians(a)), e * math.sin(math.radians(a))
-            worst = max(worst, max(vol(pin(x, dx, dy, dz=PIN_P - 0.2), tn) for x in PINS_X))
-        chk("%.1f mm error enters freely" % e, worst < 1e-3, "(%.4f)" % worst)
-    print("CLEARANCE TO OTHER PARTS (seated; overlap volume mm3, want 0):")
-    print("  new tool vs cup/dock (moved with it)      : cup %.2f  dock %.2f" % (vol(tn, cup), vol(tn, dock)))
-    print("  new carriage vs dock                      : %.2f" % vol(cn, dock))
-    print("  new carriage vs cup                       : %.2f" % vol(cn, cup))
-    mag_c = cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, -SKIN), DOWN)
-    funs = [cone(FUN_R_MOUTH, FUN_R_BOT, FUN_DEPTH, (x, CY, 0), DOWN) for x in PINS_X]
-    print("WALLS (mm): magnet cavity-funnel %.2f | funnel mouth to stem side %.2f | to front/back %.2f | floor %.2f"
-          % (min(mag_c.distance(f) for f in funs), STEM_X - PIN_SP / 2 - FUN_R_MOUTH, 9 - FUN_R_MOUTH, FLOOR))
+            # tip currently at SEAT_Z - PIN_EMBED + PIN_L; move it down so the tip sits 0.2 mm above the seat plane
+            shift = (SEAT_Z - 0.2) - (SEAT_Z - PIN_EMBED + PIN_L) + 0.4
+            worst = max(worst, max(vol(pin(x, dx, dy, dz=shift), cn) for x in PINS_X))
+        chk("%.1f mm error: pin tips enter the funnel mouth freely" % e, worst < 1e-3, "(%.4f)" % worst)
+    print("CLEARANCE (overlap mm3, want 0): new carriage vs dock %.2f | vs cup %.2f | holder vs dock %.2f"
+          % (vol(cn, s1), vol(cn, s3), vol(hn, s1)))
+    print("   original STEP for comparison: carriage vs dock %.2f | holder vs dock %.2f" % (vol(s[2], s1), vol(s[0], s1)))
+    mag_c = cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY, SEAT_Z + SKIN), UP)
+    funs = [cone(FUN_R_MOUTH, FUN_R_BOT, FUN_DEPTH, (x, CY, SEAT_Z), UP) for x in PINS_X]
+    print("WALLS (mm): magnet cavity to funnel %.2f | shelf front to funnel mouth %.2f | funnel mouth to shelf side %.2f | roof %.2f"
+          % (min(mag_c.distance(f) for f in funs), SHELF_Y1 - (CY + FUN_R_MOUTH), SHELF_X - PIN_SP / 2 - FUN_R_MOUTH, FLOOR))
+    print("   holder: wall behind magnet pocket %.2f | in front of it %.2f (slab at X=0 ends near Y -1.5)"
+          % ((CY - MAG_D / 2 - MAG_CL / 2) - FACE_Y, -1.5 - (CY + MAG_D / 2 + MAG_CL / 2)))
     print("\nALL CHECKED ITEMS PASS" if ok else "\nSOME CHECKS FAILED")
 
 
 if __name__ == "__main__":
     s = load()
-    s2, s0, s1, s3 = s[2], s[0], s[1], s[3]
-    s0m, s1m, s3m = shifted(s0, -DROP), shifted(s1, -DROP), shifted(s3, -DROP)
-    cn, tn = carriage_new(s2), tool_new(s0m)
-    for name, obj in {"carriage_new": cn, "tool_new": tn}.items():
+    cn, hn = carriage_new(s[2]), holder_new(s[0])
+    for name, obj in {"carriage_new": cn, "holder_new": hn}.items():
         obj.exportStep(os.path.join(HERE, name + ".step"))
         print("wrote %-13s volume %.0f mm3  valid=%s" % (name, obj.Volume(), obj.isValid()))
     cq.Compound.makeCompound(pins() + bushings() + [magnet_carriage(), magnet_tool()]).exportStep(os.path.join(HERE, "hardware.step"))
-    self_check(s, cn, tn, s3m, s1m)
+    self_check(s, cn, hn)
