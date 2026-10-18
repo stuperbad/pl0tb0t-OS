@@ -29,13 +29,13 @@
 <body><div id="app">
 <div id="panel">
   <h1>Pin coupler fitted to your carriage</h1>
-  <p class="sub">Rev 2: your carriage (orange) gets a shelf over the holder (teal); the holder falls straight off. Drag to orbit, right-drag to pan, scroll to zoom.</p>
+  <p class="sub">Rev 3: the holder (teal) rests on a ledge of your carriage (orange); pins go down into bushings. Drag to orbit, right-drag to pan, scroll to zoom.</p>
 
   <h2>Parts</h2>
   <div id="parts"></div>
 
   <h2>Pickup pose</h2>
-  <div class="ctl"><span>Holder drops away (mm) - 0 = seated</span><span class="v" id="v_exp">0</span>
+  <div class="ctl"><span>Holder lifts off (mm) - 0 = seated</span><span class="v" id="v_exp">0</span>
     <input id="exp" type="range" min="0" max="30" step="0.1" value="14"></div>
   <div class="ctl"><span>Sideways error at first touch (mm)</span><span class="v" id="v_lat">2.0</span>
     <input id="lat" type="range" min="0" max="4" step="0.05" value="2.0"></div>
@@ -55,7 +55,7 @@
   <h2>View</h2>
   <div class="btns">
     <button id="vFace">Face-on</button><button id="vSide">Side</button>
-    <button id="vIso">Iso</button><button id="vVee">Section through pins</button><button id="vBalls">Holder top (pins)</button><button id="vGroove">Shelf underside (bushings)</button>
+    <button id="vIso">Iso</button><button id="vVee">Section through pins</button><button id="vBalls">Holder underside (pins)</button><button id="vGroove">Ledge top (bushings)</button>
   </div>
 
   <h2>Numbers</h2>
@@ -120,7 +120,7 @@ function pose(){
                     :('Not captured: '+e.toFixed(2)+' mm is past the funnel mouth ('+cap.toFixed(2)+' mm)');
   const k=Math.min(1,exp/fd);          // 1 above the funnel, 0 when seated
   const lat=ok?e*k:e;
-  toolGroup.position.set(lat*Math.cos(ang), lat*Math.sin(ang), -exp);
+  toolGroup.position.set(lat*Math.cos(ang), lat*Math.sin(ang), exp);
   setText('v_exp',exp.toFixed(1)); setText('v_lat',e.toFixed(2)); setText('v_dir',Math.round(ang*180/Math.PI));
   $('nums').innerHTML=[['Lateral capture (funnel)','+/-'+cap.toFixed(1)+' mm'],['Funnel depth',fd.toFixed(1)+' mm @ 45 deg'],
    ['Pin','3 mm hardened dowel x 14'],['Bushing','3 ID x 5 OD x 5 L'],['Magnet air gap (2 skins)',P.gap.toFixed(1)+' mm'],
@@ -140,12 +140,12 @@ function clip(){
 function cam(pos,up,tgt){camera.up.set(up[0],up[1],up[2]);camera.position.set(pos[0],pos[1],pos[2]);
   controls.target.set(tgt[0],tgt[1],tgt[2]);camera.lookAt(tgt[0],tgt[1],tgt[2]);controls.update();}
 function only(names){Object.keys(objs).forEach(n=>{const on=names.indexOf(n)>=0;objs[n].visible=on;if(boxes[n])boxes[n].checked=on;});}
-$('vFace').onclick=()=>cam([0,-260,10],[0,0,1],[0,-5,18]);
-$('vSide').onclick=()=>cam([260,-5,10],[0,0,1],[0,-5,18]);
-$('vIso').onclick=()=>cam([150,-200,120],[0,0,1],[0,5,15]);
-$('vVee').onclick=()=>{$('clipOn').checked=true;$('clipAxis').value='x';$('clip').value=8;$('clipFlip').checked=false;clip();cam([200,-6,32],[0,0,1],[0,-6,32]);};
-$('vBalls').onclick=()=>{only(['holder_new','pins','tool_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,-6,150],[0,1,0],[0,-6,30]);};
-$('vGroove').onclick=()=>{only(['carriage_new','bushings','carriage_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,-6,-40],[0,1,0],[0,-6,30]);};
+$('vFace').onclick=()=>cam([0,-260,10],[0,0,1],[0,-5,15]);
+$('vSide').onclick=()=>cam([260,-5,10],[0,0,1],[0,-5,15]);
+$('vIso').onclick=()=>cam([150,-200,100],[0,0,1],[0,5,12]);
+$('vVee').onclick=()=>{$('clipOn').checked=true;$('clipAxis').value='x';$('clip').value=9.5;$('clipFlip').checked=false;clip();cam([200,-6,18],[0,0,1],[0,-6,18]);};
+$('vBalls').onclick=()=>{only(['holder_new','pins','tool_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,-6,-120],[0,1,0],[0,-6,18]);};
+$('vGroove').onclick=()=>{only(['carriage_new','bushings','carriage_magnet']);$('clipOn').checked=false;clip();$('exp').value=0;pose();cam([0,-6,120],[0,1,0],[0,-6,18]);};
 ['lat','dir','exp'].forEach(id=>$(id).addEventListener('input',pose));
 ['clipOn','clipAxis','clipFlip','clip'].forEach(id=>$(id).addEventListener('input',clip));
 
