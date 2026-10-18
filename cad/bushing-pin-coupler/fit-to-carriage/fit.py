@@ -4,7 +4,7 @@ Built from the user's side-view sketch: the carriage's lower stem gets a LEDGE t
 gets a matching notch under its rear, so the holder's rear overhang rests ON the ledge.  Nothing is moved.
 
   seat plane : Z = 18  (ledge top = underside of the holder's overhang)
-  carriage   : ledge Z 0..18, Y -10..-1.5 in the middle (|X|<5), Y -10..-2.5 on the wings, X +/-15
+  carriage   : ledge Z 0..18, Y -10..-2.5, X +/-15 (plain rectangle)
                top face carries 2 funnels + 2 x 2 stacked bushings (opening UP) and ONE magnet pocket
   holder     : notch cut under the rear (Z 0..18); overhang Z 18..30 keeps its rear face flat on the carriage face (Y = -10)
                carries 2 steel pins pointing DOWN + ONE magnet pocket
@@ -18,6 +18,7 @@ Run:  python fit.py   (needs 'Pen Holder assembly.step' in Downloads)
 """
 import math, os
 import cadquery as cq
+import defeature as D
 
 V = cq.Vector
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,10 +29,10 @@ SEAT_Z = 18.0                       # ledge top / underside of holder overhang
 FACE_Y = -10.0                      # carriage front face / holder rear face
 LEDGE_X = 15.0
 LEDGE_BACK = -10.4                  # ledge starts a little inside the carriage so it fuses
-LEDGE_Y1 = -1.5                     # centre part ends where the holder's hex-pocket wall ends at X=0
-LOBE_X0, LOBE_Y1 = 5.0, -2.5        # side wings (|X| 5..15) stop here: the dock's side features start at Y -2.2
+LEDGE_Y1 = -2.5                     # one straight front edge (no centre tongue)
+LOBE_X0, LOBE_Y1 = 5.0, -2.5        # ledge front (the dock's side features start at Y -2.2)
 NOTCH_CL = 0.3                      # clearance between ledge and holder notch
-CY_PIN, CY_MAG = -6.4, -5.8
+CY_PIN, CY_MAG = -6.4, -6.2
 PIN_SP = 19.0
 PINS_X = (-PIN_SP / 2, PIN_SP / 2)
 PIN_D, PIN_L, PIN_EMBED, TIP_CH = 3.0, 20.0, 7.5, 0.5
@@ -39,7 +40,7 @@ PIN_HOLE_D = 3.05
 BUSH_ID, BUSH_OD, BUSH_L, BUSH_N = 3.0, 5.0, 5.0, 2
 BUSH_POCKET_D = BUSH_OD + 0.1
 BUSH_STACK = BUSH_L * BUSH_N
-FUN_R_MOUTH, FUN_R_BOT = 3.5, 2.0
+FUN_R_MOUTH, FUN_R_BOT = 3.5, 1.75
 FUN_DEPTH = FUN_R_MOUTH - FUN_R_BOT
 RELIEF_D, RELIEF_L = 3.4, 1.5
 MAG_D, MAG_L, MAG_CL, SKIN = 6.0, 6.0, 0.2, 1.0
@@ -68,31 +69,79 @@ def load():
 
 
 # ------------------------------------------------------------------ old coupling removal
-def fill_old_holes(body, face_side):
-    """face_side 'carriage': pockets run Y -28..-10 (D6 + D3.5 bores).  'holder': pockets run Y -10..-3.2 (centre bore to -1.4).
-    A wider plug at the face removes the countersink/fillet rim as well."""
+def clean_carriage(s2):
+    """Remove the old pockets by deleting their faces (OCCT heals the surfaces): no filler seams, no rims."""
+    return D.defeature(s2, D.hole_feature_faces(s2, OLD_HOLES))
+
+
+def _void_pieces(region, s0, must_contain=None):
+    """Parts of `region` that are empty in s0 (the old hole voids).  must_contain: keep only pieces containing this point."""
+    out = []
+    try:
+        pieces = region.cut(s0).Solids()
+    except Exception:
+        return out
+    for p in pieces:
+        if must_contain is None or p.isInside(V(*must_contain), 1e-3):
+            out.append(p)
+    return out
+
+
+def clean_holder(s0):
+    """Restore the solid wherever the old D6 pockets, their rim/floor fillets and the D3.5 push-out bores (rear and the long
+    ones through the front wall) were.  Fillers are exactly the hole voids (region minus the part), so nothing is added in
+    legitimate notches or in the hex pen pocket."""
+    body = s0
     for (x, z) in OLD_HOLES:
-        if face_side == "carriage":
-            body = body.fuse(cyl(3.35, 18.1, (x, -28.1, z), (0, 1, 0)))
-            body = body.fuse(cyl(3.95, 1.0, (x, FACE_Y - 1.0, z), (0, 1, 0)))        # rim plug (stays behind the face)
-        else:
-            body = body.fuse(cyl(3.35, -3.2 - FACE_Y, (x, FACE_Y, z), (0, 1, 0)))
-            if (x, z) == (0, 5):
-                body = body.fuse(cyl(1.85, -1.4 - FACE_Y, (x, FACE_Y, z), (0, 1, 0)))
-            body = body.fuse(cyl(3.95, 1.2, (x, FACE_Y, z), (0, 1, 0)))
-    return body.clean()
+        parts = []
+        # D6 pocket
+        parts += _void_pieces(cq.Solid.makeCylinder(3.02, 6.2, V(x, -10.0, z), V(0, 1, 0)), s0, must_contain=(x, -6.0, z))
+        # mouth fillet ring (void between the rim torus and the rear face)
+        parts += _void_pieces(cq.Solid.makeCylinder(4.05, 1.1, V(x, -10.0, z), V(0, 1, 0)), s0, must_contain=(x + 3.4, -9.9, z))
+        # rear bore (starts at the pocket floor) up to the pen-pocket wall; stays inside x0 +/- 1.85 so it never reaches the side notches
+        y_end = -0.6 if x == 0 else 6.5
+        rb = D.clipped_cylinder(s0, x, z, 1.85, -4.3, y_end, [(-1.5, 0.8)] if x == 0 else [(4.0, 6.5)])
+        parts += _void_pieces(rb, s0)
+        if x != 0:       # long bore through the front wall: from the inner wall plane to the outer wall plane
+            fb = D.clipped_cylinder(s0, x, z, 1.85, 21.5, 27.0, [(22.0, 23.0), (25.5, 27.0)])
+            parts += _void_pieces(fb, s0)
+        for p in parts:
+            body = body.fuse(p)
+    body = D.unify(body.clean())
+    return _heal_leftovers(body)
+
+
+def _heal_leftovers(body):
+    """After the fills a few tiny hole faces remain (floor-fillet crescents, spot-faces at the front bore exits, bore ends at the
+    pen-pocket apex).  Delete those faces and let OCCT heal, batch by batch, keeping a batch only if the solid stays valid and
+    the volume barely moves."""
+    def batches(faces):
+        g = {}
+        for fc in faces:
+            bb = fc.BoundingBox()
+            key = (round((bb.xmin + bb.xmax) / 20), round((bb.zmin + bb.zmax) / 20), "front" if bb.ymin > 10 else ("mid" if bb.ymax > 2 and bb.ymin > -5 else "rear"))
+            g.setdefault(key, []).append(fc)
+        return list(g.values())
+    for _ in range(2):
+        for b in batches(D.hole_feature_faces(body, OLD_HOLES)):
+            try:
+                new = D.defeature(body, b)
+            except Exception:
+                continue
+            if new.isValid() and len(new.Faces()) < len(body.Faces()) and abs(new.Volume() - body.Volume()) < 45:
+                body = new
+    return body
 
 
 # ------------------------------------------------------------------ ledge / notch
 def ledge_pts():
-    return [(-LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_BACK), (LEDGE_X, LOBE_Y1), (LOBE_X0, LOBE_Y1), (LOBE_X0, LEDGE_Y1),
-            (-LOBE_X0, LEDGE_Y1), (-LOBE_X0, LOBE_Y1), (-LEDGE_X, LOBE_Y1)]
+    return [(-LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_Y1), (-LEDGE_X, LEDGE_Y1)]
 
 
 def ledge_solid():
     w = cq.Workplane("XY").polyline(ledge_pts()).close().extrude(SEAT_Z)
     # round the outer front corners (X +/-15, wing front) and the inner step corners
-    for (x, y, r) in ((LEDGE_X, LOBE_Y1, 2.0), (-LEDGE_X, LOBE_Y1, 2.0), (LOBE_X0, LEDGE_Y1, 1.0), (-LOBE_X0, LEDGE_Y1, 1.0)):
+    for (x, y, r) in ((LEDGE_X, LEDGE_Y1, 2.0), (-LEDGE_X, LEDGE_Y1, 2.0)):
         try:
             t = w.edges("|Z").edges(cq.selectors.BoxSelector((x - 0.3, y - 0.3, -1), (x + 0.3, y + 0.3, SEAT_Z + 1))).fillet(r)
             if t.val().isValid():
@@ -116,7 +165,7 @@ def notch_cutter():
 
 # ------------------------------------------------------------------ parts
 def carriage_new(s2):
-    body = fill_old_holes(s2, "carriage").fuse(ledge_solid()).clean()
+    body = clean_carriage(s2).fuse(ledge_solid()).clean()
     for x in PINS_X:
         body = body.cut(cone(FUN_R_MOUTH + 0.2, FUN_R_BOT, FUN_DEPTH + 0.2, (x, CY_PIN, SEAT_Z + 0.2), DOWN))
         body = body.cut(cyl(BUSH_POCKET_D / 2, BUSH_STACK, (x, CY_PIN, SEAT_Z - FUN_DEPTH), DOWN))
@@ -126,7 +175,7 @@ def carriage_new(s2):
 
 
 def holder_new(s0):
-    body = fill_old_holes(s0, "holder").cut(notch_cutter())
+    body = clean_holder(s0).cut(notch_cutter())
     for x in PINS_X:
         body = body.cut(cyl(PIN_HOLE_D / 2, PIN_EMBED + 0.2, (x, CY_PIN, SEAT_Z + PIN_EMBED), DOWN))
     body = body.cut(cyl(MAG_D / 2 + MAG_CL / 2, MAG_L + MAG_CL, (0, CY_MAG, SEAT_Z + SKIN), UP))
