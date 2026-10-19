@@ -35,20 +35,21 @@ NOTCH_CL = 0.3                      # clearance between ledge and holder notch
 CY_PIN, CY_MAG = -6.4, -6.2
 PIN_SP = 19.0
 PINS_X = (-PIN_SP / 2, PIN_SP / 2)
-PIN_D, PIN_L, PIN_EMBED = 3.0, 20.0, 7.5
+PIN_D, PIN_L, PIN_EMBED = 3.0, 14.0, 6.5      # 3 x 14 dowel, 6.5 glued into the holder overhang, 7.5 sticking out
 TIP_R, TIP_L = 1.0, 1.732            # bullet tip: 1.0 mm radial over 1.73 mm (30 deg from the axis) -> flat tip only D1.0
-BUSH_CH = 0.4                        # lead-in chamfer 0.4 x 45 deg on each bushing's entry end (countersink / deburr tool)
+BUSH_CH = 0.5                        # lead-in chamfer 0.5 x 45 deg on each bushing's entry end (countersink / deburr tool)
 PIN_HOLE_D = 3.05
-BUSH_ID, BUSH_OD, BUSH_L, BUSH_N = 3.0, 5.0, 5.0, 2
+BUSH_ID, BUSH_OD, BUSH_L, BUSH_N = 3.0, 5.0, 5.0, 1     # 3x5x5 brass; set BUSH_L = 8 for the 3x5x8 (needs a taller ledge, see README)
 BUSH_POCKET_D = BUSH_OD + 0.1
 BUSH_STACK = BUSH_L * BUSH_N
-FUN_R_MOUTH, FUN_R_BOT = 3.5, BUSH_ID / 2 + BUSH_CH + 0.25   # funnel bottom 0.25 outside the chamfer edge: printed tolerance can never leave a lip over the chamfer
+FUN_R_MOUTH, FUN_R_BOT = 3.5, 1.8   # printed opening at the bushing plane: inside the chamfer outer edge (R 2.0) so the print COVERS the bushing end face and captures it; must stay >= pin R + 0.1 = 1.6
 FUN_DEPTH = FUN_R_MOUTH - FUN_R_BOT
-RELIEF_D, RELIEF_L = 3.4, 1.5
+RELIEF_D, RELIEF_L, FLOOR = 3.4, 1.5, 0.8
 MAG_D, MAG_L, MAG_CL, SKIN = 6.0, 6.0, 0.2, 1.0
 OLD_HOLES = [(-10, 5), (0, 5), (10, 5), (-10, 25), (10, 25)]     # (X, Z) of the old D6 pockets
 UP, DOWN = (0, 0, 1), (0, 0, -1)
 PIN_TIP_Z = SEAT_Z + PIN_EMBED - PIN_L
+LEDGE_H = FUN_DEPTH + BUSH_L * BUSH_N + RELIEF_L + FLOOR     # ledge is only as tall as the bushing pocket needs
 
 
 def cyl(r, h, pos, d):
@@ -141,7 +142,7 @@ def ledge_pts():
 
 
 def ledge_solid():
-    w = cq.Workplane("XY").polyline(ledge_pts()).close().extrude(SEAT_Z)
+    w = cq.Workplane("XY").workplane(offset=SEAT_Z - LEDGE_H).polyline(ledge_pts()).close().extrude(LEDGE_H)
     # round the outer front corners (X +/-15, wing front) and the inner step corners
     for (x, y, r) in ((LEDGE_X, LEDGE_Y1, 2.0), (-LEDGE_X, LEDGE_Y1, 2.0)):
         try:
@@ -151,8 +152,8 @@ def ledge_solid():
         except Exception:
             pass
     try:
-        t = w.faces("<Z").edges(cq.selectors.BoxSelector((-LEDGE_X - 1, -9.5, -0.5), (LEDGE_X + 1, 5, 0.5))).chamfer(0.8)
-        if t.val().isValid() and t.val().BoundingBox().zmin > -1e-6:
+        t = w.faces("<Z").edges(cq.selectors.BoxSelector((-LEDGE_X - 1, -9.5, SEAT_Z - LEDGE_H - 0.5), (LEDGE_X + 1, 5, SEAT_Z - LEDGE_H + 0.5))).chamfer(0.8)
+        if t.val().isValid() and t.val().BoundingBox().zmin > SEAT_Z - LEDGE_H - 1e-6:
             w = t
     except Exception:
         pass
@@ -240,7 +241,7 @@ def self_check(s, cn, hn):
     chk("magnets clear their cavities", vol(magnet_carriage(), cn) < 1e-3 and vol(magnet_holder(), hn) < 1e-3)
     chk("carriage and holder do not overlap (ledge in notch, 0.3 mm clearance)", vol(cn, hn) < 1e-3, "(%.3f)" % vol(cn, hn))
     chk("pin tip stays in the relief", SEAT_Z - FUN_DEPTH - BUSH_STACK - RELIEF_L + 0.2 < PIN_TIP_Z < SEAT_Z - FUN_DEPTH - BUSH_STACK,
-        "(tip Z %.1f, bushings end %.1f, relief ends %.1f)" % (PIN_TIP_Z, SEAT_Z - FUN_DEPTH - BUSH_STACK, SEAT_Z - FUN_DEPTH - BUSH_STACK - RELIEF_L))
+        "(tip Z %.1f, bushings end %.1f, relief ends %.1f)" % (PIN_TIP_Z, SEAT_Z - FUN_DEPTH - BUSH_STACK, FLOOR))
     print("FUNNEL CAPTURE (carriage rising: pin tips 0.2 mm below the funnel mouth plane, offset sideways):")
     shift = (SEAT_Z - 0.2) - PIN_TIP_Z
     for e in (1.0, 1.5, 2.0):
@@ -256,7 +257,7 @@ def self_check(s, cn, hn):
     funs = [cone(FUN_R_MOUTH, FUN_R_BOT, FUN_DEPTH, (x, CY_PIN, SEAT_Z), DOWN) for x in PINS_X]
     print("WALLS (mm): magnet cavity to funnel %.2f | ledge front to magnet cavity %.2f | pin funnel mouth to ledge side %.2f | floor under relief %.2f"
           % (min(mag_c.distance(f) for f in funs), LEDGE_Y1 - (CY_MAG + MAG_D / 2 + MAG_CL / 2), LEDGE_X - PIN_SP / 2 - FUN_R_MOUTH,
-             SEAT_Z - FUN_DEPTH - BUSH_STACK - RELIEF_L))
+             FLOOR))
     print("   holder: overhang wall behind the magnet pocket %.2f | slab in front of it %.2f"
           % ((CY_MAG - MAG_D / 2 - MAG_CL / 2) - FACE_Y, -1.5 - (CY_MAG + MAG_D / 2 + MAG_CL / 2)))
     print("\nALL CHECKED ITEMS PASS" if ok else "\nSOME CHECKS FAILED")
