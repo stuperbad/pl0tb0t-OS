@@ -35,12 +35,14 @@ NOTCH_CL = 0.3                      # clearance between ledge and holder notch
 CY_PIN, CY_MAG = -6.4, -6.2
 PIN_SP = 19.0
 PINS_X = (-PIN_SP / 2, PIN_SP / 2)
-PIN_D, PIN_L, PIN_EMBED, TIP_CH = 3.0, 20.0, 7.5, 1.0     # tip chamfer 1.0 x 45 deg -> flat tip only D1.0
+PIN_D, PIN_L, PIN_EMBED = 3.0, 20.0, 7.5
+TIP_R, TIP_L = 1.0, 1.732            # bullet tip: 1.0 mm radial over 1.73 mm (30 deg from the axis) -> flat tip only D1.0
+BUSH_CH = 0.4                        # lead-in chamfer 0.4 x 45 deg on each bushing's entry end (countersink / deburr tool)
 PIN_HOLE_D = 3.05
 BUSH_ID, BUSH_OD, BUSH_L, BUSH_N = 3.0, 5.0, 5.0, 2
 BUSH_POCKET_D = BUSH_OD + 0.1
 BUSH_STACK = BUSH_L * BUSH_N
-FUN_R_MOUTH, FUN_R_BOT = 3.5, 1.75
+FUN_R_MOUTH, FUN_R_BOT = 3.5, BUSH_ID / 2 + BUSH_CH + 0.25   # funnel bottom 0.25 outside the chamfer edge: printed tolerance can never leave a lip over the chamfer
 FUN_DEPTH = FUN_R_MOUTH - FUN_R_BOT
 RELIEF_D, RELIEF_L = 3.4, 1.5
 MAG_D, MAG_L, MAG_CL, SKIN = 6.0, 6.0, 0.2, 1.0
@@ -183,8 +185,8 @@ def holder_new(s0):
 
 
 def pin(x, dx=0.0, dy=0.0, dz=0.0):
-    p = cyl(PIN_D / 2, PIN_L - TIP_CH, (x + dx, CY_PIN + dy, SEAT_Z + PIN_EMBED + dz), DOWN)
-    t = cone(PIN_D / 2, PIN_D / 2 - TIP_CH, TIP_CH, (x + dx, CY_PIN + dy, PIN_TIP_Z + TIP_CH + dz), DOWN)
+    p = cyl(PIN_D / 2, PIN_L - TIP_L, (x + dx, CY_PIN + dy, SEAT_Z + PIN_EMBED + dz), DOWN)
+    t = cone(PIN_D / 2, PIN_D / 2 - TIP_R, TIP_L, (x + dx, CY_PIN + dy, PIN_TIP_Z + TIP_L + dz), DOWN)
     return p.fuse(t)
 
 
@@ -197,7 +199,10 @@ def bushings():
     for x in PINS_X:
         for k in range(BUSH_N):
             z = SEAT_Z - FUN_DEPTH - k * BUSH_L
-            out.append(cyl(BUSH_OD / 2, BUSH_L, (x, CY_PIN, z), DOWN).cut(cyl(BUSH_ID / 2, BUSH_L + 0.2, (x, CY_PIN, z + 0.1), DOWN)))
+            b = cyl(BUSH_OD / 2, BUSH_L, (x, CY_PIN, z), DOWN).cut(cyl(BUSH_ID / 2, BUSH_L + 0.2, (x, CY_PIN, z + 0.1), DOWN))
+            if k == 0:       # lead-in chamfer on the entry end
+                b = b.cut(cone(BUSH_ID / 2 + BUSH_CH + 0.1, BUSH_ID / 2, BUSH_CH + 0.1, (x, CY_PIN, z + 0.1), DOWN))
+            out.append(b)
     return out
 
 
