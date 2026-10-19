@@ -27,13 +27,21 @@ STEP = r"C:\Users\evanf\Downloads\Pen Holder assembly.step"
 # ------------------------------------------------------------------ parameters
 SEAT_Z = 18.0                       # ledge top / underside of holder overhang
 FACE_Y = -10.0                      # carriage front face / holder rear face
-LEDGE_X = 15.0
-LEDGE_BACK = -10.4                  # ledge starts a little inside the carriage so it fuses
-LEDGE_Y1 = -2.5                     # one straight front edge (no centre tongue)
-LOBE_X0, LOBE_Y1 = 5.0, -2.5        # ledge front (the dock's side features start at Y -2.2)
-NOTCH_CL = 0.3                      # clearance between ledge and holder notch
-CY_PIN, CY_MAG = -6.4, -6.2
-PIN_SP = 19.0
+GAP_F = 2.3                         # carriage face stands this far BEHIND the holder's rear face when seated (absorbs +Y error)
+LEDGE_X = 10.0                      # ledge half-width: +/-2 mm of X error still leaves it inside the notch (+/-12.3) and clear of the holder's side wings / the base's side features (|X| > 11.8)
+LEDGE_BACK = -10.4 - GAP_F          # ledge starts a little inside the (moved) carriage so it fuses
+LEDGE_Y1 = -1.6                     # ledge front (single straight edge, corners chamfered)
+LEDGE_STEP_Y = -3.95                # behind this Y the ledge is the full +/-12 wide; in front of it only the middle +/-9.6 (the holder's side wings start at Y -3.5)
+LEDGE_FRONT_X = LEDGE_X
+LEDGE_CORNER = 1.5                  # 45 deg chamfer on the two front corners
+NOTCH_CL = 0.3                      # sideways clearance between ledge and holder notch
+NOTCH_X = LEDGE_X + 2.0 + NOTCH_CL    # ledge half-width + 2 mm X error + clearance
+NOTCH_FULL_X = NOTCH_X              # (no wider zone any more: the ledge is narrow enough)
+NOTCH_STEP_Y = LEDGE_STEP_Y + 0.4         # wide part of the notch stops just before the holder side wings (Y -3.5)
+NOTCH_BACK, NOTCH_FRONT = -10.6, 1.0   # notch front is 2.6 mm beyond the ledge front: +Y overshoot room
+NOTCH_OPEN_X, NOTCH_OPEN_Y = 6.0, 3.0  # |X| < 6: the notch opens right into the hex pen pocket (its rear vertex) instead of leaving a thin web
+CY_PIN, CY_MAG = -5.9, -5.6
+PIN_SP = 14.0                       # pin funnels reach X +/-11.0 (behind the step, where the ledge is +/-12 wide)
 PINS_X = (-PIN_SP / 2, PIN_SP / 2)
 PIN_D, PIN_L, PIN_EMBED = 3.0, 14.0, 6.5      # 3 x 14 dowel, 6.5 glued into the holder overhang, 7.5 sticking out
 TIP_R, TIP_L = 1.0, 1.732            # bullet tip: 1.0 mm radial over 1.73 mm (30 deg from the axis) -> flat tip only D1.0
@@ -138,13 +146,16 @@ def _heal_leftovers(body):
 
 # ------------------------------------------------------------------ ledge / notch
 def ledge_pts():
-    return [(-LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_Y1), (-LEDGE_X, LEDGE_Y1)]
+    c, fx = LEDGE_CORNER, LEDGE_FRONT_X
+    pts = [(-LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_BACK), (LEDGE_X, LEDGE_STEP_Y), (fx, LEDGE_STEP_Y), (fx, LEDGE_Y1 - c),
+           (fx - c, LEDGE_Y1), (-(fx - c), LEDGE_Y1), (-fx, LEDGE_Y1 - c), (-fx, LEDGE_STEP_Y), (-LEDGE_X, LEDGE_STEP_Y)]
+    return [p for i, p in enumerate(pts) if p != pts[i - 1]]
 
 
 def ledge_solid():
     w = cq.Workplane("XY").workplane(offset=SEAT_Z - LEDGE_H).polyline(ledge_pts()).close().extrude(LEDGE_H)
     # round the outer front corners (X +/-15, wing front) and the inner step corners
-    for (x, y, r) in ((LEDGE_X, LEDGE_Y1, 2.0), (-LEDGE_X, LEDGE_Y1, 2.0)):
+    for (x, y, r) in ():
         try:
             t = w.edges("|Z").edges(cq.selectors.BoxSelector((x - 0.3, y - 0.3, -1), (x + 0.3, y + 0.3, SEAT_Z + 1))).fillet(r)
             if t.val().isValid():
@@ -161,14 +172,16 @@ def ledge_solid():
 
 
 def notch_cutter():
-    pts = ledge_pts()
-    w = cq.Workplane("XY").workplane(offset=-1.0).polyline(pts).close().offset2D(NOTCH_CL).extrude(SEAT_Z + 1.0)
-    return w.val()
+    pts = [(-NOTCH_FULL_X, NOTCH_BACK), (NOTCH_FULL_X, NOTCH_BACK), (NOTCH_FULL_X, NOTCH_STEP_Y), (NOTCH_X, NOTCH_STEP_Y),
+           (NOTCH_X, NOTCH_FRONT), (NOTCH_OPEN_X, NOTCH_FRONT), (NOTCH_OPEN_X, NOTCH_OPEN_Y), (-NOTCH_OPEN_X, NOTCH_OPEN_Y),
+           (-NOTCH_OPEN_X, NOTCH_FRONT), (-NOTCH_X, NOTCH_FRONT), (-NOTCH_X, NOTCH_STEP_Y), (-NOTCH_FULL_X, NOTCH_STEP_Y)]
+    pts = [p for i, p in enumerate(pts) if p != pts[i - 1]]
+    return cq.Workplane("XY").workplane(offset=-1.0).polyline(pts).close().extrude(SEAT_Z + 1.0).val()
 
 
 # ------------------------------------------------------------------ parts
 def carriage_new(s2):
-    body = clean_carriage(s2).fuse(ledge_solid()).clean()
+    body = clean_carriage(s2).moved(cq.Location(V(0, -GAP_F, 0))).fuse(ledge_solid()).clean()
     for x in PINS_X:
         body = body.cut(cone(FUN_R_MOUTH + 0.2, FUN_R_BOT, FUN_DEPTH + 0.2, (x, CY_PIN, SEAT_Z + 0.2), DOWN))
         body = body.cut(cyl(BUSH_POCKET_D / 2, BUSH_STACK, (x, CY_PIN, SEAT_Z - FUN_DEPTH), DOWN))
@@ -241,7 +254,7 @@ def self_check(s, cn, hn):
     chk("magnets clear their cavities", vol(magnet_carriage(), cn) < 1e-3 and vol(magnet_holder(), hn) < 1e-3)
     chk("carriage and holder do not overlap (ledge in notch, 0.3 mm clearance)", vol(cn, hn) < 1e-3, "(%.3f)" % vol(cn, hn))
     chk("pin tip stays in the relief", SEAT_Z - FUN_DEPTH - BUSH_STACK - RELIEF_L + 0.2 < PIN_TIP_Z < SEAT_Z - FUN_DEPTH - BUSH_STACK,
-        "(tip Z %.1f, bushings end %.1f, relief ends %.1f)" % (PIN_TIP_Z, SEAT_Z - FUN_DEPTH - BUSH_STACK, FLOOR))
+        "(tip Z %.1f, bushings end %.1f, relief ends %.1f)" % (PIN_TIP_Z, SEAT_Z - FUN_DEPTH - BUSH_STACK, SEAT_Z - FUN_DEPTH - BUSH_STACK - RELIEF_L))
     print("FUNNEL CAPTURE (carriage rising: pin tips 0.2 mm below the funnel mouth plane, offset sideways):")
     shift = (SEAT_Z - 0.2) - PIN_TIP_Z
     for e in (1.0, 1.5, 2.0):
